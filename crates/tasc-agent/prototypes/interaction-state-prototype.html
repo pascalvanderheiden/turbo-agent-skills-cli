@@ -1,0 +1,650 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TASC conversational terminal prototype</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --page: #0b0e14;
+      --panel: #121722;
+      --panel-2: #181e2b;
+      --line: #2c3445;
+      --text: #e7eaf0;
+      --muted: #98a2b6;
+      --accent: #9f8cff;
+      --green: #7bdba8;
+      --yellow: #f0c674;
+      --red: #ff8d91;
+      font-family: "Avenir Next", "Trebuchet MS", ui-sans-serif, system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--text);
+      background: var(--page);
+    }
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    main {
+      width: min(1180px, calc(100% - 28px));
+      margin: 30px auto 60px;
+    }
+    .flag {
+      display: inline-block;
+      margin-bottom: 12px;
+      padding: 5px 9px;
+      border: 1px solid #4b426f;
+      border-radius: 999px;
+      color: #c8bdff;
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 {
+      margin-bottom: 8px;
+      font-size: clamp(1.9rem, 5vw, 3.5rem);
+      letter-spacing: -0.045em;
+    }
+    h2 { font-size: 1rem; }
+    p { line-height: 1.55; }
+    .intro {
+      max-width: 850px;
+      margin-bottom: 24px;
+      color: var(--muted);
+    }
+    .intro strong { color: var(--text); }
+    code {
+      padding: 2px 5px;
+      border-radius: 5px;
+      color: #d8d1ff;
+      background: #25213a;
+    }
+    .scenario-picker {
+      display: flex;
+      gap: 7px;
+      overflow-x: auto;
+      margin-bottom: 14px;
+      padding-bottom: 4px;
+    }
+    .scenario-picker button,
+    .followups button,
+    .send {
+      min-height: 38px;
+      padding: 8px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--text);
+      background: var(--panel);
+    }
+    .scenario-picker button.active {
+      border-color: var(--accent);
+      color: #d7d0ff;
+      background: #28213f;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 300px;
+      gap: 14px;
+      align-items: start;
+    }
+    .terminal {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #0f131c;
+      box-shadow: 0 14px 40px rgba(0, 0, 0, 0.24);
+    }
+    .terminal-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 13px;
+      border-bottom: 1px solid var(--line);
+      color: #bbc3d3;
+      background: var(--panel-2);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.78rem;
+    }
+    .terminal-body {
+      min-height: 520px;
+      max-height: 650px;
+      overflow: auto;
+      padding: 18px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.86rem;
+      line-height: 1.55;
+    }
+    .turn {
+      margin-bottom: 18px;
+      white-space: pre-wrap;
+    }
+    .turn .speaker {
+      display: block;
+      margin-bottom: 4px;
+      font-weight: 800;
+    }
+    .turn.user .speaker { color: var(--accent); }
+    .turn.agent .speaker { color: var(--green); }
+    .turn.progress {
+      margin: -8px 0 14px;
+      color: var(--muted);
+      font-size: 0.8rem;
+    }
+    .ranked {
+      width: 100%;
+      margin: 10px 0;
+      border-collapse: collapse;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.79rem;
+    }
+    .ranked th, .ranked td {
+      padding: 8px 7px;
+      border-bottom: 1px solid #2b3241;
+      text-align: left;
+      vertical-align: top;
+    }
+    .ranked th { color: #aeb8cc; }
+    .ranked td:first-child { color: var(--accent); font-weight: 800; }
+    .good { color: var(--green); }
+    .warn { color: var(--yellow); }
+    .bad { color: var(--red); }
+    .composer {
+      padding: 13px;
+      border-top: 1px solid var(--line);
+      background: var(--panel);
+    }
+    .input-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+    }
+    input {
+      width: 100%;
+      min-height: 42px;
+      padding: 9px 11px;
+      border: 1px solid #394255;
+      border-radius: 8px;
+      outline: 0;
+      color: var(--text);
+      background: #0e121a;
+    }
+    input:focus { border-color: var(--accent); }
+    .send {
+      border-color: var(--accent);
+      color: #10131a;
+      background: var(--accent);
+      font-weight: 800;
+    }
+    .followups {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin-top: 10px;
+    }
+    .followups button {
+      color: #d7d0ff;
+      background: #211c33;
+    }
+    .followups button:hover { border-color: var(--accent); }
+    .sidebar {
+      display: grid;
+      gap: 12px;
+    }
+    .card {
+      padding: 15px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: var(--panel);
+    }
+    .card h2 { margin-bottom: 11px; }
+    .scenario-copy {
+      margin-bottom: 0;
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+    .context-list {
+      display: grid;
+      gap: 9px;
+      margin: 0;
+    }
+    .context-list div {
+      padding-bottom: 9px;
+      border-bottom: 1px solid var(--line);
+    }
+    .context-list div:last-child { padding-bottom: 0; border-bottom: 0; }
+    .context-list dt {
+      margin-bottom: 3px;
+      color: var(--muted);
+      font-size: 0.68rem;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    .context-list dd {
+      margin: 0;
+      overflow-wrap: anywhere;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.78rem;
+    }
+    details {
+      color: var(--muted);
+      font-size: 0.8rem;
+    }
+    details summary {
+      cursor: pointer;
+      color: var(--text);
+      font-weight: 750;
+    }
+    details ul {
+      margin-bottom: 0;
+      padding-left: 18px;
+    }
+    @media (max-width: 850px) {
+      .layout { grid-template-columns: 1fr; }
+      .sidebar { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 580px) {
+      .sidebar { grid-template-columns: 1fr; }
+      .input-row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <span class="flag">Throwaway conversation prototype</span>
+    <h1>Talk to TASC like Copilot CLI</h1>
+    <p class="intro"><strong>Question:</strong> do these concrete conversations match the agent experience? Pick a task, send the example request, then use the suggested natural-language follow-ups. The safety and typed-core machinery is deliberately hidden unless it matters.</p>
+
+    <nav id="scenario-picker" class="scenario-picker" aria-label="Example TASC conversations"></nav>
+
+    <div class="layout">
+      <section class="terminal">
+        <header class="terminal-bar">
+          <span>$ tasc agent</span>
+          <span>local-first · transcript discarded by default</span>
+        </header>
+        <div id="terminal-body" class="terminal-body"></div>
+        <footer class="composer">
+          <div class="input-row">
+            <input id="prompt" aria-label="Message to TASC" autocomplete="off">
+            <button id="send" class="send">Send</button>
+          </div>
+          <div id="followups" class="followups"></div>
+        </footer>
+      </section>
+
+      <aside class="sidebar">
+        <section class="card">
+          <h2>What this example tests</h2>
+          <p id="scenario-copy" class="scenario-copy"></p>
+        </section>
+        <section class="card">
+          <h2>Remembered this session</h2>
+          <dl id="context" class="context-list"></dl>
+        </section>
+        <section class="card">
+          <details>
+            <summary>Behind the conversation</summary>
+            <ul>
+              <li>Natural language resolves to coarse typed core use cases.</li>
+              <li>Ranked/list results get stable session references such as “2” or “all outdated.”</li>
+              <li>Low-risk watch changes can use the direct follow-up as approval.</li>
+              <li>Install, update, file edits, executable checks, and new data boundaries show a concise plan before execution.</li>
+              <li>Approvals are scoped, short-lived, consumed once, and never carried into a future session.</li>
+            </ul>
+          </details>
+        </section>
+      </aside>
+    </div>
+  </main>
+
+  <script>
+    // Pure scenario state. The page only renders and dispatches actions.
+    const ConversationModel = (() => {
+      const scenarios = [
+        {
+          id: "discover",
+          label: "Discover skills",
+          prompt: "Find me good frontend web-design skills.",
+          copy: "Search returns an explainable ranked shortlist. Natural follow-ups can install a result or put results on the Watchlist.",
+          context: { intent: "discover", selected: "none", scope: "GitHub sources", artifact: "none" },
+          response: `
+I found 3 strong matches. Ranking uses query relevance, Agent Skills validity, source provenance, maintenance freshness, GitHub Copilot compatibility, and available adoption signals.
+
+<table class="ranked">
+  <tr><th>#</th><th>Skill</th><th>Why it ranks</th><th>Signals</th><th>Status</th></tr>
+  <tr><td>1</td><td>frontend-ui-engineering</td><td>Strong match for production frontend implementation and design quality</td><td class="good">valid · maintained · trusted source</td><td>not installed</td></tr>
+  <tr><td>2</td><td>web-design-guidelines</td><td>Focused UI review guidance and accessibility checks</td><td class="good">valid · maintained</td><td>watched</td></tr>
+  <tr><td>3</td><td>impeccable</td><td>Design critique and anti-pattern detection</td><td class="warn">valid · adoption signal unavailable</td><td>not installed</td></tr>
+</table>
+
+I can show details, compare them, install one, or watch any result.`,
+          followups: [
+            {
+              label: "Install 1",
+              user: "Install the first one for this project.",
+              progress: "Inspecting target and preparing install plan…",
+              agent: "Plan: install frontend-ui-engineering into this project’s GitHub Copilot skill target from revision 4ad29b1. This writes project files and records the Installation. Approve?",
+              context: { selected: "1 · frontend-ui-engineering", scope: "project · GitHub Copilot", artifact: "install plan plan_7F2" }
+            },
+            {
+              label: "Watch all 3",
+              user: "Put all three on my watch-list.",
+              progress: "Adding three reversible Local State entries…",
+              agent: "Added all 3 sources to the Watchlist. No skills were installed or updated.",
+              context: { selected: "results 1–3", artifact: "Watchlist entries watch_21–23" }
+            },
+            {
+              label: "Compare 1 and 2",
+              user: "Compare the first two.",
+              progress: "Comparing metadata, declared scope, and available evidence…",
+              agent: "frontend-ui-engineering is broader and implementation-oriented; web-design-guidelines is narrower and review-oriented. Their declared scopes complement each other, but both claim accessibility review. I can run a Consistency Check if you want evidence about overlap.",
+              context: { selected: "results 1 and 2", artifact: "read-only comparison" }
+            }
+          ]
+        },
+        {
+          id: "inventory",
+          label: "Installed skills",
+          prompt: "Which skills are installed?",
+          copy: "Inventory groups skills by project/user scope and assistant, exposes tracked state, and lets follow-ups reference list positions or sets.",
+          context: { intent: "inventory", selected: "none", scope: "all local targets", artifact: "none" },
+          response: `
+You have 5 discovered installations.
+
+<table class="ranked">
+  <tr><th>#</th><th>Scope / assistant</th><th>Skill</th><th>State</th></tr>
+  <tr><td>1</td><td>project · GitHub Copilot</td><td>code-review</td><td class="warn">outdated · clean</td></tr>
+  <tr><td>2</td><td>project · GitHub Copilot</td><td>web-design-guidelines</td><td class="good">current · clean</td></tr>
+  <tr><td>3</td><td>project · GitHub Copilot</td><td>local-rust-guide</td><td class="bad">modified</td></tr>
+  <tr><td>4</td><td>user · GitHub Copilot</td><td>research</td><td class="warn">outdated · clean</td></tr>
+  <tr><td>5</td><td>user · unknown adapter</td><td>legacy-helper</td><td class="warn">untracked</td></tr>
+</table>
+
+I can update selected clean installations, preview all outdated updates, adopt the untracked installation, or inspect local modifications.`,
+          followups: [
+            {
+              label: "Update all outdated",
+              user: "Update all outdated skills.",
+              progress: "Resolving exact Installations and upstream revisions…",
+              agent: "Plan: update #1 code-review (7af31c2 → 98bd0e1) and #4 research (1c0fd44 → 60ea129). Both are clean. #3 is modified and excluded. Approve these two updates?",
+              context: { selected: "#1 and #4", scope: "recorded targets preserved", artifact: "update plan plan_A91" }
+            },
+            {
+              label: "Inspect modified 3",
+              user: "What changed in number 3?",
+              progress: "Comparing recorded and local content digests…",
+              agent: "local-rust-guide has edits in SKILL.md and one new reference file. I will not overwrite them. I can show the diff or help move the changes into a Skill Workspace.",
+              context: { selected: "#3 · local-rust-guide", artifact: "read-only local diff" }
+            }
+          ]
+        },
+        {
+          id: "consistency",
+          label: "Consistency",
+          prompt: "Check my project skills for consistency and tell me how to improve them.",
+          copy: "A Consistency Check produces evidence-backed recommendations. TASC can draft patches only in an explicitly selected writable Skill Workspace.",
+          context: { intent: "consistency.check", selected: "project installations", scope: "4 skills", artifact: "none" },
+          response: `
+Consistency Check complete: <span class="bad">1 blocking</span>, <span class="warn">2 warnings</span>, 3 categories clean.
+
+1. <span class="bad">precedence ambiguity</span> — code-review and rust-review both claim final review ownership for Rust files.
+2. <span class="warn">terminology drift</span> — “finding” means a security issue in one skill and any review note in another.
+3. <span class="warn">stale artifact</span> — frontend-ui-engineering changed after its last Evaluation.
+
+Recommended order:
+1. Narrow rust-review to Rust-specific analysis and declare code-review as final aggregator.
+2. Align both skills to the project glossary definition of “finding.”
+3. Re-run frontend-ui-engineering’s Evaluation.
+
+No skill content was changed.`,
+          followups: [
+            {
+              label: "Draft fixes 1 and 2",
+              user: "Draft the changes for recommendations 1 and 2.",
+              progress: "Locating writable sources and preparing explainable patches…",
+              agent: "code-review has a writable Skill Workspace; rust-review is installed only. I can draft the code-review glossary/aggregation patch now, but I need a writable rust-review source before changing it. Show the code-review patch?",
+              context: { selected: "recommendations 1 and 2", scope: "code-review Skill Workspace", artifact: "remediation proposal rem_44" }
+            },
+            {
+              label: "Re-run stale eval",
+              user: "Re-run the stale evaluation.",
+              progress: "Resolving the prior Suite and checking comparability…",
+              agent: "Plan: run Suite frontend-quality@3 against the current revision with the prior executor/profile. Skill instructions and authored prompts will reach the configured model provider. Approve?",
+              context: { selected: "frontend-ui-engineering", artifact: "Evaluation plan plan_E12" }
+            }
+          ]
+        },
+        {
+          id: "evaluation",
+          label: "Create an eval",
+          prompt: "Help me create and run evals for the code-review skill.",
+          copy: "The agent inspects the skill, grills for expected behavior, proposes coverage, creates a reviewable Suite draft, then runs only after approval.",
+          context: { intent: "eval.author", selected: "code-review", scope: "current Skill Workspace", artifact: "none" },
+          response: `
+I inspected code-review. It claims to trigger on review requests, produce severity-ranked findings, avoid style-only feedback, and cite changed lines.
+
+Before I draft the Evaluation Suite:
+1. Which failure is most important to catch: missed correctness bugs, false-positive findings, or unsafe fix suggestions?
+2. Should the skill stay silent on formatting-only diffs?
+3. Do you have a representative repository or fixture boundary I may use?
+
+I’ll turn your answers into primary, boundary/non-goal, failure/recovery, and regression cases.`,
+          followups: [
+            {
+              label: "Answer the grill",
+              user: "Prioritize missed correctness bugs. It should stay silent on formatting-only changes. Use local fixtures only.",
+              progress: "Drafting coverage and deterministic assertions…",
+              agent: `Proposed Suite: 8 tasks.
+
+• 3 primary correctness reviews
+• 2 should-not-trigger formatting cases
+• 2 false-positive boundary cases
+• 1 recovery case after an ambiguous diff
+
+Deterministic graders check cited lines, severity vocabulary, and forbidden style-only output. Optional rubric grading assesses usefulness. I can show every case or write the Suite draft to the Skill Workspace.`,
+              context: { artifact: "Evaluation Suite draft code-review-quality@1" }
+            },
+            {
+              label: "Run drafted suite",
+              user: "Run it and score the skill.",
+              progress: "Preparing package, behavior, and trigger execution plan…",
+              agent: "Plan: run 8 tasks once with Waza’s copilot-sdk executor, local fixtures, minimal retention, and no tool network access. The scorecard will report package, behavior, trigger, and policy outcome separately. Approve?",
+              context: { artifact: "Evaluation plan plan_EV8" }
+            }
+          ]
+        },
+        {
+          id: "author",
+          label: "Create a skill",
+          prompt: "Help me create a skill for reviewing Rust error handling.",
+          copy: "Skill Authoring combines local inspection, authoritative research, focused grilling, a reviewable draft, deterministic validation, and optional later installation/Evaluation.",
+          context: { intent: "skill.create", selected: "new Rust error-review skill", scope: "current repository", artifact: "none" },
+          response: `
+I found Rust code, existing review conventions, and no skill that owns error-handling review. I’ll use local terminology first and research authoritative Rust guidance for details the repository does not define.
+
+Three choices:
+1. Should it trigger on every Rust review or only when Result/error paths change?
+2. Should panic/unwrap usage be blocking or contextual?
+3. Is its output advisory, or should it enforce repository policy?
+
+I’ll use the answers to define triggers, responsibilities, non-goals, references, and Evaluation ideas.`,
+          followups: [
+            {
+              label: "Answer authoring choices",
+              user: "Trigger when error paths change. Treat unwrap contextually. Advisory findings only.",
+              progress: "Researching Rust guidance and drafting the skill…",
+              agent: `Draft ready in memory:
+
+• SKILL.md — trigger and review workflow
+• references/error-context.md — anyhow/thiserror/context guidance
+• references/panic-boundaries.md — contextual unwrap/panic rules
+
+Sources are cited in the draft rationale. Non-goals: formatting, performance, and general architecture. I can show the full files or prepare a write plan for ./skills/rust-error-review.`,
+              context: { artifact: "Skill Draft preview draft_RS1" }
+            },
+            {
+              label: "Apply the draft",
+              user: "Apply it to ./skills/rust-error-review.",
+              progress: "Preparing workspace write and deterministic validation plan…",
+              agent: "Plan: create 3 files under ./skills/rust-error-review, then validate frontmatter, links, token budget, trigger shape, and package structure. This does not install, publish, commit, or run live Evaluation. Approve?",
+              context: { scope: "Skill Workspace ./skills/rust-error-review", artifact: "authoring plan plan_RS1" }
+            }
+          ]
+        },
+        {
+          id: "security",
+          label: "Security check",
+          prompt: "Check my installed skills for secrets and security vulnerabilities.",
+          copy: "Security is a distinct static, local-first capability: secrets, unsafe instructions/permissions, injection/exfiltration, risky executable content, dependencies, and suspicious links.",
+          context: { intent: "security.check", selected: "installed skills", scope: "all local installations", artifact: "none" },
+          response: `
+Security Check complete: <span class="bad">1 high</span>, <span class="warn">2 medium</span>, 7 skills clean within static coverage.
+
+1. <span class="bad">embedded secret</span> — deploy-helper/references/example.env contains a token-shaped value with high entropy.
+2. <span class="warn">unsafe instruction</span> — repo-bootstrap asks the agent to disable certificate verification.
+3. <span class="warn">suspicious external link</span> — legacy-helper downloads an executable from an unpinned URL.
+
+I did not execute skill content or send it to a model. I can show evidence, draft source-workspace fixes, or suppress a confirmed false positive with a reason and expiry.`,
+          followups: [
+            {
+              label: "Show finding 1",
+              user: "Show me evidence for the first finding.",
+              progress: "Reading only the matched local file region…",
+              agent: "deploy-helper/references/example.env:4 contains `SERVICE_TOKEN=ghp_••••••••`. The value is not in TASC Local State. Recommendation: revoke if real, remove it from history, and replace the example with a clearly fake placeholder. I will not copy the full value.",
+              context: { selected: "security finding 1", artifact: "Security Run Artifact sec_81" }
+            },
+            {
+              label: "Draft safe fixes",
+              user: "Draft fixes for all three.",
+              progress: "Locating writable Skill Workspaces and preparing bounded remediation…",
+              agent: "Two skills have writable sources; legacy-helper is installation-only. I can draft redaction and certificate-policy patches for the two writable sources. For legacy-helper, I can recommend adopting or locating its source before editing. Show the proposed patches?",
+              context: { selected: "security findings 1–3", artifact: "remediation proposals sec_rem_1–3" }
+            }
+          ]
+        }
+      ];
+
+      const initialState = scenario => ({
+        scenario,
+        turns: [
+          { role: "agent", text: "What would you like to do with your Agent Skills?" }
+        ],
+        context: { ...scenario.context },
+        started: false
+      });
+
+      function start(state, text) {
+        return {
+          ...state,
+          started: true,
+          turns: [
+            ...state.turns,
+            { role: "user", text },
+            { role: "progress", text: "working · resolving intent and gathering local evidence" },
+            { role: "agent", text: state.scenario.response, html: true }
+          ]
+        };
+      }
+
+      function followUp(state, action) {
+        return {
+          ...state,
+          turns: [
+            ...state.turns,
+            { role: "user", text: action.user },
+            { role: "progress", text: action.progress },
+            { role: "agent", text: action.agent }
+          ],
+          context: { ...state.context, ...action.context }
+        };
+      }
+
+      return { scenarios, initialState, start, followUp };
+    })();
+
+    let active = ConversationModel.scenarios[0];
+    let state = ConversationModel.initialState(active);
+
+    const el = id => document.getElementById(id);
+
+    function renderScenarios() {
+      el("scenario-picker").innerHTML = ConversationModel.scenarios.map(item =>
+        `<button data-scenario="${item.id}" class="${item.id === active.id ? "active" : ""}">${item.label}</button>`
+      ).join("");
+    }
+
+    function renderTurns() {
+      el("terminal-body").innerHTML = state.turns.map(turn => {
+        if (turn.role === "progress") {
+          return `<div class="turn progress">↳ ${turn.text}</div>`;
+        }
+        const body = turn.html ? turn.text : escapeHtml(turn.text);
+        return `<div class="turn ${turn.role}"><span class="speaker">${turn.role === "user" ? "you" : "tasc"}</span>${body}</div>`;
+      }).join("");
+      el("terminal-body").scrollTop = el("terminal-body").scrollHeight;
+    }
+
+    function renderFollowups() {
+      el("followups").innerHTML = state.started
+        ? active.followups.map((action, index) => `<button data-followup="${index}">${action.label}</button>`).join("")
+        : "";
+    }
+
+    function renderContext() {
+      el("context").innerHTML = Object.entries(state.context).map(([key, value]) =>
+        `<div><dt>${key}</dt><dd>${escapeHtml(String(value))}</dd></div>`
+      ).join("");
+    }
+
+    function render() {
+      renderScenarios();
+      renderTurns();
+      renderFollowups();
+      renderContext();
+      el("scenario-copy").textContent = active.copy;
+      el("prompt").value = state.started ? "" : active.prompt;
+    }
+
+    function escapeHtml(value) {
+      return value
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+
+    function sendPrompt() {
+      const text = el("prompt").value.trim();
+      if (!text) return;
+      state = ConversationModel.start(state, text);
+      render();
+    }
+
+    el("scenario-picker").addEventListener("click", event => {
+      const id = event.target.dataset.scenario;
+      if (!id) return;
+      active = ConversationModel.scenarios.find(item => item.id === id);
+      state = ConversationModel.initialState(active);
+      render();
+    });
+
+    el("followups").addEventListener("click", event => {
+      const index = Number(event.target.dataset.followup);
+      if (!Number.isInteger(index)) return;
+      state = ConversationModel.followUp(state, active.followups[index]);
+      render();
+    });
+
+    el("send").addEventListener("click", sendPrompt);
+    el("prompt").addEventListener("keydown", event => {
+      if (event.key === "Enter") sendPrompt();
+    });
+
+    render();
+  </script>
+</body>
+</html>
