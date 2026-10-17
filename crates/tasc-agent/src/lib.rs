@@ -1,5 +1,6 @@
 pub mod authoring;
 pub mod consistency;
+pub mod conversation;
 pub mod discovery;
 pub mod evaluation;
 pub mod gh;

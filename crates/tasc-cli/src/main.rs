@@ -19,6 +19,8 @@ use tasc_core::{
     Inventory, SkillIdentity, StateStatus,
 };
 
+mod agent;
+
 #[derive(Parser)]
 #[command(name = "tasc", version, about = "TASC: manage local agent skills")]
 struct Cli {
@@ -39,6 +41,8 @@ enum OutputFormat {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Start a Copilot SDK conversational session.
+    Agent,
     /// Record and inspect source metadata without installing skills.
     Source {
         #[command(subcommand)]
@@ -590,6 +594,7 @@ async fn main() {
         Commands::Insight {
             command: InsightCommands::Propose { .. },
         } => "insight propose",
+        Commands::Agent => "agent",
         Commands::Search(_)
         | Commands::Skill {
             command: SkillCommands::Search(_),
@@ -681,6 +686,7 @@ async fn run(
         ));
     }
     let value = match cli.command {
+        Commands::Agent => return agent::run(cli.offline).await,
         Commands::Source {
             command: SourceCommands::List(_),
         } => serde_json::json!({ "sources": discovery.sources()? }),

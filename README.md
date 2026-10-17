@@ -121,6 +121,30 @@ current directory and `~/.copilot/skills`. Local State is stored at
 `$XDG_STATE_HOME/tasc/state.json` or `~/.local/state/tasc/state.json`; set
 `TASC_STATE_PATH` to use another file.
 
+### Conversational agent
+
+`tasc agent` starts an interactive Copilot SDK session. Install and authenticate
+the GitHub Copilot CLI first, or set `COPILOT_CLI_PATH` to its executable:
+
+```bash
+tasc agent
+```
+
+The agent can list and search skills, resolve references such as “the first
+result,” and delegate Evaluation, Consistency, and Security Checks to their
+existing use cases. It can also prepare update and removal plans. Plans do not
+change installations; review the proposed operation and enter `:approve <token>`
+to authorize it, or `:deny <token>` to decline. Approval tokens expire after
+five minutes and can be used only once. `:quit` exits the session. Press
+Ctrl-C during a request to cancel it.
+
+The SDK receives only bounded summaries of local results, not skill contents,
+local filesystem paths, or detailed Security evidence. Session storage and SDK
+session telemetry are disabled; TASC does not retain the conversation. The
+Copilot CLI still needs model access even with `--offline`; that option disables
+GitHub-backed TASC tools such as remote skill search and update planning, not
+the SDK’s connection to Copilot.
+
 ### GitHub discovery
 
 Search and preview delegate to GitHub CLI's preview-stage `gh skill` commands.

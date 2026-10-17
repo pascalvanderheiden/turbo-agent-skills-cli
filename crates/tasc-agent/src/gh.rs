@@ -1,11 +1,10 @@
 use std::{
-    cell::RefCell,
     collections::BTreeMap,
     path::PathBuf,
     process::Stdio,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -96,7 +95,7 @@ pub trait GhSkillLifecycleGateway {
 pub struct GhSkill {
     executable: PathBuf,
     timeout: Duration,
-    help: RefCell<BTreeMap<&'static str, String>>,
+    help: Mutex<BTreeMap<&'static str, String>>,
 }
 
 impl Default for GhSkill {
@@ -110,7 +109,7 @@ impl GhSkill {
         Self {
             executable,
             timeout,
-            help: RefCell::new(BTreeMap::new()),
+            help: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -233,7 +232,12 @@ impl GhSkill {
         if cancel.0.load(Ordering::Relaxed) {
             return Err(cancelled());
         }
-        if let Some(help) = self.help.borrow().get(capability) {
+        if let Some(help) = self
+            .help
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(capability)
+        {
             return Ok(help.clone());
         }
         let args = match capability {
@@ -246,7 +250,10 @@ impl GhSkill {
             _ => unreachable!(),
         };
         let help = self.execute(&args, cancel).await?;
-        self.help.borrow_mut().insert(capability, help.clone());
+        self.help
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(capability, help.clone());
         Ok(help)
     }
 
