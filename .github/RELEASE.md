@@ -5,7 +5,7 @@
 1. Create a repository ruleset for tag names `v*`. Restrict tag creation to release maintainers and block tag updates and deletions. The release workflow checks GitHub's `ref_protected` context and rejects an unprotected tag.
 2. Create the `release-approval` Actions environment. Require designated maintainers as reviewers and prevent the initiator from approving their own deployment. The publish job cannot start until all build, test, archive, checksum, and SBOM gates pass and an authorized reviewer approves it.
 3. In repository **Settings → General → Releases**, enable **Enable release immutability**. Published release assets and their tag cannot be changed or deleted.
-4. In the `release-approval` environment, set `TASC_IMMUTABLE_RELEASES_ENABLED=true` only after enabling that repository setting. The publish job requires this explicit configuration and verifies the API's immutable status after publishing; if GitHub reports a mutable release, the workflow returns it to draft and fails.
+4. In the `release-approval` environment, set `TASC_IMMUTABLE_RELEASES_ENABLED=true` only after enabling that repository setting. The publish job requires this explicit configuration and verifies the API's immutable status after publishing; if GitHub reports a mutable release or status cannot be confirmed, it attempts to return the release to draft and fails. Manually verify and correct the release if the rollback also fails.
 5. Allow GitHub Actions to create attestations with the workflow's short-lived OIDC identity. No long-lived signing secret is required.
 6. Enable Pages with GitHub Actions as the build and deployment source.
 

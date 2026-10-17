@@ -203,9 +203,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          immutable="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" --jq .immutable)"
+          if ! immutable="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" --jq .immutable)"; then
+            if gh release edit "$GITHUB_REF_NAME" --draft; then
+              echo "Could not verify release immutability; release was returned to draft." >&2
+            else
+              echo "Could not verify or return $GITHUB_REF_NAME to draft; manual intervention is required." >&2
+            fi
+            exit 1
+          fi
           if [[ "$immutable" != "true" ]]; then
-            gh release edit "$GITHUB_REF_NAME" --draft
-            echo "GitHub did not make $GITHUB_REF_NAME immutable; release was returned to draft." >&2
+            if gh release edit "$GITHUB_REF_NAME" --draft; then
+              echo "GitHub did not make $GITHUB_REF_NAME immutable; release was returned to draft." >&2
+            else
+              echo "GitHub did not make $GITHUB_REF_NAME immutable and it could not be returned to draft; manual intervention is required." >&2
+            fi
             exit 1
           fi

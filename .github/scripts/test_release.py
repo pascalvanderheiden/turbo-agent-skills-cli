@@ -25,6 +25,8 @@ class ReleaseTests(unittest.TestCase):
 
         self.assertIn("TASC_IMMUTABLE_RELEASES_ENABLED", content)
         self.assertIn("--jq .immutable", content)
+        self.assertIn("if ! immutable=", content)
+        self.assertIn("Could not verify or return", content)
         self.assertLess(guard, publish)
         self.assertLess(publish, verify)
 
