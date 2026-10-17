@@ -172,7 +172,7 @@ original package changes or disappears.
 `--all-installed` flag. It performs bounded, deterministic local analysis of
 declared dependencies, ownership, precedence, assumptions, trigger phrases,
 the current directory's `CONTEXT.md` glossary, explicit non-goals, and prior
-Evaluation or Check Artifacts. Lexical trigger overlap is a warning, not proof
+Evaluation, Check, or Watch Artifacts. Lexical trigger overlap is a warning, not proof
 of runtime collision; missing declarations are not treated as conflicts.
 Findings identify deterministic evidence, confidence, severity, and revision
 status. Inferred evidence is explicitly `not_run`; no model or live composition

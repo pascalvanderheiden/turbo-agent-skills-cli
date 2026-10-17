@@ -633,6 +633,7 @@ async fn run_local(
                     state_path.with_extension("consistency-checks"),
                 ),
                 FsRunArtifactRepository::new(state_path.with_extension("evaluations")),
+                FsWatchCheckRepository::new(state_path.with_extension("watch-checks")),
             );
             match command {
                 ConsistencyCommands::Check {

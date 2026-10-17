@@ -1,6 +1,7 @@
 use crate::{
     evaluation::RunArtifactRepository,
     service::{DiscoveredSkill, SkillAdapter, StateRepository},
+    watch::WatchCheckRepository,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -18,7 +19,7 @@ use tasc_core::{
     },
     discovery::Diagnostic,
     evaluation::RunArtifact,
-    LocalState, SourceRevision, LOCAL_STATE_VERSION,
+    LocalState, SourceRevision, WatchCheck, WatchCheckStatus, LOCAL_STATE_VERSION,
 };
 
 static CHECK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -137,19 +138,22 @@ impl<
         R: StateRepository,
         A: ConsistencyArtifactRepository,
         E: RunArtifactRepository,
-    > ConsistencyService<D, R, A, E>
+        W: WatchCheckRepository,
+    > ConsistencyService<D, R, A, E, W>
 {
     pub fn new(
         adapter: D,
         state_repository: R,
         artifact_repository: A,
         evaluation_repository: E,
+        watch_repository: W,
     ) -> Self {
         Self {
             adapter,
             state_repository,
             artifact_repository,
             evaluation_repository,
+            watch_repository,
         }
     }
 
@@ -201,7 +205,9 @@ impl<
         let glossary = read_project_glossary();
         let prior_checks = self.artifact_repository.list().map_err(state_error)?;
         let evaluation_artifacts = self.evaluation_repository.list().map_err(state_error)?;
-        let stale_artifacts = stale_evidence(&docs, &evaluation_artifacts, &prior_checks);
+        let watch_checks = self.watch_repository.list().map_err(state_error)?;
+        let stale_artifacts =
+            stale_evidence(&docs, &evaluation_artifacts, &prior_checks, &watch_checks);
         let (findings, categories) = analyze(&docs, &glossary, &stale_artifacts);
         let created_at_unix_ms = now_unix_ms();
         let sequence = CHECK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -238,11 +244,12 @@ impl<
     }
 }
 
-pub struct ConsistencyService<D, R, A, E> {
+pub struct ConsistencyService<D, R, A, E, W> {
     adapter: D,
     state_repository: R,
     artifact_repository: A,
     evaluation_repository: E,
+    watch_repository: W,
 }
 
 #[derive(Debug, Clone)]
@@ -360,6 +367,7 @@ fn stale_evidence(
     docs: &[SkillDoc],
     artifacts: &[RunArtifact],
     prior_checks: &[ConsistencyArtifact],
+    watch_checks: &[WatchCheck],
 ) -> Vec<ConsistencyEvidence> {
     let mut stale = Vec::new();
     for doc in docs {
@@ -416,6 +424,42 @@ fn stale_evidence(
                             excerpt: format!(
                                 "prior digest={}; current digest={}",
                                 snapshot.content_digest, doc.snapshot.content_digest
+                            ),
+                        });
+                    }
+                }
+            }
+            for check in watch_checks.iter().filter(|check| {
+                check.status != WatchCheckStatus::Unavailable
+                    && check
+                        .source
+                        .locator
+                        .trim_end_matches('/')
+                        .eq_ignore_ascii_case(doc.snapshot.identity.source.trim_end_matches('/'))
+                    && check.path.as_deref().is_none_or(|path| {
+                        let path = path.trim_end_matches("/SKILL.md").trim_end_matches('/');
+                        doc.snapshot
+                            .identity
+                            .relative_path
+                            .trim_end_matches("/SKILL.md")
+                            .trim_end_matches('/')
+                            .ends_with(path)
+                    })
+            }) {
+                if let (Some(observed), Some(current)) = (
+                    check.observed_revision.as_ref(),
+                    doc.snapshot.source_revision.as_ref(),
+                ) {
+                    if observed.value != current.value {
+                        stale.push(ConsistencyEvidence {
+                            layer: EvidenceLayer::Deterministic,
+                            kind: "stale_watch_artifact".to_string(),
+                            skill_id: doc.snapshot.identity.id.clone(),
+                            path: format!("watch-checks/{}.json", check.id),
+                            line: None,
+                            excerpt: format!(
+                                "watch observed revision={}; selected revision={}",
+                                observed.value, current.value
                             ),
                         });
                     }
@@ -501,13 +545,20 @@ fn analyze(
     check_assumptions(docs, &mut findings, &mut statuses);
     check_terminology(docs, glossary, &mut findings, &mut statuses);
     check_scope(docs, &mut findings, &mut statuses);
+    let mut stale_by_skill = BTreeMap::<String, Vec<ConsistencyEvidence>>::new();
     for evidence in stale_evidence {
-        let skill_ids = vec![evidence.skill_id.clone()];
+        stale_by_skill
+            .entry(evidence.skill_id.clone())
+            .or_default()
+            .push(evidence.clone());
+    }
+    for (skill_id, evidence) in stale_by_skill {
+        let skill_ids = vec![skill_id];
         let mut stale_finding = finding(
             ConsistencyCategory::StaleArtifact,
             "Prior Check or Evaluation evidence references a different package revision.",
             &skill_ids,
-            vec![evidence.clone()],
+            evidence,
             FindingSeverity::Warning,
             EvidenceConfidence::Observed,
             95,
@@ -694,10 +745,7 @@ fn check_ownership(
             90,
             "Review the overlapping claims and narrow their scopes or add an explicit scoped Precedence Rule.",
         ));
-        let has_precedence = claims.iter().all(|(doc, _, _)| {
-            has_any_field(doc, &["precedence", "precedence_rule", "precedence_rules"])
-        });
-        if !has_precedence {
+        if !has_unambiguous_precedence(claims) {
             findings.push(finding(
                 ConsistencyCategory::PrecedenceAmbiguity,
                 &format!("Overlapping ownership claim '{claim}' has no declared Precedence Rule."),
@@ -748,6 +796,75 @@ fn check_ownership(
             "Only overlapping declared claims are checked for missing or ambiguous precedence.",
         ),
     );
+}
+
+fn has_unambiguous_precedence(claims: &[(&SkillDoc, usize, String)]) -> bool {
+    let mut directions = BTreeMap::<(String, String), bool>::new();
+    for (doc, _, _) in claims {
+        for (rule, _) in field_values(doc, &["precedence", "precedence_rule", "precedence_rules"]) {
+            for left in claims {
+                for right in claims {
+                    if left.0.snapshot.identity.id == right.0.snapshot.identity.id {
+                        continue;
+                    }
+                    if let Some(left_precedes) = precedence_direction(
+                        &rule,
+                        &left.0.snapshot.identity.name,
+                        &right.0.snapshot.identity.name,
+                    ) {
+                        let pair = if left.0.snapshot.identity.id < right.0.snapshot.identity.id {
+                            (
+                                left.0.snapshot.identity.id.clone(),
+                                right.0.snapshot.identity.id.clone(),
+                            )
+                        } else {
+                            (
+                                right.0.snapshot.identity.id.clone(),
+                                left.0.snapshot.identity.id.clone(),
+                            )
+                        };
+                        let direction =
+                            if left.0.snapshot.identity.id < right.0.snapshot.identity.id {
+                                left_precedes
+                            } else {
+                                !left_precedes
+                            };
+                        if directions
+                            .insert(pair, direction)
+                            .is_some_and(|previous| previous != direction)
+                        {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let unique_skills = claims
+        .iter()
+        .map(|(doc, _, _)| doc.snapshot.identity.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let expected_pairs = unique_skills.len() * (unique_skills.len() - 1) / 2;
+    directions.len() == expected_pairs
+}
+
+fn precedence_direction(rule: &str, left: &str, right: &str) -> Option<bool> {
+    let rule = normalize(rule);
+    let left = normalize(left);
+    let right = normalize(right);
+    if rule.contains(&format!("{left} before {right}"))
+        || rule.contains(&format!("{left} precedes {right}"))
+        || rule.contains(&format!("{left} > {right}"))
+    {
+        Some(true)
+    } else if rule.contains(&format!("{right} before {left}"))
+        || rule.contains(&format!("{right} precedes {left}"))
+        || rule.contains(&format!("{right} > {left}"))
+    {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 fn check_triggers(
@@ -1343,6 +1460,7 @@ mod tests {
     use super::*;
     use tasc_core::{
         consistency::ConsistencyCategory,
+        discovery::SkillSource,
         evaluation::{
             EvaluationAnalyzer, EvaluationDiagnostic, EvaluationOutcome, EvaluationPolicy,
         },
@@ -1450,12 +1568,45 @@ mod tests {
     }
 
     #[test]
+    fn precedence_requires_a_consistent_scoped_ordering_rule() {
+        let alpha = doc(
+            "alpha",
+            "alpha",
+            "---\nname: alpha\nownership: workflow files\nprecedence: alpha before beta\n---\n",
+        );
+        let beta = doc(
+            "beta",
+            "beta",
+            "---\nname: beta\nownership: workflow files\n---\n",
+        );
+        let (resolved, resolved_categories) = analyze(&[alpha.clone(), beta.clone()], &[], &[]);
+        assert!(!resolved
+            .iter()
+            .any(|finding| { finding.category == ConsistencyCategory::PrecedenceAmbiguity }));
+        assert!(resolved_categories.iter().any(|result| {
+            result.category == ConsistencyCategory::PrecedenceAmbiguity
+                && result.status == ConsistencyStatus::NotFound
+        }));
+
+        let contradictory = doc(
+            "beta",
+            "beta",
+            "---\nname: beta\nownership: workflow files\nprecedence: beta before alpha\n---\n",
+        );
+        let (findings, _) = analyze(&[alpha, contradictory], &[], &[]);
+        assert!(findings
+            .iter()
+            .any(|finding| { finding.category == ConsistencyCategory::PrecedenceAmbiguity }));
+    }
+
+    #[test]
     fn reports_unselected_declared_dependencies_and_stale_evaluation_evidence() {
-        let docs = vec![doc(
+        let mut docs = vec![doc(
             "alpha",
             "alpha",
             "---\nname: alpha\nrequired_skills:\n  - not-selected\n---\n",
         )];
+        docs[0].snapshot.identity.relative_path = "alpha".to_string();
         let artifact = RunArtifact {
             schema_version: 1,
             id: "run-old".to_string(),
@@ -1487,8 +1638,24 @@ mod tests {
             execution_outcome: EvaluationOutcome::NotRun,
             diagnostics: Vec::<EvaluationDiagnostic>::new(),
         };
-        let stale = stale_evidence(&docs, &[artifact], &[]);
-        assert_eq!(stale.len(), 1);
+        let watch_check = WatchCheck {
+            id: "watch-old".to_string(),
+            watchlist_id: "watchlist".to_string(),
+            source: SkillSource {
+                id: "source".to_string(),
+                locator: "fixture".to_string(),
+            },
+            path: Some("alpha".to_string()),
+            prior_revision: None,
+            observed_revision: Some(SourceRevision::commit("watch-old".to_string())),
+            status: WatchCheckStatus::Changed,
+            unavailable_reason: None,
+        };
+        let stale = stale_evidence(&docs, &[artifact], &[], &[watch_check]);
+        assert_eq!(stale.len(), 2);
+        assert!(stale
+            .iter()
+            .any(|evidence| evidence.kind == "stale_watch_artifact"));
         assert_eq!(stale[0].layer, EvidenceLayer::Deterministic);
         let (findings, categories) = analyze(&docs, &[], &stale);
         assert!(findings.iter().any(|finding| {
