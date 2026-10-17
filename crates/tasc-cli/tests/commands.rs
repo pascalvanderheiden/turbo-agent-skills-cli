@@ -1789,3 +1789,30 @@ fn skill_authoring_refuses_to_write_beneath_a_discovered_installation() {
     assert!(!installation.join("new-draft").exists());
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn agent_command_reports_an_unavailable_copilot_sdk_dependency() {
+    let directory = test_dir();
+    fs::create_dir_all(&directory).unwrap();
+    let state_path = directory.join("state/state.json");
+
+    let help = run(&directory, &state_path, &["agent", "--help"]);
+    assert!(help.status.success());
+    assert!(String::from_utf8_lossy(&help.stdout).contains("Copilot SDK conversational session"));
+
+    let missing_cli = directory.join("missing-copilot");
+    let output = Command::new(env!("CARGO_BIN_EXE_tasc"))
+        .args(["--format", "json", "agent"])
+        .current_dir(&directory)
+        .env("HOME", directory.join("home"))
+        .env("TASC_STATE_PATH", &state_path)
+        .env("COPILOT_CLI_PATH", missing_cli)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    let diagnostic: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(diagnostic["diagnostic"]["code"], "copilot_sdk_unavailable");
+    assert_eq!(diagnostic["diagnostic"]["origin"], "copilot-sdk");
+
+    fs::remove_dir_all(directory).unwrap();
+}
