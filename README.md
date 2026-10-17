@@ -47,6 +47,12 @@ tasc watch check <watchlist-id>
 tasc watch remove <watchlist-id> --yes
 # Compare GitHub revisions without updating Installations
 
+tasc eval run skill:file:///path/to/.github/skills/example --json
+tasc eval run <installation-id> --revision <source-revision>
+tasc eval list --json
+tasc eval show <run-id>
+# Validate local package metadata and inspect immutable Evaluation evidence
+
 tasc source add github/awesome-copilot --dry-run
 tasc source add github/awesome-copilot --yes
 # Record normalized source metadata only: no fetch, install, or skill-content edit
@@ -144,6 +150,17 @@ Checks record prior and observed commit revisions, report unavailable sources
 or GitHub CLI failures explicitly, and never update Installations. Repeated
 observations of the same revision reuse the same immutable check reference. A
 source selector matching multiple watched paths must use an exact Watchlist ID.
+
+`eval run` performs deterministic package-only smoke validation of a local
+`SKILL.md` (frontmatter `name` and `description`) without executing skill
+instructions or invoking a model. It records identity, any known source revision
+and target, package digest, analyzer configuration, policy, timestamps, outcomes,
+and diagnostics in an immutable sibling `<state-stem>.evaluations` directory.
+Scenario execution is `not_run`; `--waza` explicitly checks for the optional
+Waza executable, reporting `inconclusive` when unavailable and `not_run` when
+available because model-backed execution is outside this smoke slice. Run
+artifacts are separate from Local State and can be listed or shown after the
+original package changes or disappears.
 
 ## Architecture
 
