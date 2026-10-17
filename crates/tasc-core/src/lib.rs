@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+pub mod authoring;
 pub mod consistency;
 pub mod discovery;
 pub mod evaluation;
