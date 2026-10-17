@@ -1,0 +1,6 @@
+[
+  {"repo":"zeta/skills","skillName":"review-helper","namespace":"","description":"Review code","stars":100,"path":"skills/review-helper/SKILL.md"},
+  {"repo":"beta/skills","skillName":"review","namespace":"","description":"Code review","stars":5,"path":"skills/review/SKILL.md"},
+  {"repo":"alpha/skills","skillName":"review","namespace":"","description":"Review changes","stars":5,"path":"skills/review/SKILL.md"},
+  {"repo":"gamma/skills","skillName":"audit","namespace":"","description":"review changes","stars":200,"path":"skills/audit/SKILL.md"}
+]

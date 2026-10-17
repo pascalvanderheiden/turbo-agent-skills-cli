@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub mod discovery;
+
 pub const LOCAL_STATE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -31,6 +33,8 @@ pub struct LocalState {
     pub identities: Vec<SkillIdentity>,
     pub targets: Vec<AdapterTarget>,
     pub installations: Vec<Installation>,
+    #[serde(default)]
+    pub sources: Vec<discovery::SkillSource>,
 }
 
 impl Default for LocalState {
@@ -40,6 +44,7 @@ impl Default for LocalState {
             identities: Vec::new(),
             targets: Vec::new(),
             installations: Vec::new(),
+            sources: Vec::new(),
         }
     }
 }
