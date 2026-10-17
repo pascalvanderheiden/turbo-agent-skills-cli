@@ -39,6 +39,14 @@ tasc state status
 tasc state status --json
 # Render status facts as versioned JSON
 
+tasc watch add owner/repo --dry-run
+tasc watch add owner/repo --path skills/review/SKILL.md --yes
+tasc watch list --json
+tasc watch check
+tasc watch check <watchlist-id>
+tasc watch remove <watchlist-id> --yes
+# Compare GitHub revisions without updating Installations
+
 tasc source add github/awesome-copilot --dry-run
 tasc source add github/awesome-copilot --yes
 # Record normalized source metadata only: no fetch, install, or skill-content edit
@@ -105,6 +113,13 @@ are `2` for usage/configuration, `3` for dependency/authentication, `4` for
 operational failures, and `130` for cancellation. `--offline` rejects remote
 discovery before invoking `gh`; local inventory, source metadata, and state
 commands do not depend on GitHub CLI.
+
+Watchlists are Local State metadata; each `watch check` writes an immutable
+Watch Check artifact into a sibling `<state-stem>.watch-checks` directory.
+Checks record prior and observed commit revisions, report unavailable sources
+or GitHub CLI failures explicitly, and never update Installations. Repeated
+observations of the same revision reuse the same immutable check reference. A
+source selector matching multiple watched paths must use an exact Watchlist ID.
 
 ## Architecture
 
