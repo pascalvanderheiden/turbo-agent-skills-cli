@@ -5,12 +5,14 @@ use tasc_agent::{
     discovery::DiscoveryService,
     evaluation::{EvaluationService, FsRunArtifactRepository},
     gh::{Cancellation, GhSkill},
+    insights::{FsInsightArtifactRepository, FsInsightLifecycleRepository, InsightService},
     lifecycle::{LifecycleResult, LifecycleService},
     service::FsStateRepository,
     AgentService, CopilotAdapter, FsWatchCheckRepository, WatchService,
 };
 use tasc_core::{
     discovery::{Diagnostic, Envelope},
+    insights::InsightStatus,
     Inventory, SkillIdentity, StateStatus,
 };
 
@@ -67,6 +69,11 @@ enum Commands {
         #[command(subcommand)]
         command: ConsistencyCommands,
     },
+    /// Rank local lifecycle, Evaluation, and Consistency evidence.
+    Insight {
+        #[command(subcommand)]
+        command: InsightCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -112,6 +119,72 @@ enum ConsistencyCommands {
         #[command(flatten)]
         output: JsonOutput,
     },
+}
+
+#[derive(Subcommand)]
+enum InsightCommands {
+    /// Create immutable snapshots from currently available evidence.
+    Generate(JsonOutput),
+    /// List ranked Insight snapshots and their lifecycle status.
+    List {
+        /// Include Insights hidden from the default actionable list, including suppressed ones.
+        #[arg(long)]
+        all: bool,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
+    /// Show a snapshot or the latest snapshot for an Insight.
+    Show {
+        id: String,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
+    /// Record an auditable Insight lifecycle status change.
+    Status {
+        id: String,
+        #[arg(value_enum)]
+        status: InsightStatusArg,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        snooze_days: Option<u64>,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
+    /// Suppress an Insight or one contributing evidence item until expiration.
+    Suppress {
+        id: String,
+        #[arg(long)]
+        evidence: Option<String>,
+        #[arg(long)]
+        reason: String,
+        #[arg(long, default_value_t = 30)]
+        expires_in_days: u64,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
+    /// Record an auditable end to the active suppression.
+    Unsuppress {
+        id: String,
+        #[arg(long)]
+        reason: String,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
+    /// Show a bounded proposal without applying it.
+    Propose {
+        id: String,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum InsightStatusArg {
+    New,
+    Acknowledged,
+    Snoozed,
+    Resolved,
 }
 
 #[derive(Subcommand)]
@@ -294,6 +367,15 @@ async fn main() {
                 | ConsistencyCommands::Show { output, .. } => output.json,
                 ConsistencyCommands::List(output) => output.json,
             },
+            Commands::Insight { command } => match command {
+                InsightCommands::Generate(output)
+                | InsightCommands::Show { output, .. }
+                | InsightCommands::Status { output, .. }
+                | InsightCommands::Suppress { output, .. }
+                | InsightCommands::Unsuppress { output, .. }
+                | InsightCommands::Propose { output, .. } => output.json,
+                InsightCommands::List { output, .. } => output.json,
+            },
             _ => false,
         };
     let command = match &cli.command {
@@ -339,6 +421,27 @@ async fn main() {
         Commands::Consistency {
             command: ConsistencyCommands::Show { .. },
         } => "consistency show",
+        Commands::Insight {
+            command: InsightCommands::Generate(_),
+        } => "insight generate",
+        Commands::Insight {
+            command: InsightCommands::List { .. },
+        } => "insight list",
+        Commands::Insight {
+            command: InsightCommands::Show { .. },
+        } => "insight show",
+        Commands::Insight {
+            command: InsightCommands::Status { .. },
+        } => "insight status",
+        Commands::Insight {
+            command: InsightCommands::Suppress { .. },
+        } => "insight suppress",
+        Commands::Insight {
+            command: InsightCommands::Unsuppress { .. },
+        } => "insight unsuppress",
+        Commands::Insight {
+            command: InsightCommands::Propose { .. },
+        } => "insight propose",
         Commands::Search(_)
         | Commands::Skill {
             command: SkillCommands::Search(_),
@@ -463,6 +566,15 @@ async fn run(
             )
             .await;
         }
+        Commands::Insight { command } => {
+            return run_local(
+                Commands::Insight { command },
+                state_path,
+                cli.format == OutputFormat::Json,
+                cancel,
+            )
+            .await;
+        }
         command => {
             return run_local(
                 command,
@@ -541,6 +653,13 @@ fn safe_text(text: &str) -> String {
         .collect()
 }
 
+fn unix_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
 fn render_fields(value: &serde_json::Value, indent: usize) {
     match value {
         serde_json::Value::Object(fields) => {
@@ -588,6 +707,111 @@ async fn run_local(
     let repository = FsStateRepository::new(state_path.clone());
     let service = AgentService::new(CopilotAdapter::local(), repository.clone());
     match command {
+        Commands::Insight { command } => {
+            let service = InsightService::new(
+                CopilotAdapter::local(),
+                repository,
+                FsConsistencyArtifactRepository::new(
+                    state_path.with_extension("consistency-checks"),
+                ),
+                FsRunArtifactRepository::new(state_path.with_extension("evaluations")),
+                FsInsightArtifactRepository::new(state_path.with_extension("insights")),
+                FsInsightLifecycleRepository::new(state_path.with_extension("insight-lifecycle")),
+            );
+            match command {
+                InsightCommands::Generate(output) => render_local_artifact(
+                    serde_json::json!({ "insights": service.generate()? }),
+                    "insight generate",
+                    output.json || json,
+                ),
+                InsightCommands::List { all, output } => {
+                    let mut insights = service.list()?;
+                    if !all {
+                        insights.retain(|view| view.status != InsightStatus::Suppressed);
+                    }
+                    render_local_artifact(
+                        serde_json::json!({ "insights": insights }),
+                        "insight list",
+                        output.json || json,
+                    )
+                }
+                InsightCommands::Show { id, output } => render_local_artifact(
+                    serde_json::to_value(service.show(&id)?)
+                        .map_err(|error| local_error(error.to_string()))?,
+                    "insight show",
+                    output.json || json,
+                ),
+                InsightCommands::Status {
+                    id,
+                    status,
+                    reason,
+                    snooze_days,
+                    output,
+                } => {
+                    if matches!(status, InsightStatusArg::Snoozed) != snooze_days.is_some() {
+                        return Err(Diagnostic::new(
+                            "invalid_insight_status",
+                            "usage",
+                            "insight",
+                            "Only snoozed status accepts --snooze-days, and snoozed status requires it.",
+                            "Pass --snooze-days with `snoozed`, or omit it for other statuses.",
+                        ));
+                    }
+                    let status = match status {
+                        InsightStatusArg::New => InsightStatus::New,
+                        InsightStatusArg::Acknowledged => InsightStatus::Acknowledged,
+                        InsightStatusArg::Snoozed => InsightStatus::Snoozed,
+                        InsightStatusArg::Resolved => InsightStatus::Resolved,
+                    };
+                    let until = snooze_days.map(|days| {
+                        unix_ms().saturating_add(u128::from(days).saturating_mul(86_400_000))
+                    });
+                    render_local_artifact(
+                        serde_json::to_value(service.set_status(
+                            &id,
+                            status,
+                            reason.as_deref(),
+                            until,
+                        )?)
+                        .map_err(|error| local_error(error.to_string()))?,
+                        "insight status",
+                        output.json || json,
+                    )
+                }
+                InsightCommands::Suppress {
+                    id,
+                    evidence,
+                    reason,
+                    expires_in_days,
+                    output,
+                } => {
+                    let expires = unix_ms()
+                        .saturating_add(u128::from(expires_in_days).saturating_mul(86_400_000));
+                    render_local_artifact(
+                        serde_json::to_value(service.suppress(
+                            &id,
+                            evidence.as_deref(),
+                            &reason,
+                            expires,
+                        )?)
+                        .map_err(|error| local_error(error.to_string()))?,
+                        "insight suppress",
+                        output.json || json,
+                    )
+                }
+                InsightCommands::Unsuppress { id, reason, output } => render_local_artifact(
+                    serde_json::to_value(service.unsuppress(&id, &reason)?)
+                        .map_err(|error| local_error(error.to_string()))?,
+                    "insight unsuppress",
+                    output.json || json,
+                ),
+                InsightCommands::Propose { id, output } => render_local_artifact(
+                    serde_json::json!({ "proposals": service.proposals(&id)? }),
+                    "insight propose",
+                    output.json || json,
+                ),
+            }
+        }
         Commands::Eval { command } => {
             let service = EvaluationService::new(
                 CopilotAdapter::local(),

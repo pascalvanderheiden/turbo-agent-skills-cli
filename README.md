@@ -179,6 +179,38 @@ status. Inferred evidence is explicitly `not_run`; no model or live composition
 probe is invoked. Each run is an immutable artifact in a sibling
 `<state-stem>.consistency-checks` directory, separate from Local State.
 
+`insight generate` turns observed Installation lifecycle states, the latest
+Evaluation per Skill Identity, and the latest Consistency findings into ranked,
+immutable Insight snapshots. Priority is an explainable deterministic ordering
+of blocking impact, evidence confidence, urgency, affected Installations,
+freshness, and stable Insight ID; it is not a universal quality score.
+Impact orders `blocking` above `warning` above `info`; confidence preserves the
+source score (lifecycle and Evaluation observations use 100, inferred lifecycle
+evidence uses 60, and Consistency uses its finding score). Urgency is a separate
+deterministic 0–3 source-state factor (no unsupported deadlines are inferred),
+breadth counts distinct affected Installations, and freshness falls by one point
+per evidence age-day to zero at 100 days; lifecycle observations without a
+source timestamp are treated as current.
+`insight list` and `insight show` expose each snapshot's contributing evidence,
+revision, priority factors, and lifecycle status. Changed evidence creates a new
+snapshot and leaves its prior snapshot visible as stale. Suppressed Insights
+are omitted from the default actionable list; use `insight list --all` or
+`insight show` to inspect their retained evidence and audit history.
+
+`insight status` records acknowledged, snoozed, or resolved lifecycle events
+without rewriting snapshots. `insight suppress` requires a reason and expiration
+and can target one contributing evidence item with `--evidence`; each
+append-only suppression records the exact evidence version. Suppressions do not
+delete or modify source evidence, expire automatically, and can be audited or
+ended with `insight unsuppress`. Insight snapshots and lifecycle events are
+stored in sibling `<state-stem>.insights` and
+`<state-stem>.insight-lifecycle` directories.
+
+`insight propose <id>` renders a bounded Remediation Proposal with scope, risk,
+prerequisites, reversibility, affected evidence, and expected verification.
+Proposals are informational only: no Insight command applies a proposal or
+edits an Installation or Skill Workspace.
+
 ## Architecture
 
 - `tasc-core` holds the canonical language model and state types

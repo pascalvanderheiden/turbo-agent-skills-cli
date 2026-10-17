@@ -37,11 +37,25 @@ pub struct InsightEvidence {
     pub source_id: String,
     pub evidence_id: String,
     pub skill_ids: Vec<String>,
+    pub affected_installations: usize,
     pub revision: Option<String>,
     pub summary: String,
+    pub supporting_evidence: Vec<InsightEvidenceDetail>,
     pub severity: String,
     pub confidence: String,
+    pub confidence_score: u8,
+    pub urgency: u8,
     pub observed_at_unix_ms: Option<u128>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InsightEvidenceDetail {
+    pub kind: String,
+    pub skill_id: Option<String>,
+    pub path: Option<String>,
+    pub line: Option<usize>,
+    pub excerpt: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -52,11 +66,23 @@ pub struct InsightSnapshot {
     pub insight_id: String,
     pub created_at_unix_ms: u128,
     pub title: String,
+    pub summary: String,
     pub recommendation: String,
+    pub evidence_status: InsightStatus,
     pub scope: Vec<String>,
     pub priority: InsightPriority,
     pub evidence: Vec<InsightEvidence>,
     pub evidence_version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InsightView {
+    pub snapshot: InsightSnapshot,
+    pub status: InsightStatus,
+    pub priority_rank: usize,
+    pub is_latest_snapshot: bool,
+    pub lifecycle_events: Vec<InsightLifecycleEvent>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -74,6 +100,7 @@ pub struct Suppression {
     pub snapshot_id: String,
     pub scope: SuppressionScope,
     pub scope_id: String,
+    pub previous_status: InsightStatus,
     pub evidence_version: String,
     pub reason: String,
     pub created_at_unix_ms: u128,
@@ -83,8 +110,12 @@ pub struct Suppression {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "action", content = "details")]
 pub enum InsightLifecycleAction {
+    Refreshed {
+        active: bool,
+    },
     Status {
         status: InsightStatus,
+        previous_status: Option<InsightStatus>,
         reason: Option<String>,
         until_unix_ms: Option<u128>,
     },
@@ -122,13 +153,21 @@ pub enum ProposalReversibility {
     NotApplicable,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalType {
+    ReviewInstallation,
+    ReevaluateSkill,
+    ReviewConsistencyFinding,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RemediationProposal {
     pub id: String,
     pub insight_id: String,
     pub snapshot_id: String,
-    pub proposal_type: String,
+    pub proposal_type: ProposalType,
     pub rationale: String,
     pub scope: Vec<String>,
     pub prerequisites: Vec<String>,
