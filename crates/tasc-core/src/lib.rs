@@ -56,6 +56,8 @@ pub struct LocalState {
     pub installations: Vec<Installation>,
     #[serde(default)]
     pub sources: Vec<discovery::SkillSource>,
+    #[serde(default)]
+    pub watchlists: Vec<Watchlist>,
 }
 
 impl Default for LocalState {
@@ -66,8 +68,60 @@ impl Default for LocalState {
             targets: Vec::new(),
             installations: Vec::new(),
             sources: Vec::new(),
+            watchlists: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceRevision {
+    pub kind: String,
+    pub value: String,
+}
+
+impl SourceRevision {
+    pub fn commit(value: String) -> Self {
+        Self {
+            kind: "commit".to_string(),
+            value,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Watchlist {
+    pub id: String,
+    pub source: discovery::SkillSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub last_observed_revision: Option<SourceRevision>,
+    pub last_check_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WatchCheckStatus {
+    Baseline,
+    Changed,
+    Unchanged,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchCheck {
+    pub id: String,
+    pub watchlist_id: String,
+    pub source: discovery::SkillSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub prior_revision: Option<SourceRevision>,
+    pub observed_revision: Option<SourceRevision>,
+    pub status: WatchCheckStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

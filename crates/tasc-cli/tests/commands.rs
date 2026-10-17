@@ -514,3 +514,188 @@ fn lifecycle_plans_protect_modified_content_and_record_recoverable_state() {
     assert_eq!(missing["items"][0]["status"], "missing");
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn watch_commands_record_deterministic_revisions_without_touching_installations() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = test_dir();
+    fs::create_dir_all(&directory).unwrap();
+    let gh = directory.join("gh");
+    fs::write(&gh, include_str!("../../tasc-agent/tests/fixtures/gh.sh")).unwrap();
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(directory.join("gh.mode"), "supported\n").unwrap();
+    let revision_a = "0123456789abcdef0123456789abcdef01234567";
+    let revision_b = "abcdef0123456789abcdef0123456789abcdef01";
+    fs::write(directory.join("gh.revision"), format!("{revision_a}\n")).unwrap();
+    let state_path = directory.join("state.json");
+    let installation = serde_json::json!({
+        "id": "installation:skill:test@target:test",
+        "skill_id": "skill:test",
+        "target_id": "target:test",
+        "path": "/installed/review"
+    });
+    fs::write(
+        &state_path,
+        serde_json::to_vec(&serde_json::json!({
+            "version": 1,
+            "identities": [],
+            "targets": [],
+            "installations": [installation],
+            "sources": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let invoke = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_tasc"))
+            .args(args)
+            .env("PATH", &directory)
+            .env("HOME", directory.join("home"))
+            .env("TASC_STATE_PATH", &state_path)
+            .current_dir(&directory)
+            .output()
+            .unwrap()
+    };
+
+    let dry_run = invoke(&[
+        "watch",
+        "add",
+        "alpha/skills",
+        "--path",
+        "skills/review/SKILL.md",
+        "--dry-run",
+        "--json",
+    ]);
+    assert!(dry_run.status.success());
+    let dry_run: serde_json::Value = serde_json::from_slice(&dry_run.stdout).unwrap();
+    assert_eq!(dry_run["result"]["dryRun"], true);
+    assert!(!fs::read_to_string(&state_path)
+        .unwrap()
+        .contains("\"watchlists\""));
+    let unapproved = invoke(&[
+        "watch",
+        "add",
+        "alpha/skills",
+        "--path",
+        "skills/review/SKILL.md",
+        "--json",
+    ]);
+    assert_eq!(unapproved.status.code(), Some(2));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&unapproved.stderr).unwrap()["diagnostic"]
+            ["code"],
+        "confirmation_required"
+    );
+
+    let added = invoke(&[
+        "watch",
+        "add",
+        "alpha/skills",
+        "--path",
+        "skills/review/SKILL.md",
+        "--yes",
+        "--json",
+    ]);
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let added: serde_json::Value = serde_json::from_slice(&added.stdout).unwrap();
+    assert_eq!(added["command"], "watch add");
+    let watch_id = added["result"]["watchlist"]["id"].as_str().unwrap();
+
+    let listed = invoke(&["watch", "list", "--json"]);
+    assert!(listed.status.success());
+    let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["result"]["watchlists"].as_array().unwrap().len(), 1);
+    let human_list = invoke(&["watch", "list"]);
+    let human_list = String::from_utf8(human_list.stdout).unwrap();
+    assert!(human_list.contains(watch_id));
+
+    let baseline = invoke(&["watch", "check", watch_id, "--json"]);
+    assert!(
+        baseline.status.success(),
+        "{}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    let baseline: serde_json::Value = serde_json::from_slice(&baseline.stdout).unwrap();
+    let baseline_check = &baseline["result"]["checks"][0];
+    assert_eq!(baseline_check["status"], "baseline");
+    assert_eq!(baseline_check["priorRevision"], serde_json::Value::Null);
+    assert_eq!(baseline_check["observedRevision"]["value"], revision_a);
+
+    let unchanged = invoke(&["watch", "check", watch_id, "--json"]);
+    let unchanged: serde_json::Value = serde_json::from_slice(&unchanged.stdout).unwrap();
+    let unchanged_check = &unchanged["result"]["checks"][0];
+    assert_eq!(unchanged_check["status"], "unchanged");
+    assert_eq!(
+        unchanged_check["priorRevision"]["value"],
+        unchanged_check["observedRevision"]["value"]
+    );
+    let unchanged_id = unchanged_check["id"].as_str().unwrap();
+    let repeated = invoke(&["watch", "check", watch_id, "--json"]);
+    let repeated: serde_json::Value = serde_json::from_slice(&repeated.stdout).unwrap();
+    assert_eq!(repeated["result"]["checks"][0]["id"], unchanged_id);
+    let human_check = invoke(&["watch", "check", watch_id]);
+    assert!(String::from_utf8(human_check.stdout)
+        .unwrap()
+        .contains("status: unchanged"));
+
+    fs::write(directory.join("gh.revision"), format!("{revision_b}\n")).unwrap();
+    let changed = invoke(&["watch", "check", watch_id, "--json"]);
+    let changed: serde_json::Value = serde_json::from_slice(&changed.stdout).unwrap();
+    let changed_check = &changed["result"]["checks"][0];
+    assert_eq!(changed_check["status"], "changed");
+    assert_eq!(changed_check["priorRevision"]["value"], revision_a);
+    assert_eq!(changed_check["observedRevision"]["value"], revision_b);
+
+    fs::write(directory.join("gh.mode"), "source-missing\n").unwrap();
+    let unavailable = invoke(&["watch", "check", watch_id, "--json"]);
+    assert!(unavailable.status.success());
+    let unavailable: serde_json::Value = serde_json::from_slice(&unavailable.stdout).unwrap();
+    assert_eq!(unavailable["result"]["checks"][0]["status"], "unavailable");
+    assert_eq!(
+        unavailable["result"]["checks"][0]["unavailableReason"],
+        "source_unavailable"
+    );
+
+    let second = invoke(&[
+        "watch",
+        "add",
+        "alpha/skills",
+        "--path",
+        "skills/other",
+        "--yes",
+        "--json",
+    ]);
+    assert!(second.status.success());
+    let ambiguous = invoke(&["watch", "check", "alpha/skills", "--json"]);
+    assert_eq!(ambiguous.status.code(), Some(2));
+    let ambiguous: serde_json::Value = serde_json::from_slice(&ambiguous.stderr).unwrap();
+    assert_eq!(ambiguous["diagnostic"]["code"], "ambiguous_watch_target");
+
+    let remove = invoke(&["watch", "remove", watch_id, "--yes", "--json"]);
+    assert!(remove.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&remove.stdout).unwrap()["result"]["removed"],
+        watch_id
+    );
+    fs::remove_file(&gh).unwrap();
+    let missing_gh = invoke(&["watch", "check", "alpha/skills", "--json"]);
+    assert!(missing_gh.status.success());
+    let missing_gh: serde_json::Value = serde_json::from_slice(&missing_gh.stdout).unwrap();
+    assert_eq!(
+        missing_gh["result"]["checks"][0]["unavailableReason"],
+        "gh_missing"
+    );
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(state["installations"][0]["id"], installation["id"]);
+    assert_eq!(state["installations"][0]["path"], installation["path"]);
+    assert_eq!(state["watchlists"].as_array().unwrap().len(), 1);
+    let artifacts = state_path.with_extension("watch-checks");
+    assert_eq!(fs::read_dir(artifacts).unwrap().count(), 5);
+    fs::remove_dir_all(directory).unwrap();
+}
