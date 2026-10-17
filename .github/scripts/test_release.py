@@ -12,8 +12,21 @@ from release import TARGETS, make_archive, validate_assets, validate_tag, write_
 class ReleaseTests(unittest.TestCase):
     def test_release_workflow_matrix_covers_all_supported_targets(self):
         workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "release.yml"
-        targets = set(re.findall(r"^\s+target: ([\w-]+)$", workflow.read_text(), re.MULTILINE))
+        content = workflow.read_text()
+        targets = set(re.findall(r"^\s+target: ([\w-]+)$", content, re.MULTILINE))
         self.assertEqual(targets, TARGETS)
+
+    def test_publish_requires_and_verifies_immutable_release_configuration(self):
+        workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "release.yml"
+        content = workflow.read_text()
+        guard = content.index("Require immutable-release configuration")
+        publish = content.index("Publish immutable release")
+        verify = content.index("Verify release immutability")
+
+        self.assertIn("TASC_IMMUTABLE_RELEASES_ENABLED", content)
+        self.assertIn("--jq .immutable", content)
+        self.assertLess(guard, publish)
+        self.assertLess(publish, verify)
 
     def test_tag_must_be_protected_stable_semver_matching_package(self):
         validate_tag("v0.1.0", "0.1.0", True)
