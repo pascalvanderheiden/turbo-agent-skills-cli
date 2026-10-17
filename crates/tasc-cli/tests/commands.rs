@@ -186,6 +186,166 @@ fn source_metadata_commands_work_without_gh_and_preserve_existing_state() {
     fs::remove_dir_all(directory).unwrap();
 }
 
+#[test]
+fn evaluation_runs_store_package_outcomes_and_support_list_show() {
+    let directory = test_dir();
+    let valid_dir = directory.join(".github/skills/review");
+    let malformed_dir = directory.join(".github/skills/malformed");
+    let state_path = directory.join("state/state.json");
+    fs::create_dir_all(&valid_dir).unwrap();
+    fs::create_dir_all(&malformed_dir).unwrap();
+    fs::write(
+        valid_dir.join("SKILL.md"),
+        "---\nname: review\ndescription: a valid skill\n---\nBody.\n",
+    )
+    .unwrap();
+    fs::write(
+        malformed_dir.join("SKILL.md"),
+        "---\nname: malformed\n---\nMissing description.\n",
+    )
+    .unwrap();
+
+    let inventory = run(&directory, &state_path, &["skill", "list", "--json"]);
+    assert!(inventory.status.success());
+    let inventory: serde_json::Value = serde_json::from_slice(&inventory.stdout).unwrap();
+    let items = inventory["items"].as_array().unwrap();
+    let valid = items
+        .iter()
+        .find(|item| item["identity"]["name"] == "review")
+        .unwrap();
+    let malformed = items
+        .iter()
+        .find(|item| item["identity"]["name"] == "malformed")
+        .unwrap();
+
+    let passed = run(
+        &directory,
+        &state_path,
+        &[
+            "eval",
+            "run",
+            valid["identity"]["id"].as_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(
+        passed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&passed.stderr)
+    );
+    let passed: serde_json::Value = serde_json::from_slice(&passed.stdout).unwrap();
+    assert_eq!(passed["command"], "eval run");
+    assert_eq!(passed["result"]["outcome"], "passed");
+    assert_eq!(passed["result"]["packageOutcome"], "passed");
+    assert_eq!(passed["result"]["executionOutcome"], "not_run");
+    assert_eq!(passed["result"]["analyzer"]["name"], "tasc-package-smoke");
+    assert_eq!(passed["result"]["policy"]["mode"], "package_only");
+    assert!(passed["result"]["createdAtUnixMs"].as_u64().is_some());
+    assert!(passed["result"]["completedAtUnixMs"].as_u64().is_some());
+    assert!(passed["result"]["packageDigest"].as_str().is_some());
+    let run_id = passed["result"]["id"].as_str().unwrap();
+
+    let listed = run(&directory, &state_path, &["eval", "list", "--json"]);
+    assert!(listed.status.success());
+    let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["command"], "eval list");
+    assert_eq!(listed["result"]["runs"].as_array().unwrap().len(), 1);
+
+    let shown = run(&directory, &state_path, &["eval", "show", run_id, "--json"]);
+    assert!(shown.status.success());
+    let shown: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(shown["command"], "eval show");
+    assert_eq!(shown["result"]["id"], run_id);
+
+    let human = run(&directory, &state_path, &["eval", "show", run_id]);
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(human.contains("eval show"));
+    assert!(human.contains("passed"));
+
+    let failed = run(
+        &directory,
+        &state_path,
+        &[
+            "eval",
+            "run",
+            malformed["identity"]["id"].as_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(failed.status.success());
+    let failed: serde_json::Value = serde_json::from_slice(&failed.stdout).unwrap();
+    assert_eq!(failed["result"]["outcome"], "failed");
+    assert_eq!(
+        failed["result"]["diagnostics"][0]["code"],
+        "malformed_package"
+    );
+
+    let unavailable = Command::new(env!("CARGO_BIN_EXE_tasc"))
+        .args([
+            "eval",
+            "run",
+            valid["identity"]["id"].as_str().unwrap(),
+            "--waza",
+            "--json",
+        ])
+        .current_dir(&directory)
+        .env("PATH", "")
+        .env("HOME", directory.join("home"))
+        .env("TASC_STATE_PATH", &state_path)
+        .output()
+        .unwrap();
+    assert!(
+        unavailable.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unavailable.stderr)
+    );
+    let unavailable: serde_json::Value = serde_json::from_slice(&unavailable.stdout).unwrap();
+    assert_eq!(unavailable["result"]["outcome"], "inconclusive");
+    assert_eq!(
+        unavailable["result"]["diagnostics"][1]["code"],
+        "optional_dependency_unavailable"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let bin_dir = directory.join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let waza = bin_dir.join("waza");
+        fs::write(&waza, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&waza, fs::Permissions::from_mode(0o700)).unwrap();
+        let not_run = Command::new(env!("CARGO_BIN_EXE_tasc"))
+            .args([
+                "eval",
+                "run",
+                valid["identity"]["id"].as_str().unwrap(),
+                "--waza",
+                "--json",
+            ])
+            .current_dir(&directory)
+            .env("PATH", &bin_dir)
+            .env("HOME", directory.join("home"))
+            .env("TASC_STATE_PATH", &state_path)
+            .output()
+            .unwrap();
+        assert!(not_run.status.success());
+        let not_run: serde_json::Value = serde_json::from_slice(&not_run.stdout).unwrap();
+        assert_eq!(not_run["result"]["outcome"], "not_run");
+        assert_eq!(not_run["result"]["executionOutcome"], "not_run");
+        assert_eq!(
+            not_run["result"]["diagnostics"][1]["code"],
+            "scenario_execution_not_run"
+        );
+    }
+
+    let artifact_dir = state_path.with_extension("evaluations");
+    #[cfg(unix)]
+    assert_eq!(fs::read_dir(&artifact_dir).unwrap().count(), 4);
+    #[cfg(not(unix))]
+    assert_eq!(fs::read_dir(&artifact_dir).unwrap().count(), 3);
+    fs::remove_dir_all(directory).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn discovery_commands_have_stable_envelopes_and_preview_never_installs() {

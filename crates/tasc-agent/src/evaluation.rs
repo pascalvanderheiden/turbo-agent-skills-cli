@@ -1,4 +1,4 @@
-use crate::service::{skill_content_digest, StateRepository};
+use crate::service::{skill_content_digest, DiscoveredSkill, SkillAdapter, StateRepository};
 use std::{
     fs::{self, OpenOptions},
     io::Write,
@@ -69,19 +69,24 @@ impl RunArtifactRepository for FsRunArtifactRepository {
         for entry in entries {
             let entry =
                 entry.map_err(|error| format!("cannot read Evaluation artifact entry: {error}"))?;
-            if entry
-                .path()
+            let entry_path = entry.path();
+            if entry_path
                 .extension()
                 .is_none_or(|extension| extension != "json")
             {
                 continue;
             }
+            let metadata = fs::symlink_metadata(&entry_path)
+                .map_err(|error| format!("cannot inspect Evaluation artifact: {error}"))?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err("Evaluation artifacts must be regular, non-symlink files".to_string());
+            }
             let artifact: RunArtifact = serde_json::from_slice(
-                &fs::read(entry.path())
+                &fs::read(&entry_path)
                     .map_err(|error| format!("cannot read Evaluation artifact: {error}"))?,
             )
             .map_err(|error| format!("invalid Evaluation artifact: {error}"))?;
-            if artifact_path(&self.directory, &artifact.id)? != entry.path() {
+            if artifact_path(&self.directory, &artifact.id)? != entry_path {
                 return Err("Evaluation artifact ID does not match its filename".to_string());
             }
             artifacts.push(artifact);
@@ -96,6 +101,16 @@ impl RunArtifactRepository for FsRunArtifactRepository {
 
     fn get(&self, id: &str) -> Result<RunArtifact, String> {
         let path = artifact_path(&self.directory, id)?;
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                format!("no Evaluation Run Artifact has ID '{id}'")
+            } else {
+                format!("cannot inspect Evaluation artifact: {error}")
+            }
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("Evaluation artifacts must be regular, non-symlink files".to_string());
+        }
         let bytes = fs::read(path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 format!("no Evaluation Run Artifact has ID '{id}'")
@@ -112,14 +127,16 @@ impl RunArtifactRepository for FsRunArtifactRepository {
     }
 }
 
-pub struct EvaluationService<R, A> {
+pub struct EvaluationService<D, R, A> {
+    adapter: D,
     state_repository: R,
     artifact_repository: A,
 }
 
-impl<R: StateRepository, A: RunArtifactRepository> EvaluationService<R, A> {
-    pub fn new(state_repository: R, artifact_repository: A) -> Self {
+impl<D: SkillAdapter, R: StateRepository, A: RunArtifactRepository> EvaluationService<D, R, A> {
+    pub fn new(adapter: D, state_repository: R, artifact_repository: A) -> Self {
         Self {
+            adapter,
             state_repository,
             artifact_repository,
         }
@@ -139,13 +156,10 @@ impl<R: StateRepository, A: RunArtifactRepository> EvaluationService<R, A> {
                 state.version, LOCAL_STATE_VERSION
             )));
         }
-        let selected = resolve_selection(&state, selector, revision)?;
+        let discovered = self.adapter.discover().map_err(state_error)?;
+        let selected = resolve_selection(&state, &discovered, selector, revision)?;
         let mut diagnostics = Vec::new();
-        let package_path = selected
-            .installation
-            .as_ref()
-            .map(|installation| PathBuf::from(&installation.path))
-            .or_else(|| local_package_path(&selected.identity));
+        let package_path = selected.package_path;
         let package = inspect_package(package_path.as_deref());
         diagnostics.extend(package.diagnostics);
         let mut outcome = package.outcome;
@@ -162,6 +176,9 @@ impl<R: StateRepository, A: RunArtifactRepository> EvaluationService<R, A> {
                     outcome = EvaluationOutcome::Inconclusive;
                 }
             } else {
+                if outcome == EvaluationOutcome::Passed {
+                    outcome = EvaluationOutcome::NotRun;
+                }
                 diagnostics.push(EvaluationDiagnostic {
                     code: "scenario_execution_not_run".to_string(),
                     severity: "info".to_string(),
@@ -197,6 +214,8 @@ impl<R: StateRepository, A: RunArtifactRepository> EvaluationService<R, A> {
                 configuration: vec![
                     "required_file=SKILL.md".to_string(),
                     "required_frontmatter=name,description".to_string(),
+                    "skill_name=lowercase-alphanumeric-hyphen-1..64".to_string(),
+                    "description_max_characters=1024".to_string(),
                     "max_skill_file_bytes=1048576".to_string(),
                 ],
             },
@@ -230,10 +249,12 @@ struct Selected {
     source_revision: Option<SourceRevision>,
     target: Option<AdapterTarget>,
     installation: Option<Installation>,
+    package_path: Option<PathBuf>,
 }
 
 fn resolve_selection(
     state: &LocalState,
+    discovered: &[DiscoveredSkill],
     selector: &str,
     revision: Option<&str>,
 ) -> Result<Selected, Diagnostic> {
@@ -258,29 +279,62 @@ fn resolve_selection(
         return selected_installation(state, installation, revision);
     }
 
-    if let Some(identity) = state
+    let identities = state
         .identities
         .iter()
-        .find(|identity| identity.id == selector || identity.name == selector)
-    {
+        .filter(|identity| identity.id == selector || identity.name == selector)
+        .collect::<Vec<_>>();
+    if identities.len() > 1 {
+        return Err(selection_error(
+            "ambiguous_selection",
+            &format!("'{selector}' matches multiple Skill Identities."),
+            identities
+                .iter()
+                .map(|identity| identity.id.clone())
+                .collect(),
+        ));
+    }
+    if let Some(identity) = identities.first() {
         let installations = matching_installations(Some(&identity.id));
         return match installations.as_slice() {
             [installation] => selected_installation(state, installation, revision),
-            [] if revision.is_none() => Ok(Selected {
-                identity: identity.clone(),
-                source_revision: None,
-                target: None,
-                installation: None,
-            }),
-            [] => Err(selection_error(
-                "revision_not_found",
-                &format!(
-                    "No Installation of '{}' records revision '{}'.",
-                    identity.name,
-                    revision.unwrap()
-                ),
-                vec![],
-            )),
+            [] => {
+                let discovered_matches = discovered
+                    .iter()
+                    .filter(|skill| {
+                        skill.identity.id == identity.id
+                            && revision.is_none_or(|revision| {
+                                skill.source_revision.as_deref() == Some(revision)
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                match discovered_matches.as_slice() {
+                    [skill] => Ok(selected_discovered(skill)),
+                    [] if revision.is_none() => Ok(Selected {
+                        identity: (*identity).clone(),
+                        source_revision: None,
+                        target: None,
+                        installation: None,
+                        package_path: local_package_path(identity),
+                    }),
+                    [] => Err(selection_error(
+                        "revision_not_found",
+                        &format!(
+                            "No Installation of '{}' records revision '{}'.",
+                            identity.name,
+                            revision.unwrap()
+                        ),
+                        vec![],
+                    )),
+                    many => Err(selection_error(
+                        "ambiguous_selection",
+                        "The selected Skill Identity has multiple matching Installations.",
+                        many.iter()
+                            .map(|skill| format!("{}@{}", skill.identity.id, skill.target.id))
+                            .collect(),
+                    )),
+                }
+            }
             many => Err(selection_error(
                 "ambiguous_selection",
                 "The selected Skill Identity has multiple matching Installations.",
@@ -289,6 +343,30 @@ fn resolve_selection(
                     .collect(),
             )),
         };
+    }
+
+    let discovered_matches = discovered
+        .iter()
+        .filter(|skill| {
+            (skill.identity.id == selector
+                || skill.identity.name == selector
+                || skill.source_revision.as_deref() == Some(selector))
+                && revision
+                    .is_none_or(|revision| skill.source_revision.as_deref() == Some(revision))
+        })
+        .collect::<Vec<_>>();
+    match discovered_matches.as_slice() {
+        [skill] => return Ok(selected_discovered(skill)),
+        [] => {}
+        many => {
+            return Err(selection_error(
+                "ambiguous_selection",
+                "The selector matches multiple discovered Installations.",
+                many.iter()
+                    .map(|skill| format!("{}@{}", skill.identity.id, skill.target.id))
+                    .collect(),
+            ))
+        }
     }
 
     let installations = matching_installations(None)
@@ -367,7 +445,21 @@ fn selected_installation(
             }),
         target: Some(target),
         installation: Some(installation.clone()),
+        package_path: Some(PathBuf::from(&installation.path)),
     })
+}
+
+fn selected_discovered(skill: &DiscoveredSkill) -> Selected {
+    Selected {
+        identity: skill.identity.clone(),
+        source_revision: skill.source_revision.as_ref().map(|value| SourceRevision {
+            kind: "observed".to_string(),
+            value: value.clone(),
+        }),
+        target: Some(skill.target.clone()),
+        installation: None,
+        package_path: Some(PathBuf::from(&skill.path)),
+    }
 }
 
 struct PackageInspection {
@@ -462,6 +554,18 @@ fn inspect_package(path: Option<&Path>) -> PackageInspection {
     }
     let contents = match fs::read_to_string(&skill_file) {
         Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+            return PackageInspection {
+                outcome: EvaluationOutcome::Failed,
+                digest,
+                diagnostics: vec![diagnostic(
+                    "malformed_package",
+                    "error",
+                    "SKILL.md must contain valid UTF-8 text.",
+                    Some(&skill_file),
+                )],
+            }
+        }
         Err(error) => {
             return inconclusive(
                 "package_unreadable",
@@ -499,33 +603,93 @@ fn validate_frontmatter(contents: &str) -> Result<(), String> {
     if lines.next().is_none_or(|line| line.trim() != "---") {
         return Err("SKILL.md must begin with YAML frontmatter delimited by '---'.".to_string());
     }
-    let mut name = false;
-    let mut description = false;
+    let mut name = None;
+    let mut description = None;
     let mut closed = false;
     for line in lines {
         if line.trim() == "---" {
             closed = true;
             break;
         }
-        if let Some((key, value)) = line.split_once(':') {
-            let value = value.trim().trim_matches(['\'', '"']);
-            match key.trim() {
-                "name" => name = !value.is_empty(),
-                "description" => description = !value.is_empty(),
-                _ => {}
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || line.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let Some((key, raw_value)) = line.split_once(':') else {
+            return Err("SKILL.md frontmatter contains a malformed YAML field.".to_string());
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            return Err("SKILL.md frontmatter contains an empty YAML key.".to_string());
+        }
+        let value = yaml_scalar(raw_value);
+        match key {
+            "name" => {
+                if name.is_some() {
+                    return Err("SKILL.md frontmatter contains duplicate name fields.".to_string());
+                }
+                name = Some(value);
             }
+            "description" => {
+                if description.is_some() {
+                    return Err(
+                        "SKILL.md frontmatter contains duplicate description fields.".to_string(),
+                    );
+                }
+                description = Some(value);
+            }
+            _ => {}
         }
     }
     if !closed {
         return Err("SKILL.md frontmatter is not closed by '---'.".to_string());
     }
-    if !name {
+    let Some(name) = name.filter(|name| !name.is_empty()) else {
         return Err("SKILL.md frontmatter must include a non-empty name.".to_string());
+    };
+    if !valid_skill_name(&name) {
+        return Err(
+            "SKILL.md name must use 1-64 lowercase letters, numbers, and single hyphens."
+                .to_string(),
+        );
     }
-    if !description {
+    let Some(description) = description.filter(|description| !description.is_empty()) else {
         return Err("SKILL.md frontmatter must include a non-empty description.".to_string());
+    };
+    if description.chars().count() > 1024 {
+        return Err("SKILL.md description must be at most 1024 characters.".to_string());
     }
     Ok(())
+}
+
+fn yaml_scalar(value: &str) -> String {
+    let value = value.trim();
+    if value.len() >= 2 {
+        let first = value.as_bytes()[0];
+        let last = value.as_bytes()[value.len() - 1];
+        if (first == b'\'' || first == b'"') && first == last {
+            return value[1..value.len() - 1].trim().to_string();
+        }
+    }
+    value
+        .split_once(" #")
+        .map_or(value, |(value, _)| value)
+        .trim()
+        .to_string()
+}
+
+fn valid_skill_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && (bytes[bytes.len() - 1].is_ascii_lowercase() || bytes[bytes.len() - 1].is_ascii_digit())
+        && bytes
+            .windows(2)
+            .all(|pair| pair[0] != b'-' || pair[1] != b'-')
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
 }
 
 fn local_package_path(identity: &SkillIdentity) -> Option<PathBuf> {
@@ -566,8 +730,20 @@ fn executable_path(name: &str) -> (bool, Option<PathBuf>) {
         .into_iter()
         .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
         .map(|directory| directory.join(name))
-        .find(|path| path.is_file())
+        .find(|path| is_executable(path))
         .map_or((false, None), |path| (true, Some(path)))
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
 }
 
 fn artifact_path(directory: &Path, id: &str) -> Result<PathBuf, String> {
@@ -661,6 +837,14 @@ mod tests {
         }
     }
 
+    struct MemoryAdapter;
+
+    impl SkillAdapter for MemoryAdapter {
+        fn discover(&self) -> Result<Vec<DiscoveredSkill>, String> {
+            Ok(Vec::new())
+        }
+    }
+
     #[derive(Clone, Default)]
     struct MemoryArtifacts(Arc<Mutex<Vec<RunArtifact>>>);
 
@@ -740,6 +924,7 @@ mod tests {
         );
         let artifacts = MemoryArtifacts::default();
         let service = EvaluationService::new(
+            MemoryAdapter,
             MemoryState(state_with_installation(&directory)),
             artifacts.clone(),
         );
@@ -759,6 +944,18 @@ mod tests {
         assert_eq!(result.target.as_ref().unwrap().id, "target:copilot");
         assert!(result.package_digest.is_some());
         assert_eq!(artifacts.list().unwrap(), vec![result]);
+        let by_revision = EvaluationService::new(
+            MemoryAdapter,
+            MemoryState(state_with_installation(&directory)),
+            MemoryArtifacts::default(),
+        )
+        .run("commit-123", Some("commit-123"), false)
+        .unwrap();
+        assert_eq!(
+            by_revision.source_revision.as_ref().unwrap().value,
+            "commit-123"
+        );
+        assert_eq!(by_revision.target.as_ref().unwrap().id, "target:copilot");
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -767,6 +964,7 @@ mod tests {
         let directory = temp_dir();
         write_skill(&directory, "---\nname: demo\n---\nMissing description.\n");
         let service = EvaluationService::new(
+            MemoryAdapter,
             MemoryState(state_with_installation(&directory)),
             MemoryArtifacts::default(),
         );
@@ -774,8 +972,20 @@ mod tests {
         assert_eq!(malformed.outcome, EvaluationOutcome::Failed);
         assert_eq!(malformed.diagnostics[0].code, "malformed_package");
 
+        fs::write(directory.join("SKILL.md"), [0xff]).unwrap();
+        let invalid_utf8 = EvaluationService::new(
+            MemoryAdapter,
+            MemoryState(state_with_installation(&directory)),
+            MemoryArtifacts::default(),
+        )
+        .run("installation:demo", None, false)
+        .unwrap();
+        assert_eq!(invalid_utf8.outcome, EvaluationOutcome::Failed);
+        assert_eq!(invalid_utf8.diagnostics[0].code, "malformed_package");
+
         let missing_path = temp_dir();
         let unavailable = EvaluationService::new(
+            MemoryAdapter,
             MemoryState(state_with_installation(&missing_path)),
             MemoryArtifacts::default(),
         )

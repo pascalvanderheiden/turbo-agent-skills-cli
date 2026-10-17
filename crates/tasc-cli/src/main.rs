@@ -2,6 +2,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::IsTerminal;
 use tasc_agent::{
     discovery::DiscoveryService,
+    evaluation::{EvaluationService, FsRunArtifactRepository},
     gh::{Cancellation, GhSkill},
     lifecycle::{LifecycleResult, LifecycleService},
     service::FsStateRepository,
@@ -54,6 +55,34 @@ enum Commands {
     Watch {
         #[command(subcommand)]
         command: WatchCommands,
+    },
+    /// Run and inspect deterministic package smoke Evaluations.
+    Eval {
+        #[command(subcommand)]
+        command: EvalCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum EvalCommands {
+    /// Validate a selected Skill package without model-backed execution.
+    Run {
+        selector: String,
+        #[arg(long)]
+        revision: Option<String>,
+        /// Require the optional Waza dependency; scenario execution remains explicit and separate.
+        #[arg(long)]
+        waza: bool,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
+    /// List immutable Evaluation Run Artifacts.
+    List(JsonOutput),
+    /// Show an immutable Evaluation Run Artifact.
+    Show {
+        id: String,
+        #[command(flatten)]
+        output: JsonOutput,
     },
 }
 
@@ -228,6 +257,10 @@ async fn main() {
                 | WatchCommands::Check { output, .. }
                 | WatchCommands::List(output) => output.json,
             },
+            Commands::Eval { command } => match command {
+                EvalCommands::Run { output, .. } | EvalCommands::Show { output, .. } => output.json,
+                EvalCommands::List(output) => output.json,
+            },
             _ => false,
         };
     let command = match &cli.command {
@@ -255,6 +288,15 @@ async fn main() {
         Commands::Watch {
             command: WatchCommands::Check { .. },
         } => "watch check",
+        Commands::Eval {
+            command: EvalCommands::Run { .. },
+        } => "eval run",
+        Commands::Eval {
+            command: EvalCommands::List(_),
+        } => "eval list",
+        Commands::Eval {
+            command: EvalCommands::Show { .. },
+        } => "eval show",
         Commands::Search(_)
         | Commands::Skill {
             command: SkillCommands::Search(_),
@@ -370,6 +412,15 @@ async fn run(
                 .await?
         ),
         Commands::Watch { command } => run_watch(command, state_path, cancel).await?,
+        Commands::Eval { command } => {
+            return run_local(
+                Commands::Eval { command },
+                state_path,
+                cli.format == OutputFormat::Json,
+                cancel,
+            )
+            .await;
+        }
         command => {
             return run_local(
                 command,
@@ -493,9 +544,46 @@ async fn run_local(
     json: bool,
     cancel: &Cancellation,
 ) -> Result<(), Diagnostic> {
-    let repository = FsStateRepository::new(state_path);
+    let repository = FsStateRepository::new(state_path.clone());
     let service = AgentService::new(CopilotAdapter::local(), repository.clone());
     match command {
+        Commands::Eval { command } => {
+            let service = EvaluationService::new(
+                CopilotAdapter::local(),
+                repository,
+                FsRunArtifactRepository::new(state_path.with_extension("evaluations")),
+            );
+            match command {
+                EvalCommands::Run {
+                    selector,
+                    revision,
+                    waza,
+                    output,
+                } => {
+                    let artifact = service.run(&selector, revision.as_deref(), waza)?;
+                    render_evaluation(
+                        serde_json::to_value(artifact)
+                            .map_err(|error| local_error(error.to_string()))?,
+                        "eval run",
+                        output.json || json,
+                    )
+                }
+                EvalCommands::List(output) => render_evaluation(
+                    serde_json::json!({ "runs": service.list()? }),
+                    "eval list",
+                    output.json || json,
+                ),
+                EvalCommands::Show { id, output } => {
+                    let artifact = service.show(&id)?;
+                    render_evaluation(
+                        serde_json::to_value(artifact)
+                            .map_err(|error| local_error(error.to_string()))?,
+                        "eval show",
+                        output.json || json,
+                    )
+                }
+            }
+        }
         Commands::Skill {
             command: SkillCommands::List(output),
         } => render_inventory(
@@ -698,6 +786,25 @@ async fn run_local(
         }
         _ => unreachable!("discovery commands are dispatched by the shared discovery service"),
     }
+}
+
+fn render_evaluation(
+    result: serde_json::Value,
+    command: &str,
+    json: bool,
+) -> Result<(), Diagnostic> {
+    if json {
+        let envelope = Envelope::new(command, result);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&envelope)
+                .map_err(|error| local_error(format!("cannot render Evaluation: {error}")))?
+        );
+    } else {
+        println!("{command} (schema version 1)");
+        render_fields(&result, 0);
+    }
+    Ok(())
 }
 
 fn confirm_plan(plan: &LifecycleResult, prompt: &str) -> Result<bool, Diagnostic> {
