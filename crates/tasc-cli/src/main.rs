@@ -1,6 +1,7 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::IsTerminal;
 use tasc_agent::{
+    authoring::{FsSkillDraftRepository, SkillAuthoringService, SkillDraftInput},
     consistency::{ConsistencyService, FsConsistencyArtifactRepository},
     discovery::DiscoveryService,
     evaluation::{EvaluationService, FsRunArtifactRepository},
@@ -189,6 +190,56 @@ enum InsightStatusArg {
 
 #[derive(Subcommand)]
 enum SkillCommands {
+    /// Create a guided Skill Draft in an explicitly selected Skill Workspace.
+    Create {
+        #[arg(long, value_name = "PATH")]
+        workspace: std::path::PathBuf,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        purpose: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        triggers: Option<String>,
+        #[arg(long)]
+        non_goals: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
+    /// Deterministically validate a Skill Draft in its selected Workspace.
+    Validate {
+        id: String,
+        #[arg(long, value_name = "PATH")]
+        workspace: std::path::PathBuf,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
+    /// List durable Skill Drafts, optionally scoped to a Workspace.
+    Drafts {
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<std::path::PathBuf>,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
+    /// Propose or apply the bounded missing-description Workspace repair.
+    Remediate {
+        id: String,
+        #[arg(long, value_name = "PATH")]
+        workspace: std::path::PathBuf,
+        #[arg(long)]
+        description: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
     /// Search public GitHub skills with deterministic ranking.
     Search(SearchArgs),
     /// Preview upstream files without installing or executing them.
@@ -348,7 +399,11 @@ async fn main() {
             } => output.json,
             Commands::Skill {
                 command:
-                    SkillCommands::Install { output, .. }
+                    SkillCommands::Create { output, .. }
+                    | SkillCommands::Validate { output, .. }
+                    | SkillCommands::Drafts { output, .. }
+                    | SkillCommands::Remediate { output, .. }
+                    | SkillCommands::Install { output, .. }
                     | SkillCommands::Update { output, .. }
                     | SkillCommands::Remove { output, .. },
             } => output.json,
@@ -449,6 +504,18 @@ async fn main() {
         Commands::Skill {
             command: SkillCommands::Preview { .. },
         } => "skill preview",
+        Commands::Skill {
+            command: SkillCommands::Create { .. },
+        } => "skill create",
+        Commands::Skill {
+            command: SkillCommands::Validate { .. },
+        } => "skill validate",
+        Commands::Skill {
+            command: SkillCommands::Drafts { .. },
+        } => "skill drafts",
+        Commands::Skill {
+            command: SkillCommands::Remediate { .. },
+        } => "skill remediate",
         Commands::Skill {
             command: SkillCommands::Install { .. },
         } => "skill install",
@@ -903,6 +970,179 @@ async fn run_local(
             }
         }
         Commands::Skill {
+            command:
+                SkillCommands::Create {
+                    workspace,
+                    name,
+                    purpose,
+                    description,
+                    triggers,
+                    non_goals,
+                    dry_run,
+                    yes,
+                    output,
+                },
+        } => {
+            let missing = [
+                ("name", name.as_deref()),
+                ("purpose", purpose.as_deref()),
+                ("description", description.as_deref()),
+                ("triggers", triggers.as_deref()),
+                ("non-goals", non_goals.as_deref()),
+            ]
+            .into_iter()
+            .filter_map(|(field, value)| {
+                value
+                    .is_none_or(|value| value.trim().is_empty())
+                    .then_some(field)
+            })
+            .collect::<Vec<_>>();
+            if !missing.is_empty() && dry_run && !std::io::stdin().is_terminal() {
+                return render_local_artifact(
+                    serde_json::json!({
+                        "created": false,
+                        "workspace": workspace,
+                        "questions": missing.iter().map(|field| authoring_question(field)).collect::<Vec<_>>(),
+                    }),
+                    "skill create",
+                    output.json || json,
+                );
+            }
+            let input = SkillDraftInput {
+                workspace,
+                name: prompt_value(name, "Skill name (lowercase slug)")?,
+                purpose: prompt_value(purpose, "What should the skill help accomplish?")?,
+                description: prompt_value(description, "Describe the skill in one sentence")?,
+                triggers: prompt_value(triggers, "When should the skill activate?")?,
+                non_goals: prompt_value(non_goals, "What should the skill not do?")?,
+            };
+            let service = SkillAuthoringService::new(
+                CopilotAdapter::local(),
+                repository,
+                FsSkillDraftRepository::new(state_path.with_extension("drafts")),
+            );
+            let plan = service.plan(&input).map_err(local_error)?;
+            if dry_run {
+                return render_local_artifact(
+                    serde_json::json!({ "created": false, "plan": plan }),
+                    "skill create",
+                    output.json || json,
+                );
+            }
+            if !yes {
+                confirm_action(
+                    &format!(
+                        "Create an incomplete Skill Draft at {}:\n{}",
+                        plan.skill_path, plan.preview
+                    ),
+                    "Write this Skill Draft to the selected Workspace?",
+                )?;
+            }
+            let draft = service.create(&input, true).map_err(local_error)?;
+            let follow_up_actions = if draft.status == tasc_core::authoring::SkillDraftStatus::Ready {
+                vec![
+                    format!("tasc skill install {}", draft.skill_path),
+                    format!("tasc skill share {}", draft.skill_path),
+                    format!("tasc eval run {}", draft.skill_path),
+                ]
+            } else {
+                Vec::new()
+            };
+            render_local_artifact(
+                serde_json::json!({
+                    "draft": draft,
+                    "followUpActions": follow_up_actions,
+                    "actionsExecuted": [],
+                }),
+                "skill create",
+                output.json || json,
+            )
+        }
+        Commands::Skill {
+            command: SkillCommands::Validate { id, workspace, output },
+        } => {
+            let service = SkillAuthoringService::new(
+                CopilotAdapter::local(),
+                repository,
+                FsSkillDraftRepository::new(state_path.with_extension("drafts")),
+            );
+            let draft = service.validate(&id, &workspace).map_err(local_error)?;
+            render_local_artifact(
+                serde_json::json!({ "draft": draft }),
+                "skill validate",
+                output.json || json,
+            )
+        }
+        Commands::Skill {
+            command: SkillCommands::Drafts { workspace, output },
+        } => {
+            let service = SkillAuthoringService::new(
+                CopilotAdapter::local(),
+                repository,
+                FsSkillDraftRepository::new(state_path.with_extension("drafts")),
+            );
+            let drafts = service.list(workspace.as_deref()).map_err(local_error)?;
+            render_local_artifact(
+                serde_json::json!({ "drafts": drafts }),
+                "skill drafts",
+                output.json || json,
+            )
+        }
+        Commands::Skill {
+            command:
+                SkillCommands::Remediate {
+                    id,
+                    workspace,
+                    description,
+                    dry_run,
+                    yes,
+                    output,
+                },
+        } => {
+            let service = SkillAuthoringService::new(
+                CopilotAdapter::local(),
+                repository,
+                FsSkillDraftRepository::new(state_path.with_extension("drafts")),
+            );
+            if dry_run {
+                let draft = service
+                    .list(Some(&workspace))
+                    .map_err(local_error)?
+                    .into_iter()
+                    .find(|draft| draft.id == id)
+                    .ok_or_else(|| local_error(format!("no Skill Draft '{id}' in this Workspace")))?;
+                let backup = workspace.join(".tasc-recovery").join(format!("{id}.SKILL.md.before"));
+                return render_local_artifact(
+                    serde_json::json!({
+                        "approved": false,
+                        "draftId": id,
+                        "file": draft.skill_path,
+                        "patch": { "addDescription": description },
+                        "recoveryCopy": backup,
+                        "verification": "deterministic package validation; restore original SKILL.md if validation fails",
+                    }),
+                    "skill remediate",
+                    output.json || json,
+                );
+            }
+            if !yes {
+                confirm_action(
+                    &format!(
+                        "Add only the missing description field to draft {id}; retain a recovery copy and validate the result."
+                    ),
+                    "Apply this Workspace remediation?",
+                )?;
+            }
+            let draft = service
+                .remediate_missing_description(&id, &workspace, &description, true)
+                .map_err(local_error)?;
+            render_local_artifact(
+                serde_json::json!({ "draft": draft }),
+                "skill remediate",
+                output.json || json,
+            )
+        }
+        Commands::Skill {
             command: SkillCommands::List(output),
         } => render_inventory(
             &service.inventory().map_err(local_error)?,
@@ -1149,6 +1389,79 @@ fn confirm_plan(plan: &LifecycleResult, prompt: &str) -> Result<bool, Diagnostic
         return Ok(false);
     }
     eprintln!("Plan: {}", safe_text(&plan.plan));
+    eprint!("{prompt} [y/N] ");
+    std::io::Write::flush(&mut std::io::stderr())
+        .map_err(|error| local_error(format!("cannot write confirmation prompt: {error}")))?;
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|error| local_error(format!("cannot read confirmation: {error}")))?;
+    if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        Ok(true)
+    } else {
+        Err(Diagnostic::new(
+            "cancelled",
+            "cancelled",
+            "tasc",
+            "Operation cancelled.",
+            "Retry when ready.",
+        ))
+    }
+}
+
+fn authoring_question(field: &str) -> &'static str {
+    match field {
+        "name" => "What concise lowercase skill name should identify this capability?",
+        "purpose" => "What user goal should this skill accomplish?",
+        "description" => "How should an assistant recognize what this skill does?",
+        "triggers" => "When should this skill activate, and what requests should trigger it?",
+        _ => "What should this skill explicitly not do?",
+    }
+}
+
+fn prompt_value(value: Option<String>, prompt: &str) -> Result<String, Diagnostic> {
+    if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+        return Ok(value);
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err(Diagnostic::new(
+            "unresolved_product_question",
+            "usage",
+            "skill authoring",
+            &format!("An answer is needed: {prompt}"),
+            "Provide the corresponding authoring option, or run interactively to answer the question.",
+        ));
+    }
+    eprint!("{prompt}: ");
+    std::io::Write::flush(&mut std::io::stderr())
+        .map_err(|error| local_error(format!("cannot write authoring prompt: {error}")))?;
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|error| local_error(format!("cannot read authoring answer: {error}")))?;
+    if answer.trim().is_empty() {
+        return Err(Diagnostic::new(
+            "unresolved_product_question",
+            "usage",
+            "skill authoring",
+            &format!("An answer is needed: {prompt}"),
+            "Answer the product question before creating the Skill Draft.",
+        ));
+    }
+    Ok(answer.trim().to_string())
+}
+
+fn confirm_action(plan: &str, prompt: &str) -> Result<bool, Diagnostic> {
+    if !std::io::stdin().is_terminal() {
+        return Err(Diagnostic::new(
+            "confirmation_required",
+            "usage",
+            "skill authoring",
+            "This Workspace mutation requires explicit approval.",
+            "Review the plan and retry with --yes, or run interactively to approve it.",
+        ));
+    }
+    eprintln!("Plan: {}", safe_text(plan));
     eprint!("{prompt} [y/N] ");
     std::io::Write::flush(&mut std::io::stderr())
         .map_err(|error| local_error(format!("cannot write confirmation prompt: {error}")))?;

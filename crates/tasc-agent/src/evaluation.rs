@@ -598,6 +598,11 @@ fn inspect_package(path: Option<&Path>) -> PackageInspection {
     }
 }
 
+pub fn validate_skill_package(path: &Path) -> (EvaluationOutcome, Vec<EvaluationDiagnostic>) {
+    let inspection = inspect_package(Some(path));
+    (inspection.outcome, inspection.diagnostics)
+}
+
 fn validate_frontmatter(contents: &str) -> Result<(), String> {
     let mut lines = contents.lines();
     if lines.next().is_none_or(|line| line.trim() != "---") {

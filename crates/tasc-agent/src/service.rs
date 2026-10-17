@@ -342,6 +342,9 @@ fn collect_skill_directories(root: &Path, skills: &mut Vec<PathBuf>) -> Result<(
         if !file_type.is_dir() {
             continue;
         }
+        if path.join(".tasc-draft.json").exists() {
+            continue;
+        }
         if path.join("SKILL.md").is_file() {
             skills.push(path);
         } else {

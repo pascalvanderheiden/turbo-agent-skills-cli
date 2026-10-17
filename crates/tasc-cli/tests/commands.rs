@@ -1190,3 +1190,219 @@ fn watch_commands_record_deterministic_revisions_without_touching_installations(
     assert_eq!(fs::read_dir(artifacts).unwrap().count(), 5);
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn skill_authoring_requires_workspace_and_approval_and_preserves_remediable_drafts() {
+    let directory = test_dir();
+    let workspace = directory.join(".github/skills");
+    let state_path = directory.join("state/state.json");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(
+        directory.join("CONTEXT.md"),
+        "# Repository Context\n\n## Local constraints\n",
+    )
+    .unwrap();
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+    let invoke = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_tasc"))
+            .args(args)
+            .current_dir(&directory)
+            .env("HOME", directory.join("home"))
+            .env("TASC_STATE_PATH", &state_path)
+            .output()
+            .unwrap()
+    };
+
+    let questions = invoke(&[
+        "skill",
+        "create",
+        "--workspace",
+        &workspace_arg,
+        "--dry-run",
+        "--json",
+    ]);
+    assert!(questions.status.success());
+    let questions: serde_json::Value = serde_json::from_slice(&questions.stdout).unwrap();
+    assert_eq!(questions["result"]["created"], false);
+    assert_eq!(questions["result"]["questions"].as_array().unwrap().len(), 5);
+    assert!(!workspace.join("review-helper").exists());
+
+    let args = [
+        "skill",
+        "create",
+        "--workspace",
+        &workspace_arg,
+        "--name",
+        "review-helper",
+        "--purpose",
+        "Review Rust changes",
+        "--description",
+        "Review Rust changes for correctness.",
+        "--triggers",
+        "When a user requests a Rust code review.",
+        "--non-goals",
+        "Do not run remote deployment commands.",
+        "--json",
+    ];
+    let unapproved = invoke(&args);
+    assert_eq!(unapproved.status.code(), Some(2));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&unapproved.stderr).unwrap()["diagnostic"]
+            ["code"],
+        "confirmation_required"
+    );
+    assert!(!workspace.join("review-helper").exists());
+
+    let mut approved_args = args.to_vec();
+    approved_args.insert(approved_args.len() - 1, "--yes");
+    let created = invoke(&approved_args);
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let created: serde_json::Value = serde_json::from_slice(&created.stdout).unwrap();
+    assert_eq!(created["command"], "skill create");
+    assert_eq!(created["result"]["draft"]["status"], "ready");
+    assert_eq!(created["result"]["draft"]["localContext"]["headings"][0], "Repository Context");
+    assert_eq!(created["result"]["actionsExecuted"], serde_json::json!([]));
+    assert_eq!(
+        created["result"]["followUpActions"].as_array().unwrap().len(),
+        3
+    );
+    let draft_id = created["result"]["draft"]["id"].as_str().unwrap();
+    let skill_dir = workspace.join("review-helper");
+    let skill_file = skill_dir.join("SKILL.md");
+    assert!(!skill_dir.join(".tasc-draft.json").exists());
+    let original_invalid = "---\nname: review-helper\n---\nMissing description.\n";
+    fs::write(&skill_file, original_invalid).unwrap();
+
+    let validate = invoke(&[
+        "skill",
+        "validate",
+        draft_id,
+        "--workspace",
+        &workspace_arg,
+        "--json",
+    ]);
+    assert!(validate.status.success());
+    let validate: serde_json::Value = serde_json::from_slice(&validate.stdout).unwrap();
+    assert_eq!(validate["result"]["draft"]["status"], "incomplete");
+    assert_eq!(
+        validate["result"]["draft"]["diagnostics"][0]["code"],
+        "malformed_package"
+    );
+    assert!(skill_dir.join(".tasc-draft.json").exists());
+
+    let inventory = invoke(&["skill", "list", "--json"]);
+    assert!(inventory.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&inventory.stdout).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+
+    let description = "Review Rust changes for correctness.";
+    let remediate_dry_run = invoke(&[
+        "skill",
+        "remediate",
+        draft_id,
+        "--workspace",
+        &workspace_arg,
+        "--description",
+        description,
+        "--dry-run",
+        "--json",
+    ]);
+    assert!(remediate_dry_run.status.success());
+    assert_eq!(fs::read_to_string(&skill_file).unwrap(), original_invalid);
+    let mut remediate_args = vec![
+        "skill",
+        "remediate",
+        draft_id,
+        "--workspace",
+        &workspace_arg,
+        "--description",
+        description,
+        "--yes",
+        "--json",
+    ];
+    let remediated = invoke(&remediate_args);
+    assert!(
+        remediated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&remediated.stderr)
+    );
+    let remediated: serde_json::Value = serde_json::from_slice(&remediated.stdout).unwrap();
+    assert_eq!(remediated["result"]["draft"]["status"], "ready");
+    assert!(remediated["result"]["draft"]["recoveryPath"].is_string());
+    assert!(fs::read_to_string(&skill_file)
+        .unwrap()
+        .contains(&format!("description: \"{description}\"")));
+    assert_eq!(
+        fs::read_to_string(
+            remediated["result"]["draft"]["recoveryPath"]
+                .as_str()
+                .unwrap()
+        )
+        .unwrap(),
+        original_invalid
+    );
+    assert!(!skill_dir.join(".tasc-draft.json").exists());
+    assert!(remediate_args.pop().is_some());
+
+    let drafts = invoke(&[
+        "skill",
+        "drafts",
+        "--workspace",
+        &workspace_arg,
+        "--json",
+    ]);
+    let drafts: serde_json::Value = serde_json::from_slice(&drafts.stdout).unwrap();
+    assert_eq!(drafts["result"]["drafts"][0]["status"], "ready");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn skill_authoring_refuses_to_write_beneath_a_discovered_installation() {
+    let directory = test_dir();
+    let installation = directory.join(".github/skills/installed");
+    let state_path = directory.join("state/state.json");
+    fs::create_dir_all(&installation).unwrap();
+    fs::write(
+        installation.join("SKILL.md"),
+        "---\nname: installed\ndescription: existing installed skill\n---\n",
+    )
+    .unwrap();
+    let workspace_arg = installation.to_string_lossy().into_owned();
+    let output = Command::new(env!("CARGO_BIN_EXE_tasc"))
+        .args([
+            "skill",
+            "create",
+            "--workspace",
+            &workspace_arg,
+            "--name",
+            "new-draft",
+            "--purpose",
+            "Test installed-copy protection",
+            "--description",
+            "A test skill description.",
+            "--triggers",
+            "When explicitly requested.",
+            "--non-goals",
+            "Do not alter the installed copy.",
+            "--yes",
+            "--json",
+        ])
+        .current_dir(&directory)
+        .env("HOME", directory.join("home"))
+        .env("TASC_STATE_PATH", &state_path)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("overlaps a discovered installed skill"));
+    assert!(!installation.join("new-draft").exists());
+    fs::remove_dir_all(directory).unwrap();
+}
