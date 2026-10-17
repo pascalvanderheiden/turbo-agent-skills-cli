@@ -1,44 +1,42 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>TASC | Agent Skills Lifecycle</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Task-oriented documentation for Turbo Agent Skills CLI.">
+    <title>TASC documentation</title>
     <style>
-      body { font-family: Inter, system-ui, sans-serif; margin: 0; background: #0b1020; color: #e8edf7; }
-      .wrap { max-width: 960px; margin: 0 auto; padding: 4rem 1.5rem 5rem; }
-      h1 { font-size: clamp(2.5rem, 5vw, 4rem); margin-bottom: 1rem; }
-      p { color: #c2cee8; line-height: 1.6; }
-      .card { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 18px; padding: 1.5rem; margin-top: 2rem; }
-      ul { padding-left: 1.2rem; }
-      a { color: #8ec5ff; }
+      :root { color-scheme: light; font: 100%/1.6 system-ui, sans-serif; color: #182230; background: #f7f9fc; }
+      body { max-width: 58rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+      a { color: #0755a5; }
+      .skip-link { position: absolute; left: -10000px; }
+      .skip-link:focus { left: 1rem; top: 1rem; background: white; padding: .5rem; }
+      main { padding: 1rem 0; }
+      .version { display: inline-block; padding: .15rem .6rem; border: 1px solid #526172; border-radius: 1rem; }
     </style>
   </head>
   <body>
-    <div class="wrap">
-      <h1>TASC</h1>
-      <p>Turbo Agent Skills CLI helps you manage, evaluate, watch, and improve your reusable coding-assistant skills.</p>
-
-      <div class="card">
-        <h2>What TASC does</h2>
-        <ul>
-          <li>Install and track agent skills across the local coding-assistant environment</li>
-          <li>Watch trusted skill sources for updates</li>
-          <li>Evaluate skills with repeatable scenarios</li>
-          <li>Run cross-skill consistency checks</li>
-          <li>Turn findings into actionable insights</li>
-        </ul>
-      </div>
-
-      <div class="card">
-        <h2>Built on the right foundations</h2>
-        <p>TASC intentionally reuses <a href="https://cli.github.com/manual/gh_skill">GitHub CLI</a> for lifecycle operations and the <a href="https://github.com/github/copilot-sdk">GitHub Copilot SDK</a> for the agent surface. Evaluation is grounded in <a href="https://github.com/microsoft/waza">Waza</a> patterns, while consistency checks borrow Kratos-style conflict analysis without a hard dependency.</p>
-      </div>
-
-      <div class="card">
-        <h2>Local-first trust</h2>
-        <p>Skills, evaluation traces, and consistency findings stay local by default unless the user explicitly requests a broader export or sharing flow.</p>
-      </div>
-    </div>
+    <a class="skip-link" href="#main">Skip to main content</a>
+    <header>
+      <p><a href="https://github.com/pascalvanderheiden/turbo-agent-skills-cli">TASC on GitHub</a></p>
+    </header>
+    <nav aria-label="Project links">
+      <ul>
+        <li><a href="v0.1.0/index.html">Version 0.1.0 task guides</a></li>
+        <li><a href="https://github.com/pascalvanderheiden/turbo-agent-skills-cli/releases">Releases</a></li>
+      </ul>
+    </nav>
+    <main id="main">
+      <h1>TASC documentation</h1>
+      <p>Find a task guide for installing, safely managing, evaluating, and understanding local Agent Skills with Turbo Agent Skills CLI.</p>
+      <p>Documentation version: <span class="version">0.1.0</span></p>
+      <p><a href="v0.1.0/index.html">Read the TASC 0.1.0 task guides</a></p>
+      <h2>Project resources</h2>
+      <ul>
+        <li><a href="https://github.com/pascalvanderheiden/turbo-agent-skills-cli">Source code and issue tracker</a></li>
+        <li><a href="https://github.com/pascalvanderheiden/turbo-agent-skills-cli/releases">Release downloads and notes</a></li>
+        <li><a href="https://github.com/pascalvanderheiden/turbo-agent-skills-cli/blob/main/README.md">Full CLI overview</a></li>
+      </ul>
+    </main>
   </body>
 </html>
