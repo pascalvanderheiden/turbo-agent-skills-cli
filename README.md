@@ -1,6 +1,6 @@
 # TASC
 
-TASC (Turbo Agent Skills CLI) helps you install, share, manage, watch-list, update, discover, search, evaluate, and check consistency across coding-assistant skills.
+TASC (Turbo Agent Skills CLI) helps you install, share, manage, watch-list, update, discover, search, evaluate, check consistency, and analyze security risks across coding-assistant skills.
 
 It is designed around a local-first Rust core that the CLI and Copilot SDK agent share, while delegating lifecycle tasks that GitHub already handles to `gh skill`.
 
@@ -9,6 +9,7 @@ It is designed around a local-first Rust core that the CLI and Copilot SDK agent
 - Manage local agent-skill inventory and watchlists
 - Evaluate skills against repeatable scenarios
 - Detect consistency issues across installed skills
+- Detect exposed secrets and risky skill content with local static Security Checks
 - Produce explainable insights without mutating skills silently
 - Ship a Rust CLI and a GitHub Copilot agent from the same typed core
 
@@ -58,6 +59,15 @@ tasc consistency check --all-installed
 tasc consistency list
 tasc consistency show <check-id>
 # Compare an explicit set of skills or opt in to all discovered skills
+
+tasc security check <skill-id> --json
+tasc security check /path/to/skill-workspace --fail-on high
+tasc security check --all-installed
+tasc security list
+tasc security show <check-id>
+tasc security suppress <finding-fingerprint> --reason "Reviewed" --expires-in-days 30
+tasc security unsuppress <finding-fingerprint> --reason "Reconsidered"
+# Analyze local content only, with narrow auditable suppressions and optional policy exits
 
 tasc source add github/awesome-copilot --dry-run
 tasc source add github/awesome-copilot --yes
@@ -178,6 +188,25 @@ Findings identify deterministic evidence, confidence, severity, and revision
 status. Inferred evidence is explicitly `not_run`; no model or live composition
 probe is invoked. Each run is an immutable artifact in a sibling
 `<state-stem>.consistency-checks` directory, separate from Local State.
+
+`security check` requires one or more explicit Skill Identity, Installation, or
+Skill Workspace selectors, or the opt-in `--all-installed` flag. The static
+analyzers check local content for exposed secrets, unsafe permissions and
+instructions, injection or exfiltration patterns, risky executable content,
+supply-chain indicators, and suspicious references. Evidence excerpts redact
+credential-shaped values; severity and confidence remain independent. A
+revision-pinned immutable artifact records the content digest, findings,
+diagnostics, and any partial-analysis status in `<state-stem>.security-checks`.
+No skill content is executed and external references are never fetched. Dynamic
+execution and external reputation checks are explicitly recorded as not run.
+`--fail-on <severity>` is opt-in and blocks only deterministic findings with at
+least 90 confidence and the selected severity or higher.
+
+`security suppress` targets one exact finding fingerprint, requires a reason,
+and expires after 1–365 days; `security unsuppress` ends the active suppression
+with an audit reason. Suppressions do not rewrite Security Check Artifacts or
+remove findings. Security recommendations are informational and never modify a
+Skill Workspace.
 
 `insight generate` turns observed Installation lifecycle states, the latest
 Evaluation per Skill Identity, and the latest Consistency findings into ranked,

@@ -4,6 +4,7 @@ pub mod consistency;
 pub mod discovery;
 pub mod evaluation;
 pub mod insights;
+pub mod security;
 
 pub const LOCAL_STATE_VERSION: u32 = 1;
 

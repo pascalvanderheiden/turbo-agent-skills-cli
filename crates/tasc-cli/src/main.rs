@@ -7,12 +7,14 @@ use tasc_agent::{
     gh::{Cancellation, GhSkill},
     insights::{FsInsightArtifactRepository, FsInsightLifecycleRepository, InsightService},
     lifecycle::{LifecycleResult, LifecycleService},
+    security::{FsSecurityArtifactRepository, FsSecuritySuppressionRepository, SecurityService},
     service::FsStateRepository,
     AgentService, CopilotAdapter, FsWatchCheckRepository, WatchService,
 };
 use tasc_core::{
     discovery::{Diagnostic, Envelope},
     insights::InsightStatus,
+    security::SecuritySeverity,
     Inventory, SkillIdentity, StateStatus,
 };
 
@@ -69,6 +71,11 @@ enum Commands {
         #[command(subcommand)]
         command: ConsistencyCommands,
     },
+    /// Analyze selected local skill content for static security risks.
+    Security {
+        #[command(subcommand)]
+        command: SecurityCommands,
+    },
     /// Rank local lifecycle, Evaluation, and Consistency evidence.
     Insight {
         #[command(subcommand)]
@@ -119,6 +126,70 @@ enum ConsistencyCommands {
         #[command(flatten)]
         output: JsonOutput,
     },
+}
+
+#[derive(Subcommand)]
+enum SecurityCommands {
+    /// Analyze explicitly selected Skills, Installations, or Skill Workspace paths.
+    Check {
+        #[arg(value_name = "SKILL")]
+        selectors: Vec<String>,
+        /// Explicitly analyze every skill discovered in installed Copilot targets.
+        #[arg(long, conflicts_with = "selectors")]
+        all_installed: bool,
+        /// Return a finding exit code for deterministic findings at this severity or higher.
+        #[arg(long, value_enum)]
+        fail_on: Option<SecuritySeverityArg>,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
+    /// List immutable Security Check Artifacts.
+    List(JsonOutput),
+    /// Show an immutable Security Check Artifact.
+    Show {
+        id: String,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
+    /// Suppress exactly one finding fingerprint for a bounded period.
+    Suppress {
+        fingerprint: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long, default_value_t = 30)]
+        expires_in_days: u64,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
+    /// End an active suppression for exactly one finding fingerprint.
+    Unsuppress {
+        fingerprint: String,
+        #[arg(long)]
+        reason: String,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum SecuritySeverityArg {
+    Info,
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+impl From<SecuritySeverityArg> for SecuritySeverity {
+    fn from(severity: SecuritySeverityArg) -> Self {
+        match severity {
+            SecuritySeverityArg::Info => Self::Info,
+            SecuritySeverityArg::Low => Self::Low,
+            SecuritySeverityArg::Medium => Self::Medium,
+            SecuritySeverityArg::High => Self::High,
+            SecuritySeverityArg::Critical => Self::Critical,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -367,6 +438,13 @@ async fn main() {
                 | ConsistencyCommands::Show { output, .. } => output.json,
                 ConsistencyCommands::List(output) => output.json,
             },
+            Commands::Security { command } => match command {
+                SecurityCommands::Check { output, .. }
+                | SecurityCommands::Show { output, .. }
+                | SecurityCommands::Suppress { output, .. }
+                | SecurityCommands::Unsuppress { output, .. } => output.json,
+                SecurityCommands::List(output) => output.json,
+            },
             Commands::Insight { command } => match command {
                 InsightCommands::Generate(output)
                 | InsightCommands::Show { output, .. }
@@ -421,6 +499,21 @@ async fn main() {
         Commands::Consistency {
             command: ConsistencyCommands::Show { .. },
         } => "consistency show",
+        Commands::Security {
+            command: SecurityCommands::Check { .. },
+        } => "security check",
+        Commands::Security {
+            command: SecurityCommands::List(_),
+        } => "security list",
+        Commands::Security {
+            command: SecurityCommands::Show { .. },
+        } => "security show",
+        Commands::Security {
+            command: SecurityCommands::Suppress { .. },
+        } => "security suppress",
+        Commands::Security {
+            command: SecurityCommands::Unsuppress { .. },
+        } => "security unsuppress",
         Commands::Insight {
             command: InsightCommands::Generate(_),
         } => "insight generate",
@@ -900,6 +993,92 @@ async fn run_local(
                         output.json || json,
                     )
                 }
+            }
+        }
+        Commands::Security { command } => {
+            let service = SecurityService::new(
+                CopilotAdapter::local(),
+                repository,
+                FsSecurityArtifactRepository::new(state_path.with_extension("security-checks")),
+                FsSecuritySuppressionRepository::new(
+                    state_path.with_extension("security-suppressions"),
+                ),
+            );
+            match command {
+                SecurityCommands::Check {
+                    selectors,
+                    all_installed,
+                    fail_on,
+                    output,
+                } => {
+                    let fail_on = fail_on.map(SecuritySeverity::from);
+                    let artifact = service.check(&selectors, all_installed, fail_on)?;
+                    let blocked = artifact.policy.fail_on.is_some_and(|threshold| {
+                        artifact.findings.iter().any(|finding| {
+                            finding.deterministic
+                                && finding.confidence_score >= artifact.policy.minimum_confidence
+                                && finding.severity >= threshold
+                                && !artifact
+                                    .suppressed_fingerprints
+                                    .contains(&finding.fingerprint)
+                        })
+                    });
+                    render_local_artifact(
+                        serde_json::to_value(&artifact)
+                            .map_err(|error| local_error(error.to_string()))?,
+                        "security check",
+                        output.json || json,
+                    )?;
+                    if blocked {
+                        return Err(Diagnostic::new(
+                                "security_findings",
+                                "finding",
+                                "security",
+                                "The Security Check found policy-selected high-confidence findings.",
+                                "Review the immutable Security Check Artifact and explicitly address the findings.",
+                            ));
+                    }
+                    Ok(())
+                }
+                SecurityCommands::List(output) => render_local_artifact(
+                    serde_json::json!({ "checks": service.list()? }),
+                    "security list",
+                    output.json || json,
+                ),
+                SecurityCommands::Show { id, output } => {
+                    let artifact = service.show(&id)?;
+                    render_local_artifact(
+                        serde_json::to_value(artifact)
+                            .map_err(|error| local_error(error.to_string()))?,
+                        "security show",
+                        output.json || json,
+                    )
+                }
+                SecurityCommands::Suppress {
+                    fingerprint,
+                    reason,
+                    expires_in_days,
+                    output,
+                } => render_local_artifact(
+                    serde_json::to_value(service.suppress(
+                        &fingerprint,
+                        &reason,
+                        expires_in_days,
+                    )?)
+                    .map_err(|error| local_error(error.to_string()))?,
+                    "security suppress",
+                    output.json || json,
+                ),
+                SecurityCommands::Unsuppress {
+                    fingerprint,
+                    reason,
+                    output,
+                } => render_local_artifact(
+                    serde_json::to_value(service.unsuppress(&fingerprint, &reason)?)
+                        .map_err(|error| local_error(error.to_string()))?,
+                    "security unsuppress",
+                    output.json || json,
+                ),
             }
         }
         Commands::Skill {
