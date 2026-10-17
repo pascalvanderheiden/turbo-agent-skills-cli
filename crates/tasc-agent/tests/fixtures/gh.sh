@@ -9,6 +9,11 @@ case "$1 $2" in
   "version ")
     if [ "$mode" = "bad-version" ]; then printf 'unexpected\n'; else printf 'gh version 2.101.0\n'; fi
     exit 0 ;;
+  "api repos/alpha/skills/commits")
+    if [ "$mode" = "source-missing" ]; then printf 'HTTP 404: Not Found\n' >&2; exit 1; fi
+    if [ "$mode" = "empty-revision" ]; then printf ''; exit 0; fi
+    if [ -f "$0.revision" ]; then /bin/cat "$0.revision"; else printf '0123456789abcdef0123456789abcdef01234567\n'; fi
+    exit 0 ;;
   "skill --help")
     if [ "$mode" = "unavailable" ]; then printf 'unknown command skill\n' >&2; exit 1; fi
     printf 'search preview\n'

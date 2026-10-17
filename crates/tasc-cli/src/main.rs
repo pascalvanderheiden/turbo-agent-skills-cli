@@ -3,7 +3,7 @@ use tasc_agent::{
     discovery::DiscoveryService,
     gh::{Cancellation, GhSkill},
     service::FsStateRepository,
-    AgentService, CopilotAdapter,
+    AgentService, CopilotAdapter, FsWatchCheckRepository, WatchService,
 };
 use tasc_core::{
     discovery::{Diagnostic, Envelope},
@@ -47,6 +47,11 @@ enum Commands {
     State {
         #[command(subcommand)]
         command: StateCommands,
+    },
+    /// Manage watched GitHub sources and skill-relative paths.
+    Watch {
+        #[command(subcommand)]
+        command: WatchCommands,
     },
 }
 
@@ -102,6 +107,40 @@ enum StateCommands {
     Status(JsonOutput),
 }
 
+#[derive(Subcommand)]
+enum WatchCommands {
+    /// Add a GitHub source or source-relative path to the Watchlist.
+    Add {
+        locator: String,
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
+    /// List Watchlist targets and their latest observed revisions.
+    List(JsonOutput),
+    /// Remove a Watchlist ID or an unambiguous source selector.
+    Remove {
+        selector: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
+    /// Compare selected targets (or every target) with their last observed revisions.
+    Check {
+        selector: Option<String>,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
+}
+
 #[derive(Args)]
 struct JsonOutput {
     /// Render versioned JSON instead of human-readable text.
@@ -127,6 +166,12 @@ async fn main() {
             Commands::Skill {
                 command: SkillCommands::Preview { output, .. },
             } => output.json,
+            Commands::Watch { command } => match command {
+                WatchCommands::Add { output, .. }
+                | WatchCommands::Remove { output, .. }
+                | WatchCommands::Check { output, .. }
+                | WatchCommands::List(output) => output.json,
+            },
             _ => false,
         };
     let command = match &cli.command {
@@ -142,6 +187,18 @@ async fn main() {
         Commands::Source {
             command: SourceCommands::Capabilities(_),
         } => "source capabilities",
+        Commands::Watch {
+            command: WatchCommands::Add { .. },
+        } => "watch add",
+        Commands::Watch {
+            command: WatchCommands::List(_),
+        } => "watch list",
+        Commands::Watch {
+            command: WatchCommands::Remove { .. },
+        } => "watch remove",
+        Commands::Watch {
+            command: WatchCommands::Check { .. },
+        } => "watch check",
         Commands::Search(_)
         | Commands::Skill {
             command: SkillCommands::Search(_),
@@ -195,6 +252,9 @@ async fn run(
             | Commands::Source {
                 command: SourceCommands::Capabilities(_)
             }
+            | Commands::Watch {
+                command: WatchCommands::Check { .. }
+            }
     );
     if cli.offline && remote {
         return Err(Diagnostic::new(
@@ -241,6 +301,7 @@ async fn run(
                 .preview(&selector, source.as_deref(), cancel)
                 .await?
         ),
+        Commands::Watch { command } => run_watch(command, state_path, cancel).await?,
         command => {
             return run_local(command, state_path, cli.format == OutputFormat::Json)
                 .map_err(local_error);
@@ -261,6 +322,46 @@ async fn run(
         render_fields(&envelope.result, 0);
     }
     Ok(())
+}
+
+async fn run_watch(
+    command: WatchCommands,
+    state_path: std::path::PathBuf,
+    cancel: &Cancellation,
+) -> Result<serde_json::Value, Diagnostic> {
+    let artifacts = FsWatchCheckRepository::new(state_path.with_extension("watch-checks"));
+    let service = WatchService::new(
+        GhSkill::default(),
+        FsStateRepository::new(state_path),
+        artifacts,
+    );
+    match command {
+        WatchCommands::Add {
+            locator,
+            path,
+            dry_run,
+            yes,
+            ..
+        } => Ok(serde_json::json!({
+            "watchlist": service.add(&locator, path.as_deref(), dry_run, yes)?,
+            "dryRun": dry_run
+        })),
+        WatchCommands::List(_) => Ok(serde_json::json!({
+            "watchlists": service.list()?
+        })),
+        WatchCommands::Remove {
+            selector,
+            dry_run,
+            yes,
+            ..
+        } => Ok(serde_json::json!({
+            "removed": service.remove(&selector, dry_run, yes)?,
+            "dryRun": dry_run
+        })),
+        WatchCommands::Check { selector, .. } => Ok(serde_json::json!({
+            "checks": service.check(selector.as_deref(), cancel).await?
+        })),
+    }
 }
 
 fn safe_text(text: &str) -> String {

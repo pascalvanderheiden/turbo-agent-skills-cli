@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tasc_agent::gh::{Cancellation, GhSkill, GhSkillGateway};
+use tasc_core::discovery::SkillSource;
 
 struct Fixture(PathBuf);
 
@@ -157,5 +158,47 @@ async fn timeout_and_cancellation_bound_execution_and_reap_the_child() {
     assert_eq!(
         gateway.search("review", &cancel).await.unwrap_err().code,
         "cancelled"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn revision_observation_returns_exact_commits_and_explicit_unavailable_states() {
+    let fixture = Fixture::new("supported");
+    let source = SkillSource {
+        id: "source:https://github.com/alpha/skills".into(),
+        locator: "https://github.com/alpha/skills".into(),
+    };
+    let gateway = fixture.gateway();
+    let revision = gateway
+        .revision(
+            &source,
+            Some("skills/review/SKILL.md"),
+            &Cancellation::default(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(revision.kind, "commit");
+    assert_eq!(revision.value, "0123456789abcdef0123456789abcdef01234567");
+    let calls = fs::read_to_string(fixture.0.join("gh.calls")).unwrap();
+    assert!(calls.contains(    "api repos/alpha/skills/commits --method GET --field per_page=1 --field path=skills/review/SKILL.md --jq"));
+
+    let missing = Fixture::new("empty-revision");
+    assert!(missing
+        .gateway()
+        .revision(&source, None, &Cancellation::default())
+        .await
+        .unwrap()
+        .is_none());
+
+    let missing = Fixture::new("source-missing");
+    assert_eq!(
+        missing
+            .gateway()
+            .revision(&source, None, &Cancellation::default())
+            .await
+            .unwrap_err()
+            .code,
+        "gh_not_found"
     );
 }

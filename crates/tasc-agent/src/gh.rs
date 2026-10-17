@@ -9,7 +9,10 @@ use std::{
     },
     time::Duration,
 };
-use tasc_core::discovery::{Capabilities, Diagnostic, SearchHit};
+use tasc_core::{
+    discovery::{Capabilities, Diagnostic, SearchHit, SkillSource},
+    SourceRevision,
+};
 use tokio::{io::AsyncReadExt, process::Command, time};
 
 const OUTPUT_LIMIT: u64 = 1024 * 1024;
@@ -44,6 +47,18 @@ pub trait GhSkillGateway {
         path: &str,
         cancel: &Cancellation,
     ) -> Result<String, Diagnostic>;
+    async fn revision(
+        &self,
+        source: &SkillSource,
+        path: Option<&str>,
+        cancel: &Cancellation,
+    ) -> Result<Option<SourceRevision>, Diagnostic> {
+        let _ = (source, path, cancel);
+        Err(dependency(
+            "gh_unsupported",
+            "GitHub CLI revision observation is unavailable.",
+        ))
+    }
 }
 
 pub struct GhSkill {
@@ -125,6 +140,14 @@ impl GhSkill {
                         )
                     } else if text.contains("http 403") {
                         Diagnostic::new("gh_access_denied", "dependency", "gh", "GitHub denied access to the requested operation.", "Check gh authentication scopes, repository access, and API rate limits.")
+                    } else if text.contains("http 404") || text.contains("404 not found") {
+                        Diagnostic::new(
+                            "gh_not_found",
+                            "operational",
+                            "gh",
+                            "The requested GitHub source or path was not found.",
+                            "Verify the source and skill-relative path.",
+                        )
                     } else if text.contains("unknown command")
                         || text.contains("unknown flag")
                         || text.contains("unknown json field")
@@ -281,6 +304,41 @@ impl GhSkillGateway for GhSkill {
         self.require("preview", cancel).await?;
         self.execute(&["skill", "preview", "--", repository, path], cancel)
             .await
+    }
+
+    async fn revision(
+        &self,
+        source: &SkillSource,
+        path: Option<&str>,
+        cancel: &Cancellation,
+    ) -> Result<Option<SourceRevision>, Diagnostic> {
+        let repository = source.locator.trim_start_matches("https://github.com/");
+        let endpoint = format!("repos/{repository}/commits");
+        let mut args = vec![
+            "api",
+            endpoint.as_str(),
+            "--method",
+            "GET",
+            "--field",
+            "per_page=1",
+        ];
+        let path_field = path.map(|path| format!("path={path}"));
+        if let Some(path_field) = &path_field {
+            args.extend(["--field", path_field.as_str()]);
+        }
+        args.extend(["--jq", ".[0].sha // empty"]);
+        let output = self.execute(&args, cancel).await?;
+        let sha = output.trim();
+        if sha.is_empty() {
+            return Ok(None);
+        }
+        if !matches!(sha.len(), 40 | 64) || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(operational(
+                "gh_malformed_output",
+                "GitHub CLI returned an invalid source revision.",
+            ));
+        }
+        Ok(Some(SourceRevision::commit(sha.to_ascii_lowercase())))
     }
 }
 
