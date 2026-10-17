@@ -38,12 +38,71 @@ tasc state status
 
 tasc state status --json
 # Render status facts as versioned JSON
+
+tasc source add github/awesome-copilot --dry-run
+tasc source add github/awesome-copilot --yes
+# Record normalized source metadata only: no fetch, install, or skill-content edit
+
+tasc source list --json
+tasc source show github/awesome-copilot
+# Inspect recorded source IDs and GitHub locators (works offline)
+
+tasc source capabilities --json
+# Probe installed gh version and search/preview support
+
+tasc skill search review --format json
+# Also available as `tasc search review` or `tasc discover review`
+
+tasc skill preview 'skill:https://github.com/owner/repo/skills/review/SKILL.md'
+tasc skill preview skills/review/SKILL.md --source owner/repo --json
+# Fetch upstream preview text without installing or executing skill files
 ```
 
 `skill list` discovers skills with a `SKILL.md` from `.github/skills` in the
 current directory and `~/.copilot/skills`. Local State is stored at
 `$XDG_STATE_HOME/tasc/state.json` or `~/.local/state/tasc/state.json`; set
 `TASC_STATE_PATH` to use another file.
+
+### GitHub discovery
+
+Search and preview delegate to GitHub CLI's preview-stage `gh skill` commands.
+The tested wire contract is `gh 2.101.0`: search must expose `--json` fields
+`repo,skillName,namespace,description,stars,path` and `--limit`; preview must
+accept a repository and skill path. TASC probes only the capability being used,
+caches successful probes for the process, and never substitutes its own GitHub
+API implementation when a capability is unavailable. Authenticate with
+`gh auth login` or GitHub CLI's environment-based authentication.
+
+Source commands manage TASC metadata, not a second GitHub catalog. `source show`
+inspects that metadata; search discovers available skills and preview inspects
+their contents. Adding a source does not scope subsequent global searches.
+Source add requires `--yes` to write; `--dry-run` returns the normalized record
+without writing. Existing version-1 Local State files remain readable.
+
+Discovery results use a versioned envelope with `schemaVersion`, `command`,
+`result`, and `warnings`. Both `--json` and `--format json` select JSON. Preview
+preserves delegated content in `renderedText` rather than inventing structured
+metadata. Human output escapes terminal control sequences. Diagnostics go to
+stderr (structured with JSON output), with stable code, category, origin,
+message, remediation, and candidate IDs for ambiguous selections.
+
+Search fetches up to 100 results from the first delegated page. Ranking is
+deterministic within those results: exact name, name substring, description
+substring, then other delegated matches; ties use descending repository stars
+and ascending Skill Identity. Each result includes a rank and explanation.
+Duplicate identities are collapsed. Name-based preview requires one exact
+match; ambiguity returns candidate IDs without selecting or previewing any.
+Use a returned Skill Identity or an exact `SKILL.md` path with `--source` for
+automation. Search and preview do not write Local State or installation files.
+
+Each GitHub CLI invocation has a 30-second timeout and a 1-MiB limit per output
+stream, with closed stdin, disabled prompts/pagers, and cancellation on Ctrl-C.
+Missing executables, unsupported capabilities, authentication, command failures,
+invalid output, timeout, and cancellation are distinct diagnostics. Exit codes
+are `2` for usage/configuration, `3` for dependency/authentication, `4` for
+operational failures, and `130` for cancellation. `--offline` rejects remote
+discovery before invoking `gh`; local inventory, source metadata, and state
+commands do not depend on GitHub CLI.
 
 ## Architecture
 
