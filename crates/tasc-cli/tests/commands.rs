@@ -771,6 +771,241 @@ fn lifecycle_plans_protect_modified_content_and_record_recoverable_state() {
     fs::remove_dir_all(directory).unwrap();
 }
 
+#[test]
+fn insight_snapshots_lifecycle_suppressions_and_proposals_are_local_and_proposal_only() {
+    let directory = test_dir();
+    let skill_dir = directory.join(".github/skills/review");
+    let skill_file = skill_dir.join("SKILL.md");
+    let state_path = directory.join("state/state.json");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(
+        &skill_file,
+        "---\nname: Code Review\ndescription: Review code changes.\n---\n",
+    )
+    .unwrap();
+
+    let inventory = run(&directory, &state_path, &["skill", "list", "--json"]);
+    assert!(inventory.status.success());
+    let inventory: serde_json::Value = serde_json::from_slice(&inventory.stdout).unwrap();
+    let skill_id = inventory["items"][0]["identity"]["id"].as_str().unwrap();
+    let target_id = inventory["items"][0]["target"]["id"].as_str().unwrap();
+    let adopted = run(&directory, &state_path, &["skill", "adopt", skill_id]);
+    assert!(adopted.status.success());
+
+    fs::write(
+        &skill_file,
+        "---\nname: Code Review\ndescription: Review code changes carefully.\n---\n",
+    )
+    .unwrap();
+    let skill_bytes_before = fs::read(&skill_file).unwrap();
+    let state_bytes_before = fs::read(&state_path).unwrap();
+
+    let generated = run(&directory, &state_path, &["insight", "generate", "--json"]);
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let generated: serde_json::Value = serde_json::from_slice(&generated.stdout).unwrap();
+    let insight = &generated["result"]["insights"][0];
+    assert_eq!(insight["status"], "new");
+    assert_eq!(insight["snapshot"]["evidence"][0]["source"], "lifecycle");
+    assert_eq!(
+        insight["snapshot"]["evidence"][0]["evidenceId"],
+        format!("installation:{skill_id}@{target_id}")
+    );
+    let snapshot_id = insight["snapshot"]["id"].as_str().unwrap();
+    let insight_id = insight["snapshot"]["insightId"].as_str().unwrap();
+    let evidence_id = insight["snapshot"]["evidence"][0]["evidenceId"]
+        .as_str()
+        .unwrap();
+    let human_show = run(&directory, &state_path, &["insight", "show", snapshot_id]);
+    assert!(human_show.status.success());
+    let human_show = String::from_utf8(human_show.stdout).unwrap();
+    assert!(human_show.contains("insight show (schema version 1)"));
+    assert!(human_show.contains("priorityRank"));
+    assert!(human_show.contains("Installation"));
+
+    let generated_again = run(&directory, &state_path, &["insight", "generate", "--json"]);
+    assert!(generated_again.status.success());
+    let generated_again: serde_json::Value =
+        serde_json::from_slice(&generated_again.stdout).unwrap();
+    assert_eq!(
+        generated_again["result"]["insights"][0]["snapshot"]["id"],
+        snapshot_id
+    );
+    assert_eq!(
+        fs::read_dir(state_path.with_extension("insights"))
+            .unwrap()
+            .count(),
+        1
+    );
+
+    let proposal = run(
+        &directory,
+        &state_path,
+        &["insight", "propose", snapshot_id, "--json"],
+    );
+    assert!(proposal.status.success());
+    let proposal: serde_json::Value = serde_json::from_slice(&proposal.stdout).unwrap();
+    let proposal = &proposal["result"]["proposals"][0];
+    assert_eq!(proposal["risk"], "medium");
+    assert_eq!(proposal["reversibility"], "review_required");
+    assert!(!proposal["prerequisites"].as_array().unwrap().is_empty());
+    assert!(!proposal["expectedVerification"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    let acknowledged = run(
+        &directory,
+        &state_path,
+        &[
+            "insight",
+            "status",
+            insight_id,
+            "acknowledged",
+            "--reason",
+            "Review planned",
+            "--json",
+        ],
+    );
+    assert!(acknowledged.status.success());
+    let listed = run(&directory, &state_path, &["insight", "list", "--json"]);
+    let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["result"]["insights"][0]["status"], "acknowledged");
+
+    let suppressed = run(
+        &directory,
+        &state_path,
+        &[
+            "insight",
+            "suppress",
+            snapshot_id,
+            "--evidence",
+            evidence_id,
+            "--reason",
+            "Known local change",
+            "--expires-in-days",
+            "1",
+            "--json",
+        ],
+    );
+    assert!(suppressed.status.success());
+    let suppressed: serde_json::Value = serde_json::from_slice(&suppressed.stdout).unwrap();
+    assert_eq!(
+        suppressed["result"]["action"]["details"]["reason"],
+        "Known local change"
+    );
+    assert_eq!(
+        suppressed["result"]["action"]["details"]["evidenceVersion"],
+        insight["snapshot"]["evidenceVersion"]
+    );
+    assert_eq!(
+        suppressed["result"]["action"]["details"]["scope"],
+        "evidence"
+    );
+    assert!(
+        suppressed["result"]["action"]["details"]["expiresAtUnixMs"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    let listed = run(&directory, &state_path, &["insight", "list", "--json"]);
+    let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert!(listed["result"]["insights"].as_array().unwrap().is_empty());
+    let listed = run(
+        &directory,
+        &state_path,
+        &["insight", "list", "--all", "--json"],
+    );
+    let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["result"]["insights"][0]["status"], "suppressed");
+
+    let unsuppressed = run(
+        &directory,
+        &state_path,
+        &[
+            "insight",
+            "unsuppress",
+            snapshot_id,
+            "--reason",
+            "Investigation started",
+            "--json",
+        ],
+    );
+    assert!(unsuppressed.status.success());
+    let listed = run(&directory, &state_path, &["insight", "list", "--json"]);
+    let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["result"]["insights"][0]["status"], "acknowledged");
+    let shown = run(
+        &directory,
+        &state_path,
+        &["insight", "show", snapshot_id, "--json"],
+    );
+    assert!(shown.status.success());
+    let shown: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+    let events = shown["result"]["lifecycleEvents"].as_array().unwrap();
+    assert!(events
+        .iter()
+        .any(|event| { event["action"]["details"]["reason"] == "Known local change" }));
+    assert!(events
+        .iter()
+        .any(|event| { event["action"]["details"]["reason"] == "Investigation started" }));
+    assert_eq!(fs::read(&skill_file).unwrap(), skill_bytes_before);
+    assert_eq!(fs::read(&state_path).unwrap(), state_bytes_before);
+
+    let suppressed_again = run(
+        &directory,
+        &state_path,
+        &[
+            "insight",
+            "suppress",
+            snapshot_id,
+            "--reason",
+            "Waiting for refreshed evidence",
+            "--expires-in-days",
+            "1",
+            "--json",
+        ],
+    );
+    assert!(suppressed_again.status.success());
+    fs::write(
+        &skill_file,
+        "---\nname: Code Review\ndescription: Review code changes carefully and thoroughly.\n---\n",
+    )
+    .unwrap();
+    let skill_bytes_after_revision_change = fs::read(&skill_file).unwrap();
+    let refreshed = run(&directory, &state_path, &["insight", "generate", "--json"]);
+    assert!(refreshed.status.success());
+    let refreshed: serde_json::Value = serde_json::from_slice(&refreshed.stdout).unwrap();
+    let refreshed = &refreshed["result"]["insights"];
+    let old_snapshot = refreshed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|view| view["snapshot"]["id"] == snapshot_id)
+        .unwrap();
+    let latest_snapshot = refreshed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|view| view["snapshot"]["insightId"] == insight_id && view["status"] == "new")
+        .unwrap();
+    assert_eq!(old_snapshot["status"], "stale");
+    assert_ne!(
+        latest_snapshot["snapshot"]["evidenceVersion"],
+        insight["snapshot"]["evidenceVersion"]
+    );
+    assert_eq!(
+        fs::read(&skill_file).unwrap(),
+        skill_bytes_after_revision_change
+    );
+    assert_eq!(fs::read(&state_path).unwrap(), state_bytes_before);
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn watch_commands_record_deterministic_revisions_without_touching_installations() {
