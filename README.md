@@ -53,6 +53,25 @@ tasc eval list --json
 tasc eval show <run-id>
 # Validate local package metadata and inspect immutable Evaluation evidence
 
+tasc skill create --workspace ./skill-workspace --name review-helper
+# Answer any remaining authoring questions; no files are written until approval
+
+tasc skill create --workspace ./skill-workspace --name review-helper \
+  --purpose "Review Rust changes" \
+  --description "Review Rust changes for correctness." \
+  --triggers "When a user requests a Rust code review." \
+  --non-goals "Do not run deployment commands." --dry-run
+tasc skill create --workspace ./skill-workspace --name review-helper \
+  --purpose "Review Rust changes" \
+  --description "Review Rust changes for correctness." \
+  --triggers "When a user requests a Rust code review." \
+  --non-goals "Do not run deployment commands." --yes
+tasc skill drafts --workspace ./skill-workspace --json
+tasc skill validate <draft-id> --workspace ./skill-workspace --json
+tasc skill remediate <draft-id> --workspace ./skill-workspace \
+  --description "Review Rust changes for correctness." --dry-run
+# Create, inspect, validate, and propose bounded Workspace-only repairs
+
 tasc consistency check <skill-id-1> <skill-id-2> --json
 tasc consistency check --all-installed
 tasc consistency list
@@ -167,6 +186,27 @@ Waza executable, reporting `inconclusive` when unavailable and `not_run` when
 available because model-backed execution is outside this smoke slice. Run
 artifacts are separate from Local State and can be listed or shown after the
 original package changes or disappears.
+
+`skill create` is guided Skill Authoring, not Installation. It requires an
+explicit existing Skill Workspace, inspects the nearest local `CONTEXT.md` for
+headings and a digest, and asks for the skill name, purpose, description,
+activation guidance, and non-goals that were not supplied. It previews the
+proposed `SKILL.md` and requires interactive approval or `--yes` before writing.
+`--dry-run` never writes. Draft records are durable in a sibling
+`<state-stem>.drafts` directory; incomplete drafts are marked in their package
+and are excluded from ready-skill discovery. Validation reports actionable
+diagnostics for package frontmatter, activation guidance, local links, and a
+10,000 whitespace-delimited-token limit. Failed drafts remain available for
+correction. The bounded `skill remediate` action only adds a missing
+description, records a pre-change copy under `.tasc-recovery`, validates the
+result, and restores the original file if validation fails. Every skill-content
+write is confined to the selected Workspace; an Installation or discovered
+installed copy is never an authoring target.
+
+A ready draft offers installation, sharing, and Evaluation as separate
+follow-up choices. Creating or validating a draft does not run any of them;
+the user must explicitly choose a follow-up action. Authoring does not create
+commits or push files.
 
 `consistency check` requires at least two explicit selectors or the opt-in
 `--all-installed` flag. It performs bounded, deterministic local analysis of

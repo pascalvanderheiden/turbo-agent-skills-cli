@@ -1224,7 +1224,10 @@ fn skill_authoring_requires_workspace_and_approval_and_preserves_remediable_draf
     assert!(questions.status.success());
     let questions: serde_json::Value = serde_json::from_slice(&questions.stdout).unwrap();
     assert_eq!(questions["result"]["created"], false);
-    assert_eq!(questions["result"]["questions"].as_array().unwrap().len(), 5);
+    assert_eq!(
+        questions["result"]["questions"].as_array().unwrap().len(),
+        5
+    );
     assert!(!workspace.join("review-helper").exists());
 
     let args = [
@@ -1264,17 +1267,24 @@ fn skill_authoring_requires_workspace_and_approval_and_preserves_remediable_draf
     let created: serde_json::Value = serde_json::from_slice(&created.stdout).unwrap();
     assert_eq!(created["command"], "skill create");
     assert_eq!(created["result"]["draft"]["status"], "ready");
-    assert_eq!(created["result"]["draft"]["localContext"]["headings"][0], "Repository Context");
+    assert_eq!(
+        created["result"]["draft"]["localContext"]["headings"][0],
+        "Repository Context"
+    );
     assert_eq!(created["result"]["actionsExecuted"], serde_json::json!([]));
     assert_eq!(
-        created["result"]["followUpActions"].as_array().unwrap().len(),
+        created["result"]["followUpActions"]
+            .as_array()
+            .unwrap()
+            .len(),
         3
     );
     let draft_id = created["result"]["draft"]["id"].as_str().unwrap();
     let skill_dir = workspace.join("review-helper");
     let skill_file = skill_dir.join("SKILL.md");
     assert!(!skill_dir.join(".tasc-draft.json").exists());
-    let original_invalid = "---\nname: review-helper\n---\nMissing description.\n";
+    let original_invalid =
+        "---\nname: review-helper\n---\n## When to use\n\nWhen explicitly requested.\n";
     fs::write(&skill_file, original_invalid).unwrap();
 
     let validate = invoke(&[
@@ -1287,9 +1297,9 @@ fn skill_authoring_requires_workspace_and_approval_and_preserves_remediable_draf
     ]);
     assert!(validate.status.success());
     let validate: serde_json::Value = serde_json::from_slice(&validate.stdout).unwrap();
-    assert_eq!(validate["result"]["draft"]["status"], "incomplete");
+    assert_eq!(validate["result"]["validation"]["status"], "incomplete");
     assert_eq!(
-        validate["result"]["draft"]["diagnostics"][0]["code"],
+        validate["result"]["validation"]["diagnostics"][0]["code"],
         "malformed_package"
     );
     assert!(skill_dir.join(".tasc-draft.json").exists());
@@ -1318,7 +1328,7 @@ fn skill_authoring_requires_workspace_and_approval_and_preserves_remediable_draf
     ]);
     assert!(remediate_dry_run.status.success());
     assert_eq!(fs::read_to_string(&skill_file).unwrap(), original_invalid);
-    let mut remediate_args = vec![
+    let remediate_args = [
         "skill",
         "remediate",
         draft_id,
@@ -1351,17 +1361,88 @@ fn skill_authoring_requires_workspace_and_approval_and_preserves_remediable_draf
         original_invalid
     );
     assert!(!skill_dir.join(".tasc-draft.json").exists());
-    assert!(remediate_args.pop().is_some());
 
-    let drafts = invoke(&[
-        "skill",
-        "drafts",
-        "--workspace",
-        &workspace_arg,
-        "--json",
-    ]);
+    let drafts = invoke(&["skill", "drafts", "--workspace", &workspace_arg, "--json"]);
     let drafts: serde_json::Value = serde_json::from_slice(&drafts.stdout).unwrap();
     assert_eq!(drafts["result"]["drafts"][0]["status"], "ready");
+    let human_drafts = invoke(&["skill", "drafts", "--workspace", &workspace_arg]);
+    assert!(human_drafts.status.success());
+    let human_drafts = String::from_utf8(human_drafts.stdout).unwrap();
+    assert!(human_drafts.contains("status: ready"));
+    assert!(human_drafts.contains("review-helper"));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn skill_validation_reports_trigger_link_and_token_diagnostics() {
+    let directory = test_dir();
+    let workspace = directory.join(".github/skills");
+    let state_path = directory.join("state/state.json");
+    fs::create_dir_all(&workspace).unwrap();
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+    let output = Command::new(env!("CARGO_BIN_EXE_tasc"))
+        .args([
+            "skill",
+            "create",
+            "--workspace",
+            &workspace_arg,
+            "--name",
+            "validation-test",
+            "--purpose",
+            "Exercise deterministic validation.",
+            "--description",
+            "A deterministic validation test.",
+            "--triggers",
+            "When testing package checks.",
+            "--non-goals",
+            "Do not perform external actions.",
+            "--yes",
+            "--json",
+        ])
+        .current_dir(&directory)
+        .env("HOME", directory.join("home"))
+        .env("TASC_STATE_PATH", &state_path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let created: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let draft_id = created["result"]["draft"]["id"].as_str().unwrap();
+    let skill_file = workspace.join("validation-test/SKILL.md");
+    let tokens = " word".repeat(10_001);
+    fs::write(
+        &skill_file,
+        format!(
+            "---\nname: validation-test\ndescription: valid description\n---\n\n## Purpose\n\n{tokens}\n\n[Missing](not-found.md)\n"
+        ),
+    )
+    .unwrap();
+    let validation = Command::new(env!("CARGO_BIN_EXE_tasc"))
+        .args([
+            "skill",
+            "validate",
+            draft_id,
+            "--workspace",
+            &workspace_arg,
+            "--json",
+        ])
+        .current_dir(&directory)
+        .env("HOME", directory.join("home"))
+        .env("TASC_STATE_PATH", &state_path)
+        .output()
+        .unwrap();
+    assert!(validation.status.success());
+    let validation: serde_json::Value = serde_json::from_slice(&validation.stdout).unwrap();
+    let diagnostics = validation["result"]["validation"]["diagnostics"]
+        .as_array()
+        .unwrap();
+    let codes = diagnostics
+        .iter()
+        .filter_map(|diagnostic| diagnostic["code"].as_str())
+        .collect::<Vec<_>>();
+    assert!(codes.contains(&"trigger_guidance_missing"));
+    assert!(codes.contains(&"workspace_link_missing"));
+    assert!(codes.contains(&"token_limit_exceeded"));
+    assert_eq!(validation["result"]["validation"]["status"], "incomplete");
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -1402,7 +1483,9 @@ fn skill_authoring_refuses_to_write_beneath_a_discovered_installation() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(4));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("overlaps a discovered installed skill"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("overlaps a discovered installed skill")
+    );
     assert!(!installation.join("new-draft").exists());
     fs::remove_dir_all(directory).unwrap();
 }

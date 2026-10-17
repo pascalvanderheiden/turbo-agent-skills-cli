@@ -1039,12 +1039,9 @@ async fn run_local(
                 )?;
             }
             let draft = service.create(&input, true).map_err(local_error)?;
-            let follow_up_actions = if draft.status == tasc_core::authoring::SkillDraftStatus::Ready {
-                vec![
-                    format!("tasc skill install {}", draft.skill_path),
-                    format!("tasc skill share {}", draft.skill_path),
-                    format!("tasc eval run {}", draft.skill_path),
-                ]
+            let follow_up_actions = if draft.status == tasc_core::authoring::SkillDraftStatus::Ready
+            {
+                vec!["install", "share", "evaluation"]
             } else {
                 Vec::new()
             };
@@ -1059,16 +1056,23 @@ async fn run_local(
             )
         }
         Commands::Skill {
-            command: SkillCommands::Validate { id, workspace, output },
+            command:
+                SkillCommands::Validate {
+                    id,
+                    workspace,
+                    output,
+                },
         } => {
             let service = SkillAuthoringService::new(
                 CopilotAdapter::local(),
                 repository,
                 FsSkillDraftRepository::new(state_path.with_extension("drafts")),
             );
-            let draft = service.validate(&id, &workspace).map_err(local_error)?;
+            let validation = service
+                .validate_report(&id, &workspace)
+                .map_err(local_error)?;
             render_local_artifact(
-                serde_json::json!({ "draft": draft }),
+                serde_json::json!({ "validation": validation }),
                 "skill validate",
                 output.json || json,
             )
@@ -1104,37 +1108,24 @@ async fn run_local(
                 repository,
                 FsSkillDraftRepository::new(state_path.with_extension("drafts")),
             );
+            let plan = service
+                .plan_missing_description(&id, &workspace, &description)
+                .map_err(local_error)?;
             if dry_run {
-                let draft = service
-                    .list(Some(&workspace))
-                    .map_err(local_error)?
-                    .into_iter()
-                    .find(|draft| draft.id == id)
-                    .ok_or_else(|| local_error(format!("no Skill Draft '{id}' in this Workspace")))?;
-                let backup = workspace.join(".tasc-recovery").join(format!("{id}.SKILL.md.before"));
                 return render_local_artifact(
-                    serde_json::json!({
-                        "approved": false,
-                        "draftId": id,
-                        "file": draft.skill_path,
-                        "patch": { "addDescription": description },
-                        "recoveryCopy": backup,
-                        "verification": "deterministic package validation; restore original SKILL.md if validation fails",
-                    }),
+                    serde_json::json!({ "approved": false, "plan": plan }),
                     "skill remediate",
                     output.json || json,
                 );
             }
             if !yes {
-                confirm_action(
-                    &format!(
-                        "Add only the missing description field to draft {id}; retain a recovery copy and validate the result."
-                    ),
-                    "Apply this Workspace remediation?",
-                )?;
+                let rendered_plan = serde_json::to_string_pretty(&plan).map_err(|error| {
+                    local_error(format!("cannot render remediation plan: {error}"))
+                })?;
+                confirm_action(&rendered_plan, "Apply this Workspace remediation?")?;
             }
             let draft = service
-                .remediate_missing_description(&id, &workspace, &description, true)
+                .apply_remediation(&plan, true)
                 .map_err(local_error)?;
             render_local_artifact(
                 serde_json::json!({ "draft": draft }),
