@@ -128,8 +128,10 @@ impl<G: GhSkillGateway, R: StateRepository> DiscoveryService<G, R> {
             (normalize_source(source)?, selector.to_string())
         } else {
             let source = source.map(normalize_source).transpose()?;
+            let name = selector.strip_suffix("/SKILL.md").unwrap_or(selector);
+            let query = name.rsplit('/').next().unwrap_or(name);
             let matches: Vec<_> = self
-                .search(selector, cancel)
+                .search(query, cancel)
                 .await?
                 .into_iter()
                 .filter(|item| {
@@ -339,6 +341,62 @@ mod tests {
             self.1.borrow_mut().push(format!("{repository}/{path}"));
             Ok("unparsed upstream content".into())
         }
+    }
+
+    struct NamespacedGateway;
+
+    impl GhSkillGateway for NamespacedGateway {
+        async fn capabilities(&self, _: &Cancellation) -> Result<Capabilities, Diagnostic> {
+            unreachable!()
+        }
+        async fn search(
+            &self,
+            query: &str,
+            _: &Cancellation,
+        ) -> Result<Vec<SearchHit>, Diagnostic> {
+            assert_eq!(query, "review", "gh keyword filtering needs the bare name");
+            let mut hit = hits().remove(1);
+            hit.namespace = "author".into();
+            Ok(vec![hit])
+        }
+        async fn preview(
+            &self,
+            repository: &str,
+            path: &str,
+            _: &Cancellation,
+        ) -> Result<String, Diagnostic> {
+            assert_eq!(repository, "beta/skills");
+            assert_eq!(path, "skills/review/SKILL.md");
+            Ok("namespaced preview".into())
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn namespaced_selectors_search_by_name_then_match_exactly() {
+        let service = DiscoveryService::new(NamespacedGateway, Repository::default());
+        let cancel = Cancellation::default();
+        for source in [None, Some("beta/skills")] {
+            assert_eq!(
+                service
+                    .preview("author/review", source, &cancel)
+                    .await
+                    .unwrap()
+                    .rendered_text,
+                "namespaced preview"
+            );
+        }
+        assert_eq!(
+            service
+                .preview("other/review", None, &cancel)
+                .await
+                .unwrap_err()
+                .code,
+            "skill_not_found"
+        );
+        assert!(service
+            .preview("skills/review/SKILL.md", None, &cancel)
+            .await
+            .is_ok());
     }
 
     fn hits() -> Vec<SearchHit> {

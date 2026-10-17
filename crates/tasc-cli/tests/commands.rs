@@ -206,6 +206,7 @@ fn discovery_commands_have_stable_envelopes_and_preview_never_installs() {
         Command::new(env!("CARGO_BIN_EXE_tasc"))
             .args(args)
             .env("PATH", &directory)
+            .env("GH_HOST", "enterprise.example.com")
             .env("HOME", directory.join("home"))
             .env("TASC_STATE_PATH", &state_path)
             .current_dir(&directory)

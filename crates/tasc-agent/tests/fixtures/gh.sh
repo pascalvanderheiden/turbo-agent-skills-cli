@@ -1,4 +1,8 @@
 #!/bin/sh
+if [ "$GH_HOST" != "github.com" ] || [ "$GH_PROMPT_DISABLED" != "1" ]; then
+  printf 'host or prompt boundary not enforced\n' >&2
+  exit 1
+fi
 read -r mode < "$0.mode"
 printf '%s\n' "$*" >> "$0.calls"
 case "$1 $2" in

@@ -76,6 +76,7 @@ impl GhSkill {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .env("GH_HOST", "github.com")
             .env("GH_PROMPT_DISABLED", "1")
             .env("GH_PAGER", "")
             .env("PAGER", "")

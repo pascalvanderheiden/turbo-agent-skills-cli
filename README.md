@@ -72,6 +72,8 @@ accept a repository and skill path. TASC probes only the capability being used,
 caches successful probes for the process, and never substitutes its own GitHub
 API implementation when a capability is unavailable. Authenticate with
 `gh auth login` or GitHub CLI's environment-based authentication.
+Discovery is explicitly bound to `github.com`, irrespective of inherited
+`GH_HOST` or GitHub CLI's configured default host.
 
 Source commands manage TASC metadata, not a second GitHub catalog. `source show`
 inspects that metadata; search discovers available skills and preview inspects
