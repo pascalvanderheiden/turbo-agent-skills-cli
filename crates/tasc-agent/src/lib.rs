@@ -5,6 +5,7 @@ pub mod evaluation;
 pub mod gh;
 pub mod insights;
 pub mod lifecycle;
+pub mod security;
 pub mod service;
 pub mod watch;
 pub use authoring::{
@@ -18,6 +19,10 @@ pub use evaluation::{EvaluationService, FsRunArtifactRepository, RunArtifactRepo
 pub use insights::{
     FsInsightArtifactRepository, FsInsightLifecycleRepository, InsightArtifactRepository,
     InsightLifecycleRepository, InsightService,
+};
+pub use security::{
+    FsSecurityArtifactRepository, FsSecuritySuppressionRepository, SecurityArtifactRepository,
+    SecurityService, SecuritySuppressionRepository,
 };
 pub use service::{AgentService, CopilotAdapter, FsStateRepository};
 pub use watch::{FsWatchCheckRepository, WatchService};
