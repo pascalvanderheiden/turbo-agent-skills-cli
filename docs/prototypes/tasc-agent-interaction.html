@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>TASC agent interaction prototype</title>
+  <style>
+    :root { color-scheme: light; --ink:#172033; --muted:#667085; --line:#d9e0ea; --panel:#f7f9fc; --accent:#635bff; --good:#087443; --warn:#9a6700; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:16px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#fff; }
+    main { max-width:1080px; margin:0 auto; padding:36px 22px 60px; }
+    h1,h2,h3 { line-height:1.2; margin:0 0 10px; }
+    h1 { font-size:clamp(28px,4vw,46px); letter-spacing:-.03em; }
+    h2 { font-size:22px; }
+    h3 { font-size:16px; }
+    p { margin:0 0 12px; }
+    .eyebrow { color:var(--accent); font-weight:700; text-transform:uppercase; letter-spacing:.08em; font-size:12px; }
+    .intro { max-width:780px; color:var(--muted); margin:10px 0 28px; }
+    .grid { display:grid; grid-template-columns:1.1fr .9fr; gap:18px; }
+    .panel { border:1px solid var(--line); border-radius:14px; padding:20px; background:#fff; }
+    .panel.soft { background:var(--panel); }
+    .state { display:grid; gap:10px; margin-top:16px; }
+    .row { display:flex; justify-content:space-between; gap:18px; padding:10px 0; border-bottom:1px solid var(--line); }
+    .row:last-child { border-bottom:0; }
+    .label { color:var(--muted); }
+    .value { text-align:right; font-weight:650; }
+    .pill { display:inline-block; border-radius:999px; padding:3px 9px; font-size:13px; background:#ecebff; color:#3d36b8; }
+    .pill.good { background:#e6f6ee; color:var(--good); }
+    .pill.warn { background:#fff4d6; color:var(--warn); }
+    .log { min-height:270px; display:flex; flex-direction:column; gap:10px; }
+    .event { border:1px solid var(--line); border-radius:8px; padding:8px 12px; background:var(--panel); }
+    .event strong { display:block; }
+    .actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }
+    button { appearance:none; border:1px solid #c5cce0; border-radius:9px; background:#fff; color:var(--ink); padding:9px 12px; font:inherit; cursor:pointer; }
+    button:hover { border-color:var(--accent); color:var(--accent); }
+    button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+    button:disabled { opacity:.45; cursor:not-allowed; }
+    .tabs { display:flex; gap:8px; flex-wrap:wrap; margin:16px 0 12px; }
+    .tabs button.active { border-color:var(--accent); color:var(--accent); box-shadow:0 0 0 2px #ecebff; }
+    .scenario { min-height:170px; }
+    .step { margin-top:12px; padding:12px; border-radius:9px; background:#f4f1ff; }
+    .hint { color:var(--muted); font-size:14px; }
+    code { background:#f1f3f7; padding:2px 5px; border-radius:4px; }
+    @media (max-width:760px) { .grid { grid-template-columns:1fr; } .row { align-items:flex-start; flex-direction:column; gap:2px; } .value { text-align:left; } }
+  </style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">Throwaway logic prototype · issue 12</div>
+  <h1>TASC agent interaction</h1>
+  <p class="intro"><strong>Question:</strong> does a Copilot SDK agent need a visible typed plan, explicit confirmation for mutations, bounded progress, and a verification hand-off? Try the lifecycle and evidence flows below. This prototype has no persistence and never touches a real skill.</p>
+
+  <section class="grid">
+    <div class="panel">
+      <h2>Current interaction state</h2>
+      <div id="state" class="state"></div>
+      <div class="actions">
+        <button class="primary" data-action="reset">Reset conversation</button>
+        <button data-action="userInstall">Ask to install a skill</button>
+        <button data-action="userCheck">Ask for consistency check</button>
+        <button data-action="approve">Approve proposed action</button>
+        <button data-action="deny">Decline proposed action</button>
+        <button data-action="cancel">Cancel active work</button>
+        <button data-action="retry">Retry failed step</button>
+      </div>
+      <p class="hint">Free play is intentionally permissive: try approval before a plan, cancellation during a check, or retry after a successful run.</p>
+    </div>
+    <div class="panel soft">
+      <h2>Agent event stream</h2>
+      <div id="log" class="log" aria-live="polite"></div>
+    </div>
+  </section>
+
+  <section class="panel" style="margin-top:18px">
+    <h2>Guided walkthroughs</h2>
+    <div class="tabs" id="tabs"></div>
+    <div id="scenario" class="scenario"></div>
+  </section>
+</main>
+
+<script>
+  // Portable domain logic: the page only dispatches actions and renders the result.
+  const initial = () => ({
+    request: "none",
+    phase: "idle",
+    mutation: "none",
+    progress: "No active work",
+    verification: "Not required",
+    result: "No result",
+    lastChange: "Conversation ready",
+    events: [{ title: "Agent ready", body: "Ask for a lifecycle action or an evidence-only analysis." }]
+  });
+
+  const addEvent = (state, title, body) => ({
+    ...state,
+    lastChange: title,
+    events: [{ title, body }, ...state.events].slice(0, 8)
+  });
+
+  function reduce(state, action) {
+    switch (action) {
+      case "reset": return initial();
+      case "userInstall":
+        return addEvent({ ...state, request:"install skill", phase:"planning", mutation:"pending", progress:"Preparing a preview", verification:"Will verify target and revision", result:"Awaiting confirmation" },
+          "Plan prepared", "I found acme/review-skill and will ask gh skill to install revision 8f31c2 into GitHub Copilot. Files will not change until you approve.");
+      case "userCheck":
+        return addEvent({ ...state, request:"consistency check", phase:"running", mutation:"none", progress:"Checking 3 selected skills · static layer", verification:"Will report findings and evidence", result:"In progress" },
+          "Check started", "This is evidence-only. No skill files or precedence rules will be changed.");
+      case "approve":
+        if (state.mutation !== "pending") return addEvent(state, "Approval not applicable", "There is no pending mutation to approve.");
+        return addEvent({ ...state, phase:"running", mutation:"approved", progress:"Installing via gh skill · 1 of 2 steps", result:"In progress" },
+          "Approval recorded", "Scope: one skill, one adapter target, one pinned revision. I will verify the result next.");
+      case "deny":
+        if (state.mutation !== "pending") return addEvent(state, "Decline not applicable", "There is no pending mutation to decline.");
+        return addEvent({ ...state, phase:"complete", mutation:"declined", progress:"No active work", verification:"Not required", result:"Declined safely" },
+          "Action declined", "No files changed. The proposal remains available for review.");
+      case "cancel":
+        if (state.phase === "idle" || state.phase === "complete") return addEvent(state, "Nothing to cancel", "There is no active operation.");
+        return addEvent({ ...state, phase:"complete", progress:"Stopped at a safe boundary", verification:"Partial result retained", result:"Cancelled" },
+          "Work cancelled", "The agent stopped without starting another mutation and retained the partial evidence.");
+      case "retry":
+        if (state.result !== "Failed") return addEvent(state, "Retry not applicable", "Only an explicit failure can be retried.");
+        return addEvent({ ...state, phase:"running", progress:"Retrying bounded step", result:"In progress" },
+          "Retry started", "Retry uses the same scope unless you change it.");
+      default: return state;
+    }
+  }
+
+  const scenarios = [
+    { id:"install", label:"Install with confirmation", description:"A user asks the agent to install a discovered skill. Notice that the agent previews the exact scope, waits for approval, executes through gh skill, and verifies without hiding the mutation.", steps:["userInstall","approve","cancel"] },
+    { id:"check", label:"Consistency check", description:"A user asks for cross-skill analysis. Notice that the agent starts directly because the operation is evidence-only, exposes progress, and keeps findings separate from remediation.", steps:["userCheck","cancel"] },
+    { id:"guard", label:"Unsafe approval attempt", description:"Try approving before a mutation is proposed. The agent should explain why the action is not applicable rather than guessing or silently doing work.", steps:["approve","userInstall","deny"] }
+  ];
+
+  let state = initial();
+  let activeScenario = "install";
+  let stepIndex = 0;
+
+  function label(value) { return value.replaceAll("-", " ").replace(/\b\w/g, c => c.toUpperCase()); }
+  function render() {
+    document.querySelector("#state").innerHTML = [
+      ["Request", label(state.request)],
+      ["Phase", `<span class="pill ${state.phase === "complete" ? "good" : state.phase === "running" ? "warn" : ""}">${label(state.phase)}</span>`],
+      ["Mutation", label(state.mutation)],
+      ["Progress", state.progress],
+      ["Verification", state.verification],
+      ["Result", state.result],
+      ["Last change", state.lastChange]
+    ].map(([key, value]) => `<div class="row"><span class="label">${key}</span><span class="value">${value}</span></div>`).join("");
+    document.querySelector("#log").innerHTML = state.events.map(event => `<div class="event"><strong>${event.title}</strong><span>${event.body}</span></div>`).join("");
+    document.querySelectorAll("[data-action]").forEach(button => {
+      button.disabled = button.dataset.action === "reset" ? false : false;
+    });
+    renderScenario();
+  }
+  function renderScenario() {
+    document.querySelector("#tabs").innerHTML = scenarios.map(s => `<button class="${s.id === activeScenario ? "active" : ""}" data-scenario="${s.id}">${s.label}</button>`).join("");
+    const scenario = scenarios.find(s => s.id === activeScenario);
+    const next = scenario.steps[stepIndex];
+    document.querySelector("#scenario").innerHTML = `<p>${scenario.description}</p><div class="step"><strong>Step ${Math.min(stepIndex + 1, scenario.steps.length)} of ${scenario.steps.length}:</strong> ${label(next || "reset")}<div class="actions"><button class="primary" data-step="${next || "reset"}">${next ? "Perform step" : "Restart walkthrough"}</button><button data-step="reset">Reset state</button></div></div>`;
+    document.querySelectorAll("[data-scenario]").forEach(button => button.onclick = () => { activeScenario = button.dataset.scenario; stepIndex = 0; state = initial(); render(); });
+    document.querySelectorAll("[data-step]").forEach(button => button.onclick = () => { const action = button.dataset.step; state = reduce(state, action); if (action !== "reset") stepIndex = Math.min(stepIndex + 1, scenario.steps.length); else stepIndex = 0; render(); });
+  }
+  document.querySelectorAll("[data-action]").forEach(button => button.onclick = () => { state = reduce(state, button.dataset.action); render(); });
+  render();
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+[package]
+name = "tasc"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/pascalvanderheiden/turbo-agent-skills-cli"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "cargo"] }
+serde_json = "1"
+tasc-agent = { path = "../tasc-agent" }
+tasc-core = { path = "../tasc-core" }

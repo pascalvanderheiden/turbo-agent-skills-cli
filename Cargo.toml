@@ -1,0 +1,12 @@
+[workspace]
+members = [
+  "crates/tasc-core",
+  "crates/tasc-cli",
+  "crates/tasc-agent",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/pascalvanderheiden/turbo-agent-skills-cli"
