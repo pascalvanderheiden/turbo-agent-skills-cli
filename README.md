@@ -288,7 +288,9 @@ edits an Installation or Skill Workspace.
 
 ## Release and delivery
 
-The repo is set up for GitHub Releases and Pages delivery patterns, with a modern CI build pipeline for macOS, Linux, and Windows. The distribution model intentionally favors immutable binaries and provenance over native package-manager shortcuts in v1.
+Stable releases build reproducible Linux x64/ARM64, macOS Intel/Apple Silicon, and Windows x64 archives from protected SemVer tags. Publication requires passing workspace tests and packaging/integrity checks plus approval in the `release-approval` environment. Releases include SHA-256 checksums, a CycloneDX SBOM, build provenance, and a separate SBOM attestation; configure repository tag rulesets and immutable releases as described in the [release runbook](.github/RELEASE.md).
+
+The [versioned GitHub Pages documentation](https://pascalvanderheiden.github.io/turbo-agent-skills-cli/) includes installation and verification, lifecycle safety, feature guides, architecture, troubleshooting, and release recovery. TASC does not self-update; users manually download, verify, and replace binaries.
 
 ## Related work
 

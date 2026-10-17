@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Task guides for TASC 0.1.0.">
+    <meta name="tasc-docs-version" content="0.1.0">
+    <title>TASC 0.1.0 | User guide</title>
+    <style>
+      :root { color-scheme: light; font: 100%/1.65 system-ui, sans-serif; color: #182230; background: #fff; }
+      body { max-width: 70rem; margin: 0 auto; padding: 1.5rem 1.25rem 5rem; }
+      a { color: #0755a5; }
+      a:focus, button:focus { outline: 3px solid #a33b00; outline-offset: 3px; }
+      .skip-link { position: absolute; left: -10000px; }
+      .skip-link:focus { left: 1rem; top: 1rem; background: white; padding: .5rem; }
+      header, nav, main, footer { margin-block: 1.5rem; }
+      nav, .notice { padding: 1rem; border: 1px solid #526172; border-radius: .5rem; }
+      nav ul { columns: 2; }
+      pre { overflow-x: auto; padding: 1rem; background: #f1f4f8; color: #182230; }
+      code { font-family: ui-monospace, monospace; }
+      h2 { margin-top: 2.5rem; }
+      .version { display: inline-block; padding: .15rem .6rem; border: 1px solid #526172; border-radius: 1rem; }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to main content</a>
+    <header>
+      <p><a href="../index.html">All documentation versions</a></p>
+      <p class="version">TASC 0.1.0</p>
+      <h1>TASC user guide</h1>
+      <p>Choose a task below. These guides describe the CLI that ships in version 0.1.0 and distinguish available behavior from deferred features.</p>
+    </header>
+    <nav aria-label="Task guides">
+      <h2>On this page</h2>
+      <ul>
+        <li><a href="#install">Install and verify</a></li>
+        <li><a href="#lifecycle-safety">Manage skills safely</a></li>
+        <li><a href="#discovery">Discover and watch sources</a></li>
+        <li><a href="#evaluation">Run an Evaluation</a></li>
+        <li><a href="#consistency">Check Consistency</a></li>
+        <li><a href="#insights">Review Insights and proposals</a></li>
+        <li><a href="#authoring">Author a skill</a></li>
+        <li><a href="#security">Security and trust boundaries</a></li>
+        <li><a href="#architecture">Understand the architecture</a></li>
+        <li><a href="#troubleshooting">Troubleshoot</a></li>
+        <li><a href="#releases">Upgrade and recover releases</a></li>
+      </ul>
+    </nav>
+    <main id="main">
+      <section id="install">
+        <h2>Install and verify</h2>
+        <p>Download the archive matching your operating system and CPU from the <a href="https://github.com/pascalvanderheiden/turbo-agent-skills-cli/releases">GitHub Releases page</a>. Archives are named <code>tasc-v0.1.0-&lt;Rust-target&gt;.tar.gz</code>.</p>
+        <ul>
+          <li>Linux x64: <code>x86_64-unknown-linux-gnu</code></li>
+          <li>Linux ARM64: <code>aarch64-unknown-linux-gnu</code></li>
+          <li>macOS Intel: <code>x86_64-apple-darwin</code></li>
+          <li>macOS Apple Silicon: <code>aarch64-apple-darwin</code></li>
+          <li>Windows x64: <code>x86_64-pc-windows-msvc</code></li>
+        </ul>
+        <p>Download <code>SHA256SUMS.txt</code> beside the archive. Verify the selected file before extracting it:</p>
+        <pre><code>sha256sum tasc-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+shasum -a 256 tasc-v0.1.0-aarch64-apple-darwin.tar.gz</code></pre>
+        <p>Compare the resulting digest with the matching filename in the release checksum manifest. On Windows, use PowerShell <code>Get-FileHash -Algorithm SHA256 &lt;archive&gt;</code>. The published manifest covers all release assets, so do not run a whole-manifest check unless you downloaded every listed asset. Extract the verified archive and put its <code>tasc</code> executable on your PATH. TASC has no self-updater or installer script.</p>
+        <p>Use GitHub CLI (<code>gh</code>) for GitHub discovery and skill lifecycle operations. A working GitHub CLI authentication is required for remote operations; local state and analysis commands work without network access. Waza is optional; the deterministic package smoke Evaluation does not execute skill instructions or require a model.</p>
+      </section>
+
+      <section id="lifecycle-safety">
+        <h2>Manage skills safely</h2>
+        <p>Inventory local Copilot skills and see which ones are tracked in TASC Local State:</p>
+        <pre><code data-validate-command="skill list --json">tasc skill list --json</code></pre>
+        <p>Install, update, and remove delegate to supported <code>gh skill</code> commands. Start with a dry run; an interactive mutation shows a plan and asks for approval. Non-interactive mutations require <code>--yes</code>. Updating or removing locally modified content additionally requires <code>--force</code> and approval.</p>
+        <pre><code data-validate-command="skill install review --source owner/repo --dry-run;skill install review --source owner/repo --yes">tasc skill install review --source owner/repo --dry-run
+tasc skill install review --source owner/repo --yes</code></pre>
+        <p>Adopting a discovered but untracked Installation records it without reinstalling or changing skill files. Removal only deletes the selected recorded skill directory. TASC never silently updates skills from a Watchlist or Insight.</p>
+        <p>Local State is stored at <code>$XDG_STATE_HOME/tasc/state.json</code> or <code>~/.local/state/tasc/state.json</code>; set <code>TASC_STATE_PATH</code> to select a different file. Evaluation, Consistency, Watch, and Insight evidence is kept in separate immutable artifact directories beside the state file. Credentials are not copied into Local State.</p>
+      </section>
+
+      <section id="discovery">
+        <h2>Discover and watch sources</h2>
+        <p>Search and preview delegate to GitHub CLI's supported skill capabilities and are explicitly bound to <code>github.com</code>, regardless of an inherited <code>GH_HOST</code> setting. Search does not install files or write Local State. Name-based preview must resolve to one exact match; use a returned Skill Identity or exact skill path when results are ambiguous.</p>
+        <pre><code data-validate-command="search review --format json">tasc search review --format json</code></pre>
+        <h3 id="watchlists">Watchlists</h3>
+        <p>Watchlists record GitHub sources or selected skill paths. A Watch Check compares revisions and writes immutable evidence; it does not install or update a skill.</p>
+        <pre><code data-validate-command="watch add owner/repo --dry-run;watch list --json;watch check">tasc watch add owner/repo --dry-run
+tasc watch list --json
+tasc watch check</code></pre>
+        <p>Adding or removing a Watchlist entry requires explicit approval. A changed upstream revision is a report for you to review, not authorization to modify an Installation.</p>
+      </section>
+
+      <section id="evaluation">
+        <h2>Run an Evaluation</h2>
+        <p>Version 0.1.0 supports deterministic package-only smoke validation of a local <code>SKILL.md</code>. It checks package metadata such as frontmatter <code>name</code> and <code>description</code>; it does not run scenarios, invoke a model, or execute skill instructions.</p>
+        <pre><code data-validate-command="eval run skill:file:///path/to/.github/skills/example --json">tasc eval run skill:file:///path/to/.github/skills/example --json</code></pre>
+        <p>Each run records the package digest, identity, known source revision and target, analyzer configuration, outcomes, and diagnostics in an immutable sibling <code>&lt;state-stem&gt;.evaluations</code> directory separate from Local State. A changed or removed package does not rewrite old evidence.</p>
+        <pre><code data-validate-command="eval list --json">tasc eval list --json</code></pre>
+        <p>Scenario execution is reported as <code>not_run</code>. The optional <code>--waza</code> check reports the external capability status; a Waza installation alone does not enable model-backed execution in this release.</p>
+      </section>
+
+      <section id="consistency">
+        <h2>Check Consistency</h2>
+        <p>Select at least two Skill Identities explicitly, or opt into all discovered skills. The deterministic local check compares declared dependencies, ownership, precedence, assumptions, trigger phrases, the current directory glossary, non-goals, and prior artifacts.</p>
+        <pre><code data-validate-command="consistency check skill:file:///skill-one skill:file:///skill-two --json;consistency check --all-installed">tasc consistency check &lt;skill-id-1&gt; &lt;skill-id-2&gt; --json
+tasc consistency check --all-installed</code></pre>
+        <p>Findings include evidence, confidence, severity, and revision status. Lexical trigger overlap is a warning, not proof of runtime collision; missing declarations are not treated as conflicts. Inferred analysis is explicitly marked <code>not_run</code>; no model or live composition probe is invoked. Each check is an immutable artifact in a sibling <code>&lt;state-stem&gt;.consistency-checks</code> directory.</p>
+      </section>
+
+      <section id="insights">
+        <h2>Review Insights and proposals</h2>
+        <p>Generate a ranked snapshot from observed Installation lifecycle states, the latest Evaluation per Skill Identity, and the latest Consistency findings:</p>
+        <pre><code data-validate-command="insight generate">tasc insight generate</code></pre>
+        <p>Priority is a deterministic ordering of impact, confidence, urgency, affected Installations, freshness, and stable Insight ID—not a universal quality score. Snapshots retain their contributing evidence. Changed evidence creates a new snapshot and marks the previous one stale.</p>
+        <p>Insight status and scoped, reasoned, expiring suppressions are append-only lifecycle records; they do not rewrite evidence. Suppressed Insights are omitted from the default actionable list but remain inspectable with <code>--all</code>.</p>
+        <pre><code data-validate-command="insight list --all;insight status example-insight acknowledged;insight suppress --reason reviewed --expires-in-days 30 example-insight">tasc insight list --all
+tasc insight status example-insight acknowledged
+tasc insight suppress --reason "reviewed" --expires-in-days 30 example-insight</code></pre>
+        <p>Users can record <code>new</code>, <code>acknowledged</code>, <code>snoozed</code>, and <code>resolved</code>. <code>stale</code> and <code>inconclusive</code> describe evidence or snapshot state; <code>suppressed</code> is driven by an active suppression record.</p>
+        <pre><code data-validate-command="insight propose example-insight-id">tasc insight propose &lt;insight-id&gt;</code></pre>
+        <p>A Remediation Proposal explains scope, risk, prerequisites, reversibility, affected evidence, and expected verification. Proposals are informational only. This release has no command that applies a proposal or edits an Installation or Skill Workspace.</p>
+      </section>
+
+      <section id="authoring">
+        <h2>Author a skill</h2>
+        <p>Guided Skill Authoring (including <code>tasc skill create</code>) is not available in version 0.1.0. To author a skill today, create and edit its files yourself in a Skill Workspace—the explicitly selected writable source directory, not an installed copy. Review the skill format and retain the source in your own version control.</p>
+        <p>TASC’s Evaluation command can check local package metadata, but it is not a full authoring validator and does not prove that instructions are correct, safe, or effective. Do not treat a successful smoke Evaluation as approval to install or share a Skill Draft.</p>
+      </section>
+
+      <section id="security">
+        <h2>Security and trust boundaries</h2>
+        <p>A TASC Security Check is planned but is not implemented in version 0.1.0. TASC does not scan skill contents for secrets, unsafe instructions, injection, permissions, executable content, or supply-chain indicators. Previewing a skill fetches and displays content; it does not execute it.</p>
+        <p>Review untrusted skill content and its source before installing or enabling it in an assistant. Treat skill instructions as untrusted input, follow the lifecycle dry-run and approval prompts, and avoid granting tools or permissions that are not needed. Evaluation and Consistency output are not security verdicts.</p>
+        <p>Release archives have SHA-256 checksums, a CycloneDX SBOM, GitHub build-provenance attestations, and a separate SBOM attestation. Verify checksums and GitHub attestations before use. Platform-native code signing is not provided in this release.</p>
+      </section>
+
+      <section id="architecture">
+        <h2>Understand the architecture</h2>
+        <ul>
+          <li><code>tasc-core</code> contains canonical domain types and state models.</li>
+          <li><code>tasc-agent</code> contains shared application services, adapters, and immutable artifact storage.</li>
+          <li><code>tasc-cli</code> provides the <code>tasc</code> command-line interface.</li>
+        </ul>
+        <p>The CLI delegates GitHub skill lifecycle operations to GitHub CLI and keeps Local State, Evaluations, Consistency Checks, and Insights local by default. See the <a href="https://github.com/pascalvanderheiden/turbo-agent-skills-cli/blob/main/CONTEXT.md">domain glossary</a>, <a href="https://github.com/pascalvanderheiden/turbo-agent-skills-cli/blob/main/README.md">CLI overview</a>, and the <a href="https://github.com/pascalvanderheiden/turbo-agent-skills-cli">project repository</a> for contributor context.</p>
+      </section>
+
+      <section id="troubleshooting">
+        <h2>Troubleshoot</h2>
+        <ul>
+          <li><strong>Remote command says <code>gh</code> is missing:</strong> install GitHub CLI. Authenticate with <code>gh auth login</code> before search, preview, install, or update.</li>
+          <li><strong>Unsupported GitHub skill operation:</strong> check the installed <code>gh</code> capability; TASC reports unsupported operations rather than substituting a different API.</li>
+          <li><strong>Local changes block update or removal:</strong> inspect and preserve the modifications, then explicitly use <code>--force</code> only if you approve replacing them.</li>
+          <li><strong>Evaluation is inconclusive or not run:</strong> this release performs package smoke checks only; model-backed scenario execution is not available.</li>
+          <li><strong>An Insight is stale or suppressed:</strong> generate fresh evidence; use <code>insight list --all</code> or <code>insight show</code> to inspect retained evidence and history.</li>
+          <li><strong>State appears missing:</strong> check <code>TASC_STATE_PATH</code> and the XDG/default state path. Run artifacts are stored separately and are not a backup of Local State.</li>
+        </ul>
+        <p>Local inventory, state, and analysis do not require a network connection. Use <code>--offline</code> to reject remote discovery before invoking GitHub CLI.</p>
+      </section>
+
+      <section id="releases">
+        <h2>Upgrade and recover releases</h2>
+        <p>Stable releases use protected SemVer tags. Each version is immutable after publication; assets are never replaced in place. Download and verify the new archive, stop using the old executable, and manually replace it. TASC has no self-update command.</p>
+        <p>The five supported archives target Linux x64/ARM64, macOS Intel/Apple Silicon, and Windows x64. No Rust toolchain is needed to run a downloaded binary. GitHub CLI is required for remote discovery and lifecycle operations; the tested <code>gh skill</code> discovery contract is GitHub CLI 2.101.0. Waza is optional and model-backed Evaluation execution is not available. Version 0.1.0 reads existing version-1 Local State; review release notes for any later schema migration.</p>
+        <p>To verify an archive's GitHub build provenance, install a current GitHub CLI and run <code>gh attestation verify &lt;archive&gt; --repo pascalvanderheiden/turbo-agent-skills-cli</code>. To verify the separate CycloneDX attestation, add <code>--predicate-type https://cyclonedx.org/bom</code>. Inspect the published BOM as JSON with <code>python3 -m json.tool tasc.cdx.json</code>; the output lists the binary's components and dependency relationships.</p>
+        <p>Check the <a href="https://github.com/pascalvanderheiden/turbo-agent-skills-cli/releases">release history</a> for supported operating systems, compatibility notes, dependency ranges, schema migrations, known limitations, and release-specific instructions. The initial release may not be available until its release is published.</p>
+        <p>If a release is defective, maintainers mark the affected release as non-latest/prerelease and warn users in its notes. The correction is a new higher SemVer release; the defective tag and its published assets remain unchanged. Follow the warning and upgrade instructions rather than attempting to reuse or modify the old version.</p>
+        <p>Manual archive replacement is the supported recovery path. There is no automatic downgrade or self-update. Current-stable and a short previous-release window are intended for security and critical fixes; older versions are upgrade-only.</p>
+        <p>Repository maintainers can find protected-tag and release approval setup in the <a href="https://github.com/pascalvanderheiden/turbo-agent-skills-cli/blob/main/.github/RELEASE.md">release runbook</a>.</p>
+      </section>
+    </main>
+    <footer>
+      <p><a href="../index.html">Return to the documentation home</a></p>
+    </footer>
+  </body>
+</html>

@@ -5,64 +5,217 @@ on:
     tags:
       - 'v*.*.*'
 
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # pinned rust-toolchain action
+        with:
+          toolchain: 1.99.0
+      - name: Validate protected SemVer tag and versioned docs
+        env:
+          REF_PROTECTED: ${{ github.ref_protected }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$REF_PROTECTED" != "true" ]]; then
+            echo "The release tag must be protected by a repository ruleset." >&2
+            exit 1
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          python3 .github/scripts/release.py validate-tag \
+            --tag "$GITHUB_REF_NAME" \
+            --version "$(sed -n 's/^version = "\(.*\)"/\1/p' crates/tasc-cli/Cargo.toml | head -1)" \
+            --protected
+          cargo build --locked -p tasc
+          python3 docs/site/validate.py --binary target/debug/tasc --version "$version" --check-external
+          python3 -m unittest discover -s .github/scripts -p 'test_release.py'
+
+  test:
+    runs-on: ubuntu-24.04
+    needs: validate
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # pinned rust-toolchain action
+        with:
+          toolchain: 1.99.0
+      - name: Test workspace
+        run: cargo test --workspace --locked
+
   build:
-    name: Build ${{ matrix.target }}
+    needs: [validate, test]
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-            asset_name: tasc-linux-amd64
-          - os: macos-latest
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-15-intel
             target: x86_64-apple-darwin
-            asset_name: tasc-macos-amd64
-          - os: macos-latest
+          - os: macos-15
             target: aarch64-apple-darwin
-            asset_name: tasc-macos-arm64
-          - os: windows-latest
+          - os: windows-2025
             target: x86_64-pc-windows-msvc
-            asset_name: tasc-windows-amd64.exe
-
     steps:
-      - uses: actions/checkout@v4
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # pinned rust-toolchain action
         with:
+          toolchain: 1.99.0
           targets: ${{ matrix.target }}
-
-      - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Package binary
+      - name: Set reproducible build environment
         shell: bash
         run: |
-          mkdir -p dist
-          cp target/${{ matrix.target }}/release/tasc${{ matrix.target == 'x86_64-pc-windows-msvc' && '.exe' || '' }} dist/${{ matrix.asset_name }}
-          sha256sum dist/${{ matrix.asset_name }} > dist/${{ matrix.asset_name }}.sha256
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+          echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct "$GITHUB_SHA")" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=--remap-path-prefix=${GITHUB_WORKSPACE}=." >> "$GITHUB_ENV"
+      - name: Build release binary
+        run: cargo build --release --locked -p tasc --target ${{ matrix.target }}
+      - name: Package release archive
+        shell: bash
+        run: |
+          binary="target/${{ matrix.target }}/release/tasc"
+          if [[ "${{ matrix.target }}" == *-msvc ]]; then binary="${binary}.exe"; fi
+          python3 .github/scripts/release.py package \
+            --binary "$binary" \
+            --target "${{ matrix.target }}" \
+            --version "$GITHUB_REF_NAME" \
+            --output-dir dist
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          name: ${{ matrix.asset_name }}
-          path: dist/*
+          subject-path: dist/*.tar.gz
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tasc-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  assemble:
+    needs: [validate, test, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: tasc-*
+          path: dist
+          merge-multiple: true
+      - name: Set reproducible SBOM environment
+        run: echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct "$GITHUB_SHA")" >> "$GITHUB_ENV"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # pinned rust-toolchain action
+        with:
+          toolchain: 1.99.0
+      - name: Generate CycloneDX SBOM
+        run: |
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo cyclonedx \
+            --manifest-path crates/tasc-cli/Cargo.toml \
+            --format json \
+            --spec-version 1.5 \
+            --override-filename tasc
+          mv crates/tasc-cli/tasc.json dist/tasc.cdx.json
+      - name: Validate release assets and generate checksums
+        run: |
+          python3 .github/scripts/release.py checksums --directory dist
+          python3 .github/scripts/release.py validate-assets \
+            --directory dist \
+            --version "$GITHUB_REF_NAME"
+      - name: Attest CycloneDX SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+          sbom-path: dist/tasc.cdx.json
+      - name: Refuse to mutate an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            draft="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" --jq .draft)"
+            if [[ "$draft" == "true" ]]; then
+              echo "An unpublished draft already exists for $GITHUB_REF_NAME; remove that draft before reassembling." >&2
+            else
+              echo "Release $GITHUB_REF_NAME is already published; publish a corrected higher SemVer instead." >&2
+            fi
+            exit 1
+          fi
+      - name: Assemble draft release
+        run: gh release create "$GITHUB_REF_NAME" dist/* --draft --generate-notes --verify-tag
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   publish:
-    needs: build
-    runs-on: ubuntu-latest
+    needs: assemble
+    runs-on: ubuntu-24.04
+    environment:
+      name: release-approval
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/**/*
+      - name: Require immutable-release configuration
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TASC_IMMUTABLE_RELEASES_ENABLED: ${{ vars.TASC_IMMUTABLE_RELEASES_ENABLED }}
+        run: |
+          if [[ "$TASC_IMMUTABLE_RELEASES_ENABLED" != "true" ]]; then
+            echo "Enable repository immutable releases and set the release environment variable before publishing." >&2
+            exit 1
+          fi
+      - name: Verify reviewed release draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          draft="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" --jq .draft)"
+          if [[ "$draft" != "true" ]]; then
+            echo "Expected a draft release for $GITHUB_REF_NAME; refusing to publish or mutate another release." >&2
+            exit 1
+          fi
+      - name: Publish immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false
+      - name: Verify release immutability
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! immutable="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" --jq .immutable)"; then
+            if gh release edit "$GITHUB_REF_NAME" --draft; then
+              echo "Could not verify release immutability; release was returned to draft." >&2
+            else
+              echo "Could not verify or return $GITHUB_REF_NAME to draft; manual intervention is required." >&2
+            fi
+            exit 1
+          fi
+          if [[ "$immutable" != "true" ]]; then
+            if gh release edit "$GITHUB_REF_NAME" --draft; then
+              echo "GitHub did not make $GITHUB_REF_NAME immutable; release was returned to draft." >&2
+            else
+              echo "GitHub did not make $GITHUB_REF_NAME immutable and it could not be returned to draft; manual intervention is required." >&2
+            fi
+            exit 1
+          fi
