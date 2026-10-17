@@ -6,4 +6,5 @@ license = "MIT"
 repository = "https://github.com/pascalvanderheiden/turbo-agent-skills-cli"
 
 [dependencies]
+serde_json = "1"
 tasc-core = { path = "../tasc-core" }

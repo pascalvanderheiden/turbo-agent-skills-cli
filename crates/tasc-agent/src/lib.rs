@@ -1,2 +1,2 @@
 pub mod service;
-pub use service::AgentService;
+pub use service::{AgentService, CopilotAdapter, FsStateRepository};

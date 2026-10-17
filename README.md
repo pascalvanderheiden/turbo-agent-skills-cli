@@ -17,29 +17,38 @@ It is designed around a local-first Rust core that the CLI and Copilot SDK agent
 ```bash
 cargo install --path crates/tasc-cli
 
-tasc status
-tasc insights
-tasc evaluate
+tasc skill list
+tasc state status
 ```
 
 ## Command surface
 
 ```bash
-tasc status
-# Show tracked sources and installed skill inventory
+tasc skill list
+# Discover local Copilot skills and show which installations are tracked
 
-tasc add-source my-org/my-skill https://github.com/my-org/my-skill
-tasc insights
-# Show prioritized recommendations for the local skill environment
+tasc skill list --json
+# Render the same inventory facts as versioned JSON
 
-tasc evaluate
-# Run the local evaluation pass for tracked skills
+tasc skill adopt skill:file:///path/to/.github/skills/example
+# Record an already-discovered installation without changing its files
+
+tasc state status
+# Show versioned Local State and discovery counts
+
+tasc state status --json
+# Render status facts as versioned JSON
 ```
+
+`skill list` discovers skills with a `SKILL.md` from `.github/skills` in the
+current directory and `~/.copilot/skills`. Local State is stored at
+`$XDG_STATE_HOME/tasc/state.json` or `~/.local/state/tasc/state.json`; set
+`TASC_STATE_PATH` to use another file.
 
 ## Architecture
 
 - `tasc-core` holds the canonical language model and state types
-- `tasc-agent` exposes the Copilot-agent service layer
+- `tasc-agent` provides the shared inventory, adoption, adapter, and state service
 - `tasc-cli` provides the command-line surface
 
 ## Release and delivery
