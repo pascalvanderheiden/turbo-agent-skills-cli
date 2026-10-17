@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tasc_agent::gh::{Cancellation, GhSkill, GhSkillGateway};
+use tasc_agent::gh::{Cancellation, GhSkill, GhSkillGateway, GhSkillLifecycleGateway};
 
 struct Fixture(PathBuf);
 
@@ -158,4 +158,58 @@ async fn timeout_and_cancellation_bound_execution_and_reap_the_child() {
         gateway.search("review", &cancel).await.unwrap_err().code,
         "cancelled"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn lifecycle_operations_use_the_bounded_typed_gh_boundary() {
+    let fixture = Fixture::new("outdated");
+    let gateway = fixture.gateway();
+    let cancel = Cancellation::default();
+    let target = fixture.0.join("target");
+
+    let installed = gateway
+        .install(
+            "alpha/skills",
+            "skills/review/SKILL.md",
+            target.to_str().unwrap(),
+            Some("commit123"),
+            false,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(installed.contains("Installed review"));
+    let plan = gateway
+        .update_plan("review", target.to_str().unwrap(), &cancel)
+        .await
+        .unwrap();
+    assert!(plan.outdated);
+    assert!(plan.rendered_text.contains("tree-old"));
+    gateway
+        .update("review", target.to_str().unwrap(), true, &cancel)
+        .await
+        .unwrap();
+    let calls = fs::read_to_string(fixture.0.join("gh.calls")).unwrap();
+    assert!(calls.contains("--pin commit123 -- alpha/skills skills/review/SKILL.md"));
+    assert!(calls.contains("skill update --dir"));
+    assert!(calls.contains("--all --force -- review"));
+
+    let timed = Fixture::new("timeout");
+    let gateway = timed.gateway();
+    let cancellation = Cancellation::default();
+    let target = timed.0.join("target");
+    let operation = gateway.install(
+        "alpha/skills",
+        "skills/review/SKILL.md",
+        target.to_str().unwrap(),
+        None,
+        false,
+        &cancellation,
+    );
+    let trigger = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        cancellation.cancel();
+    };
+    let (result, ()) = tokio::join!(operation, trigger);
+    assert_eq!(result.unwrap_err().code, "cancelled");
 }

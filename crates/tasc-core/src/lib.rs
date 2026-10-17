@@ -45,6 +45,7 @@ pub enum InstallationStatus {
     Missing,
     Outdated,
     Failed,
+    Unverified,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

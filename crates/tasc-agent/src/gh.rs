@@ -46,6 +46,38 @@ pub trait GhSkillGateway {
     ) -> Result<String, Diagnostic>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdatePlan {
+    pub outdated: bool,
+    pub rendered_text: String,
+}
+
+#[allow(async_fn_in_trait)]
+pub trait GhSkillLifecycleGateway {
+    async fn install(
+        &self,
+        repository: &str,
+        path: &str,
+        target: &str,
+        revision: Option<&str>,
+        force: bool,
+        cancel: &Cancellation,
+    ) -> Result<String, Diagnostic>;
+    async fn update_plan(
+        &self,
+        skill: &str,
+        target: &str,
+        cancel: &Cancellation,
+    ) -> Result<UpdatePlan, Diagnostic>;
+    async fn update(
+        &self,
+        skill: &str,
+        target: &str,
+        force: bool,
+        cancel: &Cancellation,
+    ) -> Result<String, Diagnostic>;
+}
+
 pub struct GhSkill {
     executable: PathBuf,
     timeout: Duration,
@@ -186,6 +218,8 @@ impl GhSkill {
             "skill" => vec!["skill", "--help"],
             "search" => vec!["skill", "search", "--help"],
             "preview" => vec!["skill", "preview", "--help"],
+            "install" => vec!["skill", "install", "--help"],
+            "update" => vec!["skill", "update", "--help"],
             _ => unreachable!(),
         };
         let help = self.execute(&args, cancel).await?;
@@ -214,6 +248,18 @@ impl GhSkill {
                     && SEARCH_FIELDS.split(',').all(|field| help.contains(field))
             }
             "preview" => help.contains("preview <repository>"),
+            "install" => {
+                help.contains("install <repository>")
+                    && help.contains("--dir")
+                    && help.contains("--pin")
+                    && help.contains("--force")
+            }
+            "update" => {
+                help.contains("update")
+                    && help.contains("--dir")
+                    && help.contains("--dry-run")
+                    && help.contains("--all")
+            }
             _ => false,
         };
         if !supported {
@@ -281,6 +327,67 @@ impl GhSkillGateway for GhSkill {
         self.require("preview", cancel).await?;
         self.execute(&["skill", "preview", "--", repository, path], cancel)
             .await
+    }
+}
+
+impl GhSkillLifecycleGateway for GhSkill {
+    async fn install(
+        &self,
+        repository: &str,
+        path: &str,
+        target: &str,
+        revision: Option<&str>,
+        force: bool,
+        cancel: &Cancellation,
+    ) -> Result<String, Diagnostic> {
+        self.require("install", cancel).await?;
+        let mut args = vec!["skill", "install", "--dir", target];
+        if let Some(revision) = revision {
+            args.extend(["--pin", revision]);
+        }
+        if force {
+            args.push("--force");
+        }
+        args.extend(["--", repository, path]);
+        self.execute(&args, cancel).await
+    }
+
+    async fn update_plan(
+        &self,
+        skill: &str,
+        target: &str,
+        cancel: &Cancellation,
+    ) -> Result<UpdatePlan, Diagnostic> {
+        self.require("update", cancel).await?;
+        let output = self
+            .execute(
+                &["skill", "update", "--dir", target, "--dry-run", "--", skill],
+                cancel,
+            )
+            .await?;
+        Ok(UpdatePlan {
+            outdated: output.lines().any(|line| {
+                let line = line.trim_start();
+                line.starts_with('•') || line.starts_with("* ")
+            }),
+            rendered_text: output,
+        })
+    }
+
+    async fn update(
+        &self,
+        skill: &str,
+        target: &str,
+        force: bool,
+        cancel: &Cancellation,
+    ) -> Result<String, Diagnostic> {
+        self.require("update", cancel).await?;
+        let mut args = vec!["skill", "update", "--dir", target, "--all"];
+        if force {
+            args.push("--force");
+        }
+        args.extend(["--", skill]);
+        self.execute(&args, cancel).await
     }
 }
 

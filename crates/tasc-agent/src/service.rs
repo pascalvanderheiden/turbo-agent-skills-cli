@@ -1,3 +1,4 @@
+use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::Write,
@@ -8,7 +9,6 @@ use tasc_core::{
     AdapterTarget, Installation, InstallationStatus, Inventory, InventoryItem, LocalState,
     SkillIdentity, StateStatus, LOCAL_STATE_VERSION,
 };
-use sha2::{Digest, Sha256};
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -63,6 +63,8 @@ impl<A: SkillAdapter, R: StateRepository> AgentService<A, R> {
             let status = installation.map(|record| {
                 if record.status == InstallationStatus::Failed {
                     InstallationStatus::Failed
+                } else if record.content_digest.is_none() {
+                    InstallationStatus::Unverified
                 } else if record
                     .content_digest
                     .as_ref()
@@ -224,15 +226,23 @@ impl CopilotAdapter {
 
     pub fn target(scope: &str) -> Result<AdapterTarget, String> {
         let path = match scope {
-            "project" => std::env::current_dir()
-                .map_err(|error| format!("cannot locate project target: {error}"))?
-                .join(".github")
-                .join("skills"),
+            "project" => fs::canonicalize(
+                std::env::current_dir()
+                    .map_err(|error| format!("cannot locate project target: {error}"))?,
+            )
+            .map_err(|error| format!("cannot resolve project target: {error}"))?
+            .join(".github")
+            .join("skills"),
             "user" => {
                 let home = std::env::var_os("HOME")
                     .or_else(|| std::env::var_os("USERPROFILE"))
-                    .ok_or_else(|| "cannot locate user target: home directory is not set".to_string())?;
-                PathBuf::from(home).join(".copilot").join("skills")
+                    .ok_or_else(|| {
+                        "cannot locate user target: home directory is not set".to_string()
+                    })?;
+                fs::canonicalize(PathBuf::from(home))
+                    .map_err(|error| format!("cannot resolve user target: {error}"))?
+                    .join(".copilot")
+                    .join("skills")
             }
             _ => return Err(format!("unsupported Copilot installation scope '{scope}'")),
         };
@@ -291,12 +301,13 @@ impl SkillAdapter for CopilotAdapter {
                 let remote_path = frontmatter_value(&contents, "github-path");
                 let identity_path = remote_path.unwrap_or_else(|| relative_path.clone());
                 let identity = SkillIdentity {
-                    id: format!(
-                        "skill:{source_locator}/{}",
-                        encode_uri_path(&identity_path)
-                    ),
-                    name: skill_name(&path.join("SKILL.md"))
-                        .unwrap_or_else(|| path.file_name().unwrap_or_default().to_string_lossy().into_owned()),
+                    id: format!("skill:{source_locator}/{}", encode_uri_path(&identity_path)),
+                    name: skill_name(&path.join("SKILL.md")).unwrap_or_else(|| {
+                        path.file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned()
+                    }),
                     source: source_locator,
                     relative_path: identity_path,
                 };
@@ -313,122 +324,122 @@ impl SkillAdapter for CopilotAdapter {
             }
         }
 
-        fn collect_skill_directories(root: &Path, skills: &mut Vec<PathBuf>) -> Result<(), String> {
-            let entries = fs::read_dir(root)
-                .map_err(|error| format!("cannot read skill target '{}': {error}", root.display()))?;
-            for entry in entries {
-                let entry = entry.map_err(|error| {
-                    format!("cannot read skill entry in '{}': {error}", root.display())
-                })?;
-                let path = entry.path();
-                let file_type = entry
-                    .file_type()
-                    .map_err(|error| format!("cannot inspect '{}': {error}", path.display()))?;
-                if !file_type.is_dir() {
-                    continue;
-                }
-                if path.join("SKILL.md").is_file() {
-                    skills.push(path);
-                } else {
-                    collect_skill_directories(&path, skills)?;
-                }
-            }
-            Ok(())
-        }
-
-        fn frontmatter_value(contents: &str, key: &str) -> Option<String> {
-            let mut lines = contents.lines();
-            if lines.next()?.trim() != "---" {
-                return None;
-            }
-            let mut in_metadata = false;
-            for line in lines {
-                if line.trim() == "---" {
-                    break;
-                }
-                let trimmed = line.trim();
-                if trimmed == "metadata:" {
-                    in_metadata = true;
-                    continue;
-                }
-                if let Some((name, value)) = trimmed.split_once(':') {
-                    let nested = line.starts_with(char::is_whitespace);
-                    if (key == name.trim() && !nested) || (in_metadata && key == name.trim() && nested) {
-                        let value = value.trim().trim_matches(['\'', '"']);
-                        if !value.is_empty() {
-                            return Some(value.to_string());
-                        }
-                    }
-                }
-                if !line.starts_with(char::is_whitespace) && trimmed != "metadata:" {
-                    in_metadata = false;
-                }
-            }
-            None
-        }
-
-        fn skill_content_digest(root: &Path) -> Result<String, String> {
-            const MAX_SKILL_BYTES: u64 = 50 * 1024 * 1024;
-            fn files(directory: &Path, output: &mut Vec<PathBuf>) -> Result<(), String> {
-                for entry in fs::read_dir(directory)
-                    .map_err(|error| format!("cannot inspect skill '{}': {error}", directory.display()))?
-                {
-                    let entry = entry.map_err(|error| format!("cannot inspect skill entry: {error}"))?;
-                    let path = entry.path();
-                    let metadata = fs::symlink_metadata(&path)
-                        .map_err(|error| format!("cannot inspect '{}': {error}", path.display()))?;
-                    if metadata.file_type().is_symlink() || metadata.is_file() {
-                        output.push(path);
-                    } else if metadata.is_dir() {
-                        files(&path, output)?;
-                    }
-                }
-                Ok(())
-            }
-
-            let mut paths = Vec::new();
-            files(root, &mut paths)?;
-            paths.sort();
-            let mut total = 0_u64;
-            let mut digest = Sha256::new();
-            for path in paths {
-                let relative = path
-                    .strip_prefix(root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                digest.update(relative.as_bytes());
-                digest.update([0]);
-                let metadata = fs::symlink_metadata(&path)
-                    .map_err(|error| format!("cannot inspect '{}': {error}", path.display()))?;
-                if metadata.file_type().is_symlink() {
-                    digest.update(
-                        fs::read_link(&path)
-                            .map_err(|error| format!("cannot read link '{}': {error}", path.display()))?
-                            .to_string_lossy()
-                            .as_bytes(),
-                    );
-                } else {
-                    total = total.saturating_add(metadata.len());
-                    if total > MAX_SKILL_BYTES {
-                        return Err("skill content exceeds the 50 MiB inspection limit".to_string());
-                    }
-                    digest.update(
-                        fs::read(&path)
-                            .map_err(|error| format!("cannot read '{}': {error}", path.display()))?,
-                    );
-                }
-                digest.update([0]);
-            }
-            Ok(digest
-                .finalize()
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect())
-        }
         skills.sort_by(|left, right| left.identity.id.cmp(&right.identity.id));
         Ok(skills)
     }
+}
+
+fn collect_skill_directories(root: &Path, skills: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries = fs::read_dir(root)
+        .map_err(|error| format!("cannot read skill target '{}': {error}", root.display()))?;
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| format!("cannot read skill entry in '{}': {error}", root.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("cannot inspect '{}': {error}", path.display()))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+        if path.join("SKILL.md").is_file() {
+            skills.push(path);
+        } else {
+            collect_skill_directories(&path, skills)?;
+        }
+    }
+    Ok(())
+}
+
+fn frontmatter_value(contents: &str, key: &str) -> Option<String> {
+    let mut lines = contents.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+    let mut in_metadata = false;
+    for line in lines {
+        if line.trim() == "---" {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed == "metadata:" {
+            in_metadata = true;
+            continue;
+        }
+        if let Some((name, value)) = trimmed.split_once(':') {
+            let nested = line.starts_with(char::is_whitespace);
+            if (key == name.trim() && !nested) || (in_metadata && key == name.trim() && nested) {
+                let value = value.trim().trim_matches(['\'', '"']);
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+        if !line.starts_with(char::is_whitespace) && trimmed != "metadata:" {
+            in_metadata = false;
+        }
+    }
+    None
+}
+
+pub(crate) fn skill_content_digest(root: &Path) -> Result<String, String> {
+    const MAX_SKILL_BYTES: u64 = 50 * 1024 * 1024;
+    fn files(directory: &Path, output: &mut Vec<PathBuf>) -> Result<(), String> {
+        for entry in fs::read_dir(directory)
+            .map_err(|error| format!("cannot inspect skill '{}': {error}", directory.display()))?
+        {
+            let entry = entry.map_err(|error| format!("cannot inspect skill entry: {error}"))?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| format!("cannot inspect '{}': {error}", path.display()))?;
+            if metadata.file_type().is_symlink() || metadata.is_file() {
+                output.push(path);
+            } else if metadata.is_dir() {
+                files(&path, output)?;
+            }
+        }
+        Ok(())
+    }
+
+    let mut paths = Vec::new();
+    files(root, &mut paths)?;
+    paths.sort();
+    let mut total = 0_u64;
+    let mut digest = Sha256::new();
+    for path in paths {
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        digest.update(relative.as_bytes());
+        digest.update([0]);
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| format!("cannot inspect '{}': {error}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            digest.update(
+                fs::read_link(&path)
+                    .map_err(|error| format!("cannot read link '{}': {error}", path.display()))?
+                    .to_string_lossy()
+                    .as_bytes(),
+            );
+        } else {
+            total = total.saturating_add(metadata.len());
+            if total > MAX_SKILL_BYTES {
+                return Err("skill content exceeds the 50 MiB inspection limit".to_string());
+            }
+            digest.update(
+                fs::read(&path)
+                    .map_err(|error| format!("cannot read '{}': {error}", path.display()))?,
+            );
+        }
+        digest.update([0]);
+    }
+    Ok(digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 fn local_source(path: &Path) -> String {
@@ -683,6 +694,19 @@ mod tests {
         assert!(error.contains("invalid Local State"));
         assert_eq!(fs::read(&path).unwrap(), b"{broken");
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn version_one_installations_without_lifecycle_fields_remain_readable() {
+        let state: LocalState = serde_json::from_str(
+            r#"{"version":1,"identities":[{"id":"skill:old","name":"old","source":"file:///skills","relative_path":"old"}],"targets":[{"id":"target:old","assistant":"copilot","path":"/skills"}],"installations":[{"id":"installation:old","skill_id":"skill:old","target_id":"target:old","path":"/skills/old"}]}"#,
+        )
+        .unwrap();
+        let installation = &state.installations[0];
+        assert_eq!(installation.status, InstallationStatus::Installed);
+        assert_eq!(installation.source_revision, None);
+        assert_eq!(installation.content_digest, None);
+        assert_eq!(installation.last_error, None);
     }
 
     #[test]

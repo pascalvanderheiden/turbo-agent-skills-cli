@@ -275,3 +275,242 @@ fn discovery_commands_have_stable_envelopes_and_preview_never_installs() {
     assert!(!calls.contains("publish"));
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn lifecycle_plans_protect_modified_content_and_record_recoverable_state() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = test_dir();
+    fs::create_dir_all(directory.join(".git")).unwrap();
+    fs::create_dir_all(&directory).unwrap();
+    let gh = directory.join("gh");
+    fs::write(&gh, include_str!("../../tasc-agent/tests/fixtures/gh.sh")).unwrap();
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(directory.join("gh.mode"), "supported\n").unwrap();
+    fs::write(
+        directory.join("gh.search.json"),
+        include_str!("../../tasc-agent/tests/fixtures/search.json"),
+    )
+    .unwrap();
+    let state_path = directory.join("state/state.json");
+    let invoke = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_tasc"))
+            .args(args)
+            .current_dir(&directory)
+            .env("PATH", &directory)
+            .env("HOME", directory.join("home"))
+            .env("TASC_STATE_PATH", &state_path)
+            .output()
+            .unwrap()
+    };
+
+    let dry_run = invoke(&[
+        "skill",
+        "install",
+        "review",
+        "--source",
+        "alpha/skills",
+        "--dry-run",
+        "--json",
+    ]);
+    assert!(
+        dry_run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dry_run.stderr)
+    );
+    let planned: serde_json::Value = serde_json::from_slice(&dry_run.stdout).unwrap();
+    assert_eq!(planned["result"]["status"], "planned");
+    assert_eq!(planned["result"]["dryRun"], true);
+    assert!(!state_path.exists());
+    assert!(!directory.join(".github/skills/review").exists());
+
+    let unapproved = invoke(&["skill", "install", "review", "--source", "alpha/skills"]);
+    assert_eq!(unapproved.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&unapproved.stderr).contains("confirmation_required"));
+    assert!(!directory.join(".github/skills/review").exists());
+
+    let installed = invoke(&[
+        "skill",
+        "install",
+        "review",
+        "--source",
+        "alpha/skills",
+        "--yes",
+        "--json",
+    ]);
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let installed: serde_json::Value = serde_json::from_slice(&installed.stdout).unwrap();
+    let installation = installed["result"]["installation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        installed["result"]["installation"]["source_revision"],
+        "tree-install"
+    );
+    assert_eq!(
+        installed["result"]["installation"]["target_id"],
+        format!(
+            "target:copilot:file://{}",
+            directory.join(".github/skills").to_string_lossy()
+        )
+    );
+
+    fs::write(directory.join("gh.mode"), "outdated\n").unwrap();
+    let outdated_plan = invoke(&["skill", "update", &installation, "--dry-run", "--json"]);
+    assert!(outdated_plan.status.success());
+    let outdated_plan: serde_json::Value = serde_json::from_slice(&outdated_plan.stdout).unwrap();
+    assert_eq!(outdated_plan["result"]["status"], "outdated");
+    assert_eq!(outdated_plan["result"]["outdated"], true);
+    let updated = invoke(&["skill", "update", &installation, "--yes", "--json"]);
+    assert!(
+        updated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&updated.stderr)
+    );
+    let updated: serde_json::Value = serde_json::from_slice(&updated.stdout).unwrap();
+    assert_eq!(
+        updated["result"]["installation"]["source_revision"],
+        "tree-updated"
+    );
+
+    let skill_file = directory.join(".github/skills/review/SKILL.md");
+    let original = fs::read_to_string(&skill_file).unwrap();
+    fs::write(
+        &skill_file,
+        original.replace("Updated fixture content.", "Local modification."),
+    )
+    .unwrap();
+    let inventory = invoke(&["skill", "list", "--json"]);
+    let inventory: serde_json::Value = serde_json::from_slice(&inventory.stdout).unwrap();
+    assert_eq!(inventory["items"][0]["status"], "modified");
+
+    let protected_remove = invoke(&["skill", "remove", &installation, "--yes"]);
+    assert_eq!(protected_remove.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&protected_remove.stderr).contains("modified_installation"));
+    assert!(skill_file.exists());
+    let force_remove_without_confirmation = invoke(&["skill", "remove", &installation, "--force"]);
+    assert_eq!(force_remove_without_confirmation.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&force_remove_without_confirmation.stderr)
+            .contains("confirmation_required")
+    );
+    assert!(skill_file.exists());
+
+    fs::write(directory.join("gh.mode"), "outdated\n").unwrap();
+    let update_plan = invoke(&["skill", "update", &installation, "--dry-run", "--json"]);
+    assert!(update_plan.status.success());
+    let update_plan: serde_json::Value = serde_json::from_slice(&update_plan.stdout).unwrap();
+    assert_eq!(update_plan["result"]["modified"], true);
+    assert_eq!(update_plan["result"]["outdated"], true);
+    assert_eq!(update_plan["result"]["dryRun"], true);
+    assert!(fs::read_to_string(&skill_file)
+        .unwrap()
+        .contains("Local modification."));
+
+    let protected_update = invoke(&["skill", "update", &installation, "--yes"]);
+    assert_eq!(protected_update.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&protected_update.stderr).contains("modified_installation"));
+    let force_without_confirmation = invoke(&["skill", "update", &installation, "--force"]);
+    assert_eq!(force_without_confirmation.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&force_without_confirmation.stderr)
+        .contains("confirmation_required"));
+
+    let recovered = invoke(&[
+        "skill",
+        "update",
+        &installation,
+        "--force",
+        "--yes",
+        "--json",
+    ]);
+    assert!(
+        recovered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    let recovered: serde_json::Value = serde_json::from_slice(&recovered.stdout).unwrap();
+    assert_eq!(
+        recovered["result"]["installation"]["source_revision"],
+        "tree-updated"
+    );
+    assert!(fs::read_to_string(&skill_file)
+        .unwrap()
+        .contains("Updated fixture content."));
+
+    let remove_plan = invoke(&["skill", "remove", &installation, "--dry-run", "--json"]);
+    assert!(remove_plan.status.success());
+    let remove_plan: serde_json::Value = serde_json::from_slice(&remove_plan.stdout).unwrap();
+    assert_eq!(remove_plan["result"]["status"], "planned");
+    assert!(skill_file.exists());
+    let unapproved_remove = invoke(&["skill", "remove", &installation]);
+    assert_eq!(unapproved_remove.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&unapproved_remove.stderr).contains("confirmation_required"));
+    assert!(skill_file.exists());
+    let removed = invoke(&["skill", "remove", &installation, "--yes", "--json"]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(!directory.join(".github/skills/review").exists());
+
+    fs::write(directory.join("gh.mode"), "partial-failure\n").unwrap();
+    let failed = invoke(&[
+        "skill",
+        "install",
+        "review",
+        "--source",
+        "alpha/skills",
+        "--yes",
+    ]);
+    assert!(!failed.status.success());
+    let inventory = invoke(&["skill", "list", "--json"]);
+    let inventory: serde_json::Value = serde_json::from_slice(&inventory.stdout).unwrap();
+    assert_eq!(inventory["items"][0]["status"], "failed");
+
+    let force_without_confirmation = invoke(&[
+        "skill",
+        "install",
+        "review",
+        "--source",
+        "alpha/skills",
+        "--force",
+    ]);
+    assert_eq!(force_without_confirmation.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&force_without_confirmation.stderr)
+        .contains("confirmation_required"));
+
+    fs::write(directory.join("gh.mode"), "supported\n").unwrap();
+    let recovered_install = invoke(&[
+        "skill",
+        "install",
+        "review",
+        "--source",
+        "alpha/skills",
+        "--force",
+        "--yes",
+        "--json",
+    ]);
+    assert!(
+        recovered_install.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovered_install.stderr)
+    );
+    let recovered_install: serde_json::Value =
+        serde_json::from_slice(&recovered_install.stdout).unwrap();
+    assert_eq!(
+        recovered_install["result"]["installation"]["status"],
+        "installed"
+    );
+    fs::remove_dir_all(directory.join(".github/skills/review")).unwrap();
+    let missing = invoke(&["skill", "list", "--json"]);
+    let missing: serde_json::Value = serde_json::from_slice(&missing.stdout).unwrap();
+    assert_eq!(missing["items"][0]["status"], "missing");
+    fs::remove_dir_all(directory).unwrap();
+}
