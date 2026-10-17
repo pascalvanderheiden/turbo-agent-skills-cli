@@ -1,3 +1,4 @@
+use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::Write,
@@ -5,8 +6,8 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 use tasc_core::{
-    AdapterTarget, Installation, Inventory, InventoryItem, LocalState, SkillIdentity, StateStatus,
-    LOCAL_STATE_VERSION,
+    AdapterTarget, Installation, InstallationStatus, Inventory, InventoryItem, LocalState,
+    SkillIdentity, StateStatus, LOCAL_STATE_VERSION,
 };
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -25,6 +26,8 @@ pub struct DiscoveredSkill {
     pub identity: SkillIdentity,
     pub target: AdapterTarget,
     pub path: String,
+    pub source_revision: Option<String>,
+    pub content_digest: String,
 }
 
 pub struct AgentService<A, R> {
@@ -47,29 +50,78 @@ impl<A: SkillAdapter, R: StateRepository> AgentService<A, R> {
     }
 
     fn inventory_for(&self, state: &LocalState) -> Result<Inventory, String> {
-        let tracked = state
-            .installations
-            .iter()
-            .map(|installation| installation.id.as_str())
-            .collect::<std::collections::HashSet<_>>();
-        let items = self
-            .adapter
-            .discover()?
-            .into_iter()
-            .map(|discovered| {
-                let installation_id = InventoryItem::canonical_installation_id(
-                    &discovered.identity.id,
-                    &discovered.target.id,
-                );
-                InventoryItem {
-                    identity: discovered.identity,
-                    target: discovered.target,
-                    path: discovered.path,
-                    tracked: tracked.contains(installation_id.as_str()),
-                    installation_id,
+        let discovered = self.adapter.discover()?;
+        let mut seen = std::collections::HashSet::new();
+        let mut items = Vec::new();
+        for skill in discovered {
+            let installation_id =
+                InventoryItem::canonical_installation_id(&skill.identity.id, &skill.target.id);
+            let installation = state
+                .installations
+                .iter()
+                .find(|installation| installation.id == installation_id);
+            let status = installation.map(|record| {
+                if record.status == InstallationStatus::Failed {
+                    InstallationStatus::Failed
+                } else if record.content_digest.is_none() {
+                    InstallationStatus::Unverified
+                } else if record
+                    .content_digest
+                    .as_ref()
+                    .is_some_and(|digest| digest != &skill.content_digest)
+                {
+                    InstallationStatus::Modified
+                } else {
+                    record.status
                 }
-            })
-            .collect();
+            });
+            if let Some(record) = installation {
+                seen.insert(record.id.as_str());
+            }
+            items.push(InventoryItem {
+                identity: skill.identity,
+                target: skill.target,
+                installation_id,
+                path: skill.path,
+                tracked: installation.is_some(),
+                status,
+                source_revision: installation
+                    .and_then(|record| record.source_revision.clone())
+                    .or(skill.source_revision),
+            });
+        }
+        for installation in &state.installations {
+            if seen.contains(installation.id.as_str()) {
+                continue;
+            }
+            let Some(identity) = state
+                .identities
+                .iter()
+                .find(|identity| identity.id == installation.skill_id)
+            else {
+                continue;
+            };
+            let Some(target) = state
+                .targets
+                .iter()
+                .find(|target| target.id == installation.target_id)
+            else {
+                continue;
+            };
+            items.push(InventoryItem {
+                identity: identity.clone(),
+                target: target.clone(),
+                installation_id: installation.id.clone(),
+                path: installation.path.clone(),
+                tracked: true,
+                status: Some(if installation.status == InstallationStatus::Failed {
+                    InstallationStatus::Failed
+                } else {
+                    InstallationStatus::Missing
+                }),
+                source_revision: installation.source_revision.clone(),
+            });
+        }
         Ok(Inventory {
             schema_version: LOCAL_STATE_VERSION,
             items,
@@ -115,6 +167,10 @@ impl<A: SkillAdapter, R: StateRepository> AgentService<A, R> {
             skill_id: discovered.identity.id,
             target_id: discovered.target.id,
             path: discovered.path,
+            source_revision: discovered.source_revision,
+            content_digest: Some(discovered.content_digest),
+            status: InstallationStatus::Installed,
+            last_error: None,
         };
         state.installations.push(installation.clone());
         self.repository.save(&state)?;
@@ -167,6 +223,36 @@ impl CopilotAdapter {
         }
         Self::new(roots)
     }
+
+    pub fn target(scope: &str) -> Result<AdapterTarget, String> {
+        let path = match scope {
+            "project" => fs::canonicalize(
+                std::env::current_dir()
+                    .map_err(|error| format!("cannot locate project target: {error}"))?,
+            )
+            .map_err(|error| format!("cannot resolve project target: {error}"))?
+            .join(".github")
+            .join("skills"),
+            "user" => {
+                let home = std::env::var_os("HOME")
+                    .or_else(|| std::env::var_os("USERPROFILE"))
+                    .ok_or_else(|| {
+                        "cannot locate user target: home directory is not set".to_string()
+                    })?;
+                fs::canonicalize(PathBuf::from(home))
+                    .map_err(|error| format!("cannot resolve user target: {error}"))?
+                    .join(".copilot")
+                    .join("skills")
+            }
+            _ => return Err(format!("unsupported Copilot installation scope '{scope}'")),
+        };
+        let source = local_source(&path);
+        Ok(AdapterTarget {
+            id: format!("target:copilot:{source}"),
+            assistant: "copilot".to_string(),
+            path: path.to_string_lossy().into_owned(),
+        })
+    }
 }
 
 impl SkillAdapter for CopilotAdapter {
@@ -183,34 +269,15 @@ impl SkillAdapter for CopilotAdapter {
                     ))
                 }
             };
-            let entries = fs::read_dir(&canonical_root).map_err(|error| {
-                format!(
-                    "cannot read skill target '{}': {error}",
-                    canonical_root.display()
-                )
-            })?;
             let source = local_source(&canonical_root);
             let target = AdapterTarget {
                 id: format!("target:copilot:{source}"),
                 assistant: "copilot".to_string(),
                 path: canonical_root.to_string_lossy().into_owned(),
             };
-            for entry in entries {
-                let entry = entry.map_err(|error| {
-                    format!(
-                        "cannot read skill entry in '{}': {error}",
-                        canonical_root.display()
-                    )
-                })?;
-                let path = entry.path();
-                if !entry
-                    .file_type()
-                    .map_err(|error| format!("cannot inspect '{}': {error}", path.display()))?
-                    .is_dir()
-                    || !path.join("SKILL.md").is_file()
-                {
-                    continue;
-                }
+            let mut directories = Vec::new();
+            collect_skill_directories(&canonical_root, &mut directories)?;
+            for path in directories {
                 let directory = fs::canonicalize(&path)
                     .map_err(|error| format!("cannot resolve '{}': {error}", path.display()))?;
                 let relative_path = path
@@ -218,26 +285,161 @@ impl SkillAdapter for CopilotAdapter {
                     .unwrap_or(&path)
                     .to_string_lossy()
                     .replace('\\', "/");
+                let contents = fs::read_to_string(path.join("SKILL.md"))
+                    .map_err(|error| format!("cannot read '{}': {error}", path.display()))?;
+                let content_digest = skill_content_digest(&path)?;
+                let remote_source = frontmatter_value(&contents, "github-repo")
+                    .filter(|value| value.starts_with("https://github.com/"));
+                let source_locator = remote_source
+                    .map(|source| {
+                        source
+                            .trim_end_matches('/')
+                            .trim_end_matches(".git")
+                            .to_ascii_lowercase()
+                    })
+                    .unwrap_or_else(|| source.clone());
+                let remote_path = frontmatter_value(&contents, "github-path");
+                let identity_path = remote_path.unwrap_or_else(|| relative_path.clone());
                 let identity = SkillIdentity {
-                    id: format!(
-                        "skill:{source}/{}",
-                        encode_uri_path(&relative_path.replace('\\', "/"))
-                    ),
-                    name: skill_name(&path.join("SKILL.md"))
-                        .unwrap_or_else(|| entry.file_name().to_string_lossy().into_owned()),
-                    source: source.clone(),
-                    relative_path,
+                    id: format!("skill:{source_locator}/{}", encode_uri_path(&identity_path)),
+                    name: skill_name(&path.join("SKILL.md")).unwrap_or_else(|| {
+                        path.file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned()
+                    }),
+                    source: source_locator,
+                    relative_path: identity_path,
                 };
+                let source_revision = frontmatter_value(&contents, "github-tree-sha")
+                    .or_else(|| frontmatter_value(&contents, "github-sha"))
+                    .or_else(|| Some(format!("sha256:{content_digest}")));
                 skills.push(DiscoveredSkill {
                     identity,
                     target: target.clone(),
                     path: directory.to_string_lossy().into_owned(),
+                    source_revision,
+                    content_digest,
                 });
             }
         }
+
         skills.sort_by(|left, right| left.identity.id.cmp(&right.identity.id));
         Ok(skills)
     }
+}
+
+fn collect_skill_directories(root: &Path, skills: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries = fs::read_dir(root)
+        .map_err(|error| format!("cannot read skill target '{}': {error}", root.display()))?;
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| format!("cannot read skill entry in '{}': {error}", root.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("cannot inspect '{}': {error}", path.display()))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+        if path.join("SKILL.md").is_file() {
+            skills.push(path);
+        } else {
+            collect_skill_directories(&path, skills)?;
+        }
+    }
+    Ok(())
+}
+
+fn frontmatter_value(contents: &str, key: &str) -> Option<String> {
+    let mut lines = contents.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+    let mut in_metadata = false;
+    for line in lines {
+        if line.trim() == "---" {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed == "metadata:" {
+            in_metadata = true;
+            continue;
+        }
+        if let Some((name, value)) = trimmed.split_once(':') {
+            let nested = line.starts_with(char::is_whitespace);
+            if (key == name.trim() && !nested) || (in_metadata && key == name.trim() && nested) {
+                let value = value.trim().trim_matches(['\'', '"']);
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+        if !line.starts_with(char::is_whitespace) && trimmed != "metadata:" {
+            in_metadata = false;
+        }
+    }
+    None
+}
+
+pub(crate) fn skill_content_digest(root: &Path) -> Result<String, String> {
+    const MAX_SKILL_BYTES: u64 = 50 * 1024 * 1024;
+    fn files(directory: &Path, output: &mut Vec<PathBuf>) -> Result<(), String> {
+        for entry in fs::read_dir(directory)
+            .map_err(|error| format!("cannot inspect skill '{}': {error}", directory.display()))?
+        {
+            let entry = entry.map_err(|error| format!("cannot inspect skill entry: {error}"))?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| format!("cannot inspect '{}': {error}", path.display()))?;
+            if metadata.file_type().is_symlink() || metadata.is_file() {
+                output.push(path);
+            } else if metadata.is_dir() {
+                files(&path, output)?;
+            }
+        }
+        Ok(())
+    }
+
+    let mut paths = Vec::new();
+    files(root, &mut paths)?;
+    paths.sort();
+    let mut total = 0_u64;
+    let mut digest = Sha256::new();
+    for path in paths {
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        digest.update(relative.as_bytes());
+        digest.update([0]);
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| format!("cannot inspect '{}': {error}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            digest.update(
+                fs::read_link(&path)
+                    .map_err(|error| format!("cannot read link '{}': {error}", path.display()))?
+                    .to_string_lossy()
+                    .as_bytes(),
+            );
+        } else {
+            total = total.saturating_add(metadata.len());
+            if total > MAX_SKILL_BYTES {
+                return Err("skill content exceeds the 50 MiB inspection limit".to_string());
+            }
+            digest.update(
+                fs::read(&path)
+                    .map_err(|error| format!("cannot read '{}': {error}", path.display()))?,
+            );
+        }
+        digest.update([0]);
+    }
+    Ok(digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 fn local_source(path: &Path) -> String {
@@ -440,6 +642,8 @@ mod tests {
             },
             target,
             path: "/workspace/.github/skills/review".to_string(),
+            source_revision: Some("tree-sha".to_string()),
+            content_digest: "content-sha".to_string(),
         }
     }
 
@@ -490,6 +694,19 @@ mod tests {
         assert!(error.contains("invalid Local State"));
         assert_eq!(fs::read(&path).unwrap(), b"{broken");
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn version_one_installations_without_lifecycle_fields_remain_readable() {
+        let state: LocalState = serde_json::from_str(
+            r#"{"version":1,"identities":[{"id":"skill:old","name":"old","source":"file:///skills","relative_path":"old"}],"targets":[{"id":"target:old","assistant":"copilot","path":"/skills"}],"installations":[{"id":"installation:old","skill_id":"skill:old","target_id":"target:old","path":"/skills/old"}]}"#,
+        )
+        .unwrap();
+        let installation = &state.installations[0];
+        assert_eq!(installation.status, InstallationStatus::Installed);
+        assert_eq!(installation.source_revision, None);
+        assert_eq!(installation.content_digest, None);
+        assert_eq!(installation.last_error, None);
     }
 
     #[test]

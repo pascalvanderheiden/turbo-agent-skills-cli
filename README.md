@@ -64,6 +64,15 @@ tasc skill search review --format json
 tasc skill preview 'skill:https://github.com/owner/repo/skills/review/SKILL.md'
 tasc skill preview skills/review/SKILL.md --source owner/repo --json
 # Fetch upstream preview text without installing or executing skill files
+
+tasc skill install review --source owner/repo --dry-run
+tasc skill install review --source owner/repo --yes
+# Plan and install a selected skill; outside a repository, also pass --scope user or project
+
+tasc skill update <installation-id> --dry-run
+tasc skill update <installation-id> --yes
+tasc skill remove <installation-id> --yes
+# Update or remove one recorded Installation
 ```
 
 `skill list` discovers skills with a `SKILL.md` from `.github/skills` in the
@@ -104,6 +113,21 @@ Duplicate identities are collapsed. Name-based preview requires one exact
 match; ambiguity returns candidate IDs without selecting or previewing any.
 Use a returned Skill Identity or an exact `SKILL.md` path with `--source` for
 automation. Search and preview do not write Local State or installation files.
+
+### Installation lifecycle
+
+Install and update delegate to supported `gh skill` commands; removal deletes
+only the recorded skill directory and then updates Local State. Every lifecycle
+command supports `--dry-run`. Interactive mutations display a plan and prompt
+for approval; non-interactive mutations require `--yes`. Updating or removing
+locally modified content additionally requires `--force` and approval.
+
+Successful installs and updates record the immutable `github-tree-sha` supplied
+by `gh skill` (or a SHA-256 content digest when upstream metadata is absent),
+the Adapter Target, and a local content digest. `skill list` reconciles tracked
+Installations and reports modified, missing, or failed states; update plans
+report when an Installation is outdated. A failed external operation remains
+visible in Local State so it can be inspected and retried.
 
 Each GitHub CLI invocation has a 30-second timeout and a 1-MiB limit per output
 stream, with closed stdin, disabled prompts/pagers, and cancellation on Ctrl-C.

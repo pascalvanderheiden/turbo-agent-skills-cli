@@ -1,13 +1,15 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::io::IsTerminal;
 use tasc_agent::{
     discovery::DiscoveryService,
     gh::{Cancellation, GhSkill},
+    lifecycle::{LifecycleResult, LifecycleService},
     service::FsStateRepository,
     AgentService, CopilotAdapter, FsWatchCheckRepository, WatchService,
 };
 use tasc_core::{
     discovery::{Diagnostic, Envelope},
-    Inventory, StateStatus,
+    Inventory, SkillIdentity, StateStatus,
 };
 
 #[derive(Parser)]
@@ -67,10 +69,58 @@ enum SkillCommands {
         #[command(flatten)]
         output: JsonOutput,
     },
+    /// Install a selected GitHub skill into a Copilot target.
+    Install {
+        selector: String,
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long)]
+        scope: Option<InstallScope>,
+        #[arg(long)]
+        revision: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        force: bool,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
+    /// Update one tracked Installation.
+    Update {
+        selector: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        force: bool,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
+    /// Remove one tracked Installation.
+    Remove {
+        selector: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        force: bool,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
     /// List discovered skills and whether they are tracked in Local State.
     List(JsonOutput),
     /// Explicitly record a discovered installation without changing its files.
     Adopt { id: String },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum InstallScope {
+    Project,
+    User,
 }
 
 #[derive(Args)]
@@ -166,6 +216,12 @@ async fn main() {
             Commands::Skill {
                 command: SkillCommands::Preview { output, .. },
             } => output.json,
+            Commands::Skill {
+                command:
+                    SkillCommands::Install { output, .. }
+                    | SkillCommands::Update { output, .. }
+                    | SkillCommands::Remove { output, .. },
+            } => output.json,
             Commands::Watch { command } => match command {
                 WatchCommands::Add { output, .. }
                 | WatchCommands::Remove { output, .. }
@@ -206,6 +262,15 @@ async fn main() {
         Commands::Skill {
             command: SkillCommands::Preview { .. },
         } => "skill preview",
+        Commands::Skill {
+            command: SkillCommands::Install { .. },
+        } => "skill install",
+        Commands::Skill {
+            command: SkillCommands::Update { .. },
+        } => "skill update",
+        Commands::Skill {
+            command: SkillCommands::Remove { .. },
+        } => "skill remove",
         _ => "local",
     };
     let cancel = Cancellation::default();
@@ -247,7 +312,10 @@ async fn run(
         &cli.command,
         Commands::Search(_)
             | Commands::Skill {
-                command: SkillCommands::Search(_) | SkillCommands::Preview { .. }
+                command: SkillCommands::Search(_)
+                    | SkillCommands::Preview { .. }
+                    | SkillCommands::Install { .. }
+                    | SkillCommands::Update { .. }
             }
             | Commands::Source {
                 command: SourceCommands::Capabilities(_)
@@ -303,8 +371,13 @@ async fn run(
         ),
         Commands::Watch { command } => run_watch(command, state_path, cancel).await?,
         command => {
-            return run_local(command, state_path, cli.format == OutputFormat::Json)
-                .map_err(local_error);
+            return run_local(
+                command,
+                state_path,
+                cli.format == OutputFormat::Json,
+                cancel,
+            )
+            .await;
         }
     };
     let envelope = Envelope::new(command_name, value);
@@ -414,16 +487,26 @@ fn local_error(message: String) -> Diagnostic {
     )
 }
 
-fn run_local(command: Commands, state_path: std::path::PathBuf, json: bool) -> Result<(), String> {
-    let service = AgentService::new(CopilotAdapter::local(), FsStateRepository::new(state_path));
+async fn run_local(
+    command: Commands,
+    state_path: std::path::PathBuf,
+    json: bool,
+    cancel: &Cancellation,
+) -> Result<(), Diagnostic> {
+    let repository = FsStateRepository::new(state_path);
+    let service = AgentService::new(CopilotAdapter::local(), repository.clone());
     match command {
         Commands::Skill {
             command: SkillCommands::List(output),
-        } => render_inventory(&service.inventory()?, output.json || json),
+        } => render_inventory(
+            &service.inventory().map_err(local_error)?,
+            output.json || json,
+        )
+        .map_err(local_error),
         Commands::Skill {
             command: SkillCommands::Adopt { id },
         } => {
-            let installation = service.adopt(&id)?;
+            let installation = service.adopt(&id).map_err(local_error)?;
             println!(
                 "Adopted {} at {} ({})",
                 installation.skill_id, installation.path, installation.target_id
@@ -432,9 +515,239 @@ fn run_local(command: Commands, state_path: std::path::PathBuf, json: bool) -> R
         }
         Commands::State {
             command: StateCommands::Status(output),
-        } => render_status(&service.status()?, output.json || json),
+        } => render_status(&service.status().map_err(local_error)?, output.json || json)
+            .map_err(local_error),
+        Commands::Skill {
+            command:
+                SkillCommands::Install {
+                    selector,
+                    source,
+                    scope,
+                    revision,
+                    dry_run,
+                    yes,
+                    force,
+                    output,
+                },
+        } => {
+            let discovery = DiscoveryService::new(GhSkill::default(), repository.clone());
+            let preview = discovery
+                .preview(&selector, source.as_deref(), cancel)
+                .await?;
+            let relative_path = preview.path;
+            let name = relative_path
+                .trim_end_matches("/SKILL.md")
+                .rsplit('/')
+                .next()
+                .unwrap_or(&selector)
+                .to_string();
+            let identity = SkillIdentity {
+                id: format!("skill:{}/{}", preview.source.locator, relative_path),
+                name,
+                source: preview.source.locator,
+                relative_path,
+            };
+            let scope = match scope {
+                Some(scope) => scope,
+                None if in_git_repository() => InstallScope::Project,
+                None => {
+                    return Err(Diagnostic::new(
+                        "target_required",
+                        "usage",
+                        "tasc",
+                        "Install scope must be selected outside a Git repository.",
+                        "Pass --scope project or --scope user.",
+                    ))
+                }
+            };
+            let target = CopilotAdapter::target(match scope {
+                InstallScope::Project => "project",
+                InstallScope::User => "user",
+            })
+            .map_err(local_error)?;
+            let lifecycle =
+                LifecycleService::new(CopilotAdapter::local(), GhSkill::default(), repository);
+            if dry_run {
+                let result = lifecycle
+                    .install(
+                        identity,
+                        target,
+                        revision.as_deref(),
+                        true,
+                        force,
+                        false,
+                        cancel,
+                    )
+                    .await?;
+                return render_lifecycle(&result, "skill install", output.json || json);
+            }
+            let plan = lifecycle
+                .install(
+                    identity.clone(),
+                    target.clone(),
+                    revision.as_deref(),
+                    true,
+                    force,
+                    false,
+                    cancel,
+                )
+                .await?;
+            if plan.existing && !force {
+                let result = lifecycle
+                    .install(
+                        identity,
+                        target,
+                        revision.as_deref(),
+                        false,
+                        false,
+                        false,
+                        cancel,
+                    )
+                    .await?;
+                return render_lifecycle(&result, "skill install", output.json || json);
+            }
+            let approved = if yes {
+                true
+            } else {
+                confirm_plan(&plan, "Install this skill?")?
+            };
+            let result = lifecycle
+                .install(
+                    identity,
+                    target,
+                    revision.as_deref(),
+                    false,
+                    force,
+                    approved,
+                    cancel,
+                )
+                .await?;
+            render_lifecycle(&result, "skill install", output.json || json)
+        }
+        Commands::Skill {
+            command:
+                SkillCommands::Update {
+                    selector,
+                    dry_run,
+                    yes,
+                    force,
+                    output,
+                },
+        } => {
+            let lifecycle =
+                LifecycleService::new(CopilotAdapter::local(), GhSkill::default(), repository);
+            let plan = lifecycle
+                .update(&selector, true, force, false, cancel)
+                .await?;
+            if dry_run || plan.status == tasc_core::InstallationStatus::Missing {
+                let mut result = plan;
+                result.dry_run = dry_run;
+                return render_lifecycle(&result, "skill update", output.json || json);
+            }
+            if plan.modified && !force {
+                return lifecycle
+                    .update(&selector, false, false, false, cancel)
+                    .await
+                    .and_then(|result| {
+                        render_lifecycle(&result, "skill update", output.json || json)
+                    });
+            }
+            if plan.status == tasc_core::InstallationStatus::Installed && !plan.outdated {
+                return render_lifecycle(&plan, "skill update", output.json || json);
+            }
+            let approved = if yes {
+                true
+            } else {
+                confirm_plan(&plan, "Apply this update?")?
+            };
+            let result = lifecycle
+                .update(&selector, false, force, approved, cancel)
+                .await?;
+            render_lifecycle(&result, "skill update", output.json || json)
+        }
+        Commands::Skill {
+            command:
+                SkillCommands::Remove {
+                    selector,
+                    dry_run,
+                    yes,
+                    force,
+                    output,
+                },
+        } => {
+            let lifecycle =
+                LifecycleService::new(CopilotAdapter::local(), GhSkill::default(), repository);
+            let plan = lifecycle.remove(&selector, true, force, false)?;
+            if dry_run {
+                return render_lifecycle(&plan, "skill remove", output.json || json);
+            }
+            if plan.modified && !force {
+                return lifecycle
+                    .remove(&selector, false, false, false)
+                    .and_then(|result| {
+                        render_lifecycle(&result, "skill remove", output.json || json)
+                    });
+            }
+            let approved = if yes {
+                true
+            } else {
+                confirm_plan(&plan, "Remove this Installation?")?
+            };
+            let result = lifecycle.remove(&selector, false, force, approved)?;
+            render_lifecycle(&result, "skill remove", output.json || json)
+        }
         _ => unreachable!("discovery commands are dispatched by the shared discovery service"),
     }
+}
+
+fn confirm_plan(plan: &LifecycleResult, prompt: &str) -> Result<bool, Diagnostic> {
+    if !std::io::stdin().is_terminal() {
+        return Ok(false);
+    }
+    eprintln!("Plan: {}", safe_text(&plan.plan));
+    eprint!("{prompt} [y/N] ");
+    std::io::Write::flush(&mut std::io::stderr())
+        .map_err(|error| local_error(format!("cannot write confirmation prompt: {error}")))?;
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|error| local_error(format!("cannot read confirmation: {error}")))?;
+    if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        Ok(true)
+    } else {
+        Err(Diagnostic::new(
+            "cancelled",
+            "cancelled",
+            "tasc",
+            "Operation cancelled.",
+            "Retry when ready.",
+        ))
+    }
+}
+
+fn in_git_repository() -> bool {
+    std::env::current_dir()
+        .ok()
+        .is_some_and(|directory| directory.ancestors().any(|path| path.join(".git").exists()))
+}
+
+fn render_lifecycle(result: &LifecycleResult, command: &str, json: bool) -> Result<(), Diagnostic> {
+    if json {
+        let envelope = Envelope::new(command, result);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&envelope)
+                .map_err(|error| local_error(format!("cannot render lifecycle result: {error}")))?
+        );
+    } else {
+        println!("{command} (schema version 1)");
+        render_fields(
+            &serde_json::to_value(result)
+                .map_err(|error| local_error(format!("cannot render lifecycle result: {error}")))?,
+            0,
+        );
+    }
+    Ok(())
 }
 
 fn render_inventory(inventory: &Inventory, json: bool) -> Result<(), String> {
@@ -461,6 +774,12 @@ fn render_inventory(inventory: &Inventory, json: bool) -> Result<(), String> {
             println!("  target: {}", item.target.id);
             println!("  target path: {}", item.target.path);
             println!("  path: {}", item.path);
+            if let Some(status) = item.status {
+                println!("  status: {status:?}");
+            }
+            if let Some(revision) = &item.source_revision {
+                println!("  source revision: {revision}");
+            }
         }
     }
     Ok(())

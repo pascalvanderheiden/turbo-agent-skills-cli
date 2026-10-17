@@ -25,6 +25,27 @@ pub struct Installation {
     pub skill_id: String,
     pub target_id: String,
     pub path: String,
+    #[serde(default)]
+    pub source_revision: Option<String>,
+    #[serde(default)]
+    pub content_digest: Option<String>,
+    #[serde(default)]
+    pub status: InstallationStatus,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallationStatus {
+    Planned,
+    #[default]
+    Installed,
+    Modified,
+    Missing,
+    Outdated,
+    Failed,
+    Unverified,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -110,6 +131,10 @@ pub struct InventoryItem {
     pub installation_id: String,
     pub path: String,
     pub tracked: bool,
+    #[serde(default)]
+    pub status: Option<InstallationStatus>,
+    #[serde(default)]
+    pub source_revision: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
