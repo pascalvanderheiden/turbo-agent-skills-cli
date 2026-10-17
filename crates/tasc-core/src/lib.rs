@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 pub mod consistency;
 pub mod discovery;
 pub mod evaluation;
+pub mod insights;
 
 pub const LOCAL_STATE_VERSION: u32 = 1;
 
