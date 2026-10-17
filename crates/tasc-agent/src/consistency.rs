@@ -725,7 +725,14 @@ fn check_ownership(
                 .push((doc, line, claim));
         }
     }
-    for claims in owners.values().filter(|claims| claims.len() > 1) {
+    for claims in owners.values().filter(|claims| {
+        claims
+            .iter()
+            .map(|(doc, _, _)| &doc.snapshot.identity.id)
+            .collect::<BTreeSet<_>>()
+            .len()
+            > 1
+    }) {
         let skills = claims
             .iter()
             .map(|(doc, _, _)| doc.snapshot.identity.id.clone())
@@ -1021,6 +1028,13 @@ fn check_assumptions(
         }
     }
     for (claim, declarations) in declarations {
+        let implicated_skills = declarations
+            .iter()
+            .map(|(doc, _, _)| &doc.snapshot.identity.id)
+            .collect::<BTreeSet<_>>();
+        if implicated_skills.len() < 2 {
+            continue;
+        }
         if !declarations
             .iter()
             .any(|(_, _, polarity)| polarity == "positive")
@@ -1565,6 +1579,20 @@ mod tests {
             result.category == ConsistencyCategory::OwnershipOverlap
                 && result.status == ConsistencyStatus::Inconclusive
         }));
+    }
+
+    #[test]
+    fn does_not_call_single_skill_contradictions_cross_skill_findings() {
+        let alpha = doc(
+            "alpha",
+            "alpha",
+            "---\nname: alpha\nassumptions:\n  - requires isolated runner\n  - forbids isolated runner\n---\n",
+        );
+        let beta = doc("beta", "beta", "---\nname: beta\n---\n");
+        let (findings, _) = analyze(&[alpha, beta], &[], &[]);
+        assert!(!findings
+            .iter()
+            .any(|finding| { finding.category == ConsistencyCategory::IncompatibleAssumption }));
     }
 
     #[test]
