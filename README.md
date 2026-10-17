@@ -53,6 +53,12 @@ tasc eval list --json
 tasc eval show <run-id>
 # Validate local package metadata and inspect immutable Evaluation evidence
 
+tasc consistency check <skill-id-1> <skill-id-2> --json
+tasc consistency check --all-installed
+tasc consistency list
+tasc consistency show <check-id>
+# Compare an explicit set of skills or opt in to all discovered skills
+
 tasc source add github/awesome-copilot --dry-run
 tasc source add github/awesome-copilot --yes
 # Record normalized source metadata only: no fetch, install, or skill-content edit
@@ -161,6 +167,17 @@ Waza executable, reporting `inconclusive` when unavailable and `not_run` when
 available because model-backed execution is outside this smoke slice. Run
 artifacts are separate from Local State and can be listed or shown after the
 original package changes or disappears.
+
+`consistency check` requires at least two explicit selectors or the opt-in
+`--all-installed` flag. It performs bounded, deterministic local analysis of
+declared dependencies, ownership, precedence, assumptions, trigger phrases,
+the current directory's `CONTEXT.md` glossary, explicit non-goals, and prior
+Evaluation, Check, or Watch Artifacts. Lexical trigger overlap is a warning, not proof
+of runtime collision; missing declarations are not treated as conflicts.
+Findings identify deterministic evidence, confidence, severity, and revision
+status. Inferred evidence is explicitly `not_run`; no model or live composition
+probe is invoked. Each run is an immutable artifact in a sibling
+`<state-stem>.consistency-checks` directory, separate from Local State.
 
 ## Architecture
 

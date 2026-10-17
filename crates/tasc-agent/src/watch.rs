@@ -16,6 +16,10 @@ use crate::{
 
 pub trait WatchCheckRepository {
     fn save(&self, check: &WatchCheck) -> Result<(), String>;
+
+    fn list(&self) -> Result<Vec<WatchCheck>, String> {
+        Ok(Vec::new())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +61,39 @@ impl WatchCheckRepository for FsWatchCheckRepository {
             }
             Err(error) => Err(format!("cannot create Watch Check: {error}")),
         }
+    }
+
+    fn list(&self) -> Result<Vec<WatchCheck>, String> {
+        let entries = match fs::read_dir(&self.directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(format!("cannot list Watch Check artifacts: {error}")),
+        };
+        let mut checks = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("cannot read Watch Check entry: {error}"))?;
+            let path = entry.path();
+            if path.extension().is_none_or(|extension| extension != "json") {
+                continue;
+            }
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| format!("cannot inspect Watch Check artifact: {error}"))?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err("Watch Check artifacts must be regular, non-symlink files".to_string());
+            }
+            let check: WatchCheck = serde_json::from_slice(
+                &fs::read(&path)
+                    .map_err(|error| format!("cannot read Watch Check artifact: {error}"))?,
+            )
+            .map_err(|error| format!("invalid Watch Check artifact: {error}"))?;
+            let expected_stem = format!("{:016x}", stable_hash(&check.id));
+            if path.file_stem().and_then(|stem| stem.to_str()) != Some(expected_stem.as_str()) {
+                return Err("Watch Check artifact ID does not match its filename".to_string());
+            }
+            checks.push(check);
+        }
+        checks.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(checks)
     }
 }
 
@@ -498,5 +535,34 @@ mod tests {
             checks[0].unavailable_reason.as_deref(),
             Some("source_unavailable")
         );
+    }
+
+    #[test]
+    fn filesystem_watch_artifacts_can_be_listed_for_staleness_checks() {
+        let directory = std::env::temp_dir().join(format!(
+            "tasc-watch-artifacts-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let repository = FsWatchCheckRepository::new(directory.clone());
+        let check = WatchCheck {
+            id: "watch-test".to_string(),
+            watchlist_id: "watchlist".to_string(),
+            source: SkillSource {
+                id: "source".to_string(),
+                locator: "https://github.com/owner/repo".to_string(),
+            },
+            path: Some("skills/example".to_string()),
+            prior_revision: None,
+            observed_revision: Some(SourceRevision::commit("revision".to_string())),
+            status: WatchCheckStatus::Baseline,
+            unavailable_reason: None,
+        };
+        repository.save(&check).unwrap();
+        assert_eq!(repository.list().unwrap(), vec![check]);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

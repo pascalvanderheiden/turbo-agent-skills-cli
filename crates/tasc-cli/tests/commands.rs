@@ -346,6 +346,102 @@ fn evaluation_runs_store_package_outcomes_and_support_list_show() {
     fs::remove_dir_all(directory).unwrap();
 }
 
+#[test]
+fn consistency_requires_explicit_scope_and_stores_immutable_check_artifacts() {
+    let directory = test_dir();
+    let first = directory.join(".github/skills/first");
+    let second = directory.join(".github/skills/second");
+    let state_path = directory.join("state/state.json");
+    fs::create_dir_all(&first).unwrap();
+    fs::create_dir_all(&second).unwrap();
+    fs::write(
+        first.join("SKILL.md"),
+        "---\nname: first\ndescription: first skill\n---\n",
+    )
+    .unwrap();
+    fs::write(
+        second.join("SKILL.md"),
+        "---\nname: second\ndescription: second skill\n---\n",
+    )
+    .unwrap();
+
+    let inventory = run(&directory, &state_path, &["skill", "list", "--json"]);
+    assert!(inventory.status.success());
+    let inventory: serde_json::Value = serde_json::from_slice(&inventory.stdout).unwrap();
+    let selectors = inventory["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["identity"]["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+
+    let missing_scope = run(&directory, &state_path, &["consistency", "check", "--json"]);
+    assert_eq!(missing_scope.status.code(), Some(2));
+    assert!(!state_path.with_extension("consistency-checks").exists());
+
+    let single = run(
+        &directory,
+        &state_path,
+        &["consistency", "check", selectors[0], "--json"],
+    );
+    assert_eq!(single.status.code(), Some(2));
+
+    let selected = run(
+        &directory,
+        &state_path,
+        &["consistency", "check", selectors[0], selectors[1], "--json"],
+    );
+    assert!(
+        selected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&selected.stderr)
+    );
+    let selected: serde_json::Value = serde_json::from_slice(&selected.stdout).unwrap();
+    assert_eq!(selected["command"], "consistency check");
+    assert_eq!(selected["result"]["allInstalled"], false);
+    assert_eq!(selected["result"]["skills"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        selected["result"]["categories"].as_array().unwrap().len(),
+        9
+    );
+    let check_id = selected["result"]["id"].as_str().unwrap();
+
+    let all = run(
+        &directory,
+        &state_path,
+        &["consistency", "check", "--all-installed", "--json"],
+    );
+    assert!(
+        all.status.success(),
+        "{}",
+        String::from_utf8_lossy(&all.stderr)
+    );
+    let all: serde_json::Value = serde_json::from_slice(&all.stdout).unwrap();
+    assert_eq!(all["result"]["allInstalled"], true);
+    assert_eq!(all["result"]["skills"].as_array().unwrap().len(), 2);
+
+    let listed = run(&directory, &state_path, &["consistency", "list", "--json"]);
+    assert!(listed.status.success());
+    let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["result"]["checks"].as_array().unwrap().len(), 2);
+
+    let shown = run(
+        &directory,
+        &state_path,
+        &["consistency", "show", check_id, "--json"],
+    );
+    assert!(shown.status.success());
+    let shown: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(shown["result"]["id"], check_id);
+    assert_eq!(
+        fs::read_dir(state_path.with_extension("consistency-checks"))
+            .unwrap()
+            .count(),
+        2
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn discovery_commands_have_stable_envelopes_and_preview_never_installs() {

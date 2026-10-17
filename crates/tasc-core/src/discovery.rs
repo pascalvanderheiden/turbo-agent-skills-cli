@@ -71,6 +71,7 @@ impl Diagnostic {
         match self.category.as_str() {
             "usage" => 2,
             "dependency" => 3,
+            "finding" => 1,
             "cancelled" => 130,
             _ => 4,
         }

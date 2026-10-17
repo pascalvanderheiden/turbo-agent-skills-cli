@@ -1,6 +1,7 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::IsTerminal;
 use tasc_agent::{
+    consistency::{ConsistencyService, FsConsistencyArtifactRepository},
     discovery::DiscoveryService,
     evaluation::{EvaluationService, FsRunArtifactRepository},
     gh::{Cancellation, GhSkill},
@@ -61,6 +62,11 @@ enum Commands {
         #[command(subcommand)]
         command: EvalCommands,
     },
+    /// Analyze an explicitly selected set of skills for cross-skill consistency.
+    Consistency {
+        #[command(subcommand)]
+        command: ConsistencyCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -79,6 +85,28 @@ enum EvalCommands {
     /// List immutable Evaluation Run Artifacts.
     List(JsonOutput),
     /// Show an immutable Evaluation Run Artifact.
+    Show {
+        id: String,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConsistencyCommands {
+    /// Analyze two or more selected skills, or explicitly include every installed skill.
+    Check {
+        #[arg(value_name = "SKILL")]
+        selectors: Vec<String>,
+        /// Explicitly analyze every skill discovered in installed Copilot targets.
+        #[arg(long, conflicts_with = "selectors")]
+        all_installed: bool,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
+    /// List immutable Consistency Check Artifacts.
+    List(JsonOutput),
+    /// Show an immutable Consistency Check Artifact.
     Show {
         id: String,
         #[command(flatten)]
@@ -261,6 +289,11 @@ async fn main() {
                 EvalCommands::Run { output, .. } | EvalCommands::Show { output, .. } => output.json,
                 EvalCommands::List(output) => output.json,
             },
+            Commands::Consistency { command } => match command {
+                ConsistencyCommands::Check { output, .. }
+                | ConsistencyCommands::Show { output, .. } => output.json,
+                ConsistencyCommands::List(output) => output.json,
+            },
             _ => false,
         };
     let command = match &cli.command {
@@ -297,6 +330,15 @@ async fn main() {
         Commands::Eval {
             command: EvalCommands::Show { .. },
         } => "eval show",
+        Commands::Consistency {
+            command: ConsistencyCommands::Check { .. },
+        } => "consistency check",
+        Commands::Consistency {
+            command: ConsistencyCommands::List(_),
+        } => "consistency list",
+        Commands::Consistency {
+            command: ConsistencyCommands::Show { .. },
+        } => "consistency show",
         Commands::Search(_)
         | Commands::Skill {
             command: SkillCommands::Search(_),
@@ -487,7 +529,6 @@ async fn run_watch(
         })),
     }
 }
-
 fn safe_text(text: &str) -> String {
     text.chars()
         .flat_map(|character| {
@@ -579,6 +620,59 @@ async fn run_local(
                         serde_json::to_value(artifact)
                             .map_err(|error| local_error(error.to_string()))?,
                         "eval show",
+                        output.json || json,
+                    )
+                }
+            }
+        }
+        Commands::Consistency { command } => {
+            let service = ConsistencyService::new(
+                CopilotAdapter::local(),
+                repository,
+                FsConsistencyArtifactRepository::new(
+                    state_path.with_extension("consistency-checks"),
+                ),
+                FsRunArtifactRepository::new(state_path.with_extension("evaluations")),
+                FsWatchCheckRepository::new(state_path.with_extension("watch-checks")),
+            );
+            match command {
+                ConsistencyCommands::Check {
+                    selectors,
+                    all_installed,
+                    output,
+                } => {
+                    let artifact = service.check(&selectors, all_installed)?;
+                    let has_blocking_finding = artifact.findings.iter().any(|finding| {
+                        finding.severity == tasc_core::consistency::FindingSeverity::Blocking
+                    });
+                    render_local_artifact(
+                        serde_json::to_value(&artifact)
+                            .map_err(|error| local_error(error.to_string()))?,
+                        "consistency check",
+                        output.json || json,
+                    )?;
+                    if has_blocking_finding {
+                        return Err(Diagnostic::new(
+                            "consistency_findings",
+                            "finding",
+                            "consistency",
+                            "The Consistency Check found one or more blocking findings.",
+                            "Review the immutable Check Artifact and resolve or explicitly govern the findings.",
+                        ));
+                    }
+                    Ok(())
+                }
+                ConsistencyCommands::List(output) => render_local_artifact(
+                    serde_json::json!({ "checks": service.list()? }),
+                    "consistency list",
+                    output.json || json,
+                ),
+                ConsistencyCommands::Show { id, output } => {
+                    let artifact = service.show(&id)?;
+                    render_local_artifact(
+                        serde_json::to_value(artifact)
+                            .map_err(|error| local_error(error.to_string()))?,
+                        "consistency show",
                         output.json || json,
                     )
                 }
@@ -799,6 +893,25 @@ fn render_evaluation(
             "{}",
             serde_json::to_string_pretty(&envelope)
                 .map_err(|error| local_error(format!("cannot render Evaluation: {error}")))?
+        );
+    } else {
+        println!("{command} (schema version 1)");
+        render_fields(&result, 0);
+    }
+    Ok(())
+}
+
+fn render_local_artifact(
+    result: serde_json::Value,
+    command: &str,
+    json: bool,
+) -> Result<(), Diagnostic> {
+    if json {
+        let envelope = Envelope::new(command, result);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&envelope)
+                .map_err(|error| local_error(format!("cannot render artifact: {error}")))?
         );
     } else {
         println!("{command} (schema version 1)");
