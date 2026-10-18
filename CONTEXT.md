@@ -61,11 +61,11 @@ The explicit act of recording an Untracked Installation in Local State without r
 _Avoid_: Install, import
 
 **Tracking**:
-The user-facing workflow for adopting an already installed skill into Local State so lifecycle, Evaluation, Consistency, Security, and update operations can address it. Uninstalled skills are watched, not tracked.
+The user-facing workflow for adopting an already installed skill into Local State so lifecycle, Evaluation, Consistency, Security, and update operations can address it. Tracking is independent per Adapter Target and scope; when user- and project-scoped installations coexist, the project installation is effective for that project. Uninstalled skills are watched, not tracked.
 _Avoid_: Watchlist, installation
 
 **Watchlist**:
-A user-selected set of Skill Sources or skill-relative paths monitored for relevant changes. A Watchlist detects changes but does not silently update installations.
+A user-selected set of uninstalled Skill Sources or skill-relative paths monitored for relevant changes. A Watchlist detects changes but does not silently install or update; after an explicit successful installation, the matching Watchlist entry is removed.
 _Avoid_: Favorites, subscriptions
 
 **Local State**:
@@ -73,7 +73,7 @@ TASC's versioned, user-owned metadata about Skill Identities, sources, installat
 _Avoid_: Cache, registry
 
 **TASC Profile**:
-A named user or project scope over Local State that groups tracked skills, watchlists, status, and related run references without making installed skill content writable.
+A named user or project scope over Local State that groups tracked skills, watchlists, status, policies, and related run references without making installed skill content writable. Project scope overrides user scope for the project and falls back to user scope when absent, without automatic migration. Profile deletion is metadata-only.
 _Avoid_: Skill Workspace, installation target
 
 **Evaluation**:
@@ -121,7 +121,7 @@ An evidence-backed compatibility risk or coverage result produced by a Consisten
 _Avoid_: Error, verdict
 
 **Security Check**:
-A local-first analysis of Agent Skill contents and dependencies for exposed secrets, unsafe instructions or permissions, injection or exfiltration patterns, risky executable content, supply-chain indicators, and suspicious external references.
+A local-first analysis of Agent Skill contents and dependencies for exposed secrets, unsafe instructions or permissions, injection or exfiltration patterns, risky executable content, supply-chain indicators, and suspicious external references. Source installation and every update run it against the candidate revision; profile policy blocks denied findings and requires approval for warnings before mutation.
 _Avoid_: Consistency Check, live penetration test
 
 **Security Finding**:
@@ -177,7 +177,7 @@ The explicit installation of a Skill Bundle into selected Adapter Targets after 
 _Avoid_: Bulk install, silent sync
 
 **Profile Skill Source**:
-An optional Skill Source repository linked to a TASC Profile as the source-controlled home for authored Agent Skills, Categories, and Skill Bundles.
+An optional Skill Source repository linked to a TASC Profile as the source-controlled home for authored Agent Skills, Categories, and Skill Bundles. Publication creates a reviewable plan; commit and push require separate approval.
 _Avoid_: Marketplace, credential store
 
 **Watch Check**:
