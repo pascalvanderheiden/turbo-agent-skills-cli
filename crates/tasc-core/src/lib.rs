@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 pub mod authoring;
+pub mod bundle;
+pub mod categories;
 pub mod consistency;
 pub mod discovery;
 pub mod evaluation;
