@@ -480,6 +480,21 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn checks_record_transitions_and_repeat_unchanged_observations_idempotently() {
         let state = MemoryState::default();
+        state
+            .0
+            .borrow_mut()
+            .installations
+            .push(tasc_core::Installation {
+                id: "installation:existing".to_string(),
+                skill_id: "skill:existing".to_string(),
+                target_id: "target:existing".to_string(),
+                path: "/skills/existing".to_string(),
+                source_revision: Some("existing-revision".to_string()),
+                content_digest: Some("existing-digest".to_string()),
+                status: tasc_core::InstallationStatus::Installed,
+                last_error: None,
+            });
+        let installations = state.0.borrow().installations.clone();
         let artifacts = MemoryArtifacts::default();
         let service = WatchService::new(
             RevisionGateway(Some(SourceRevision::commit("a".repeat(40)))),
@@ -512,7 +527,7 @@ mod tests {
         assert_eq!(unchanged.prior_revision, unchanged.observed_revision);
         assert_eq!(unchanged.id, repeated.id);
         assert_eq!(artifacts.0.borrow().len(), 2);
-        assert!(state.0.borrow().installations.is_empty());
+        assert_eq!(state.0.borrow().installations, installations);
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -547,6 +547,82 @@ fn skill_inventory_adoption_and_state_status_share_the_same_facts() {
 }
 
 #[test]
+fn skill_track_is_target_and_profile_scoped_and_returns_versioned_json() {
+    let directory = test_dir();
+    let profile_a = directory.join("state/profile-a.json");
+    let profile_b = directory.join("state/profile-b.json");
+    let project_skill = directory.join(".github/skills/review");
+    let user_skill = directory.join("home/.copilot/skills/review");
+    fs::create_dir_all(&project_skill).unwrap();
+    fs::create_dir_all(&user_skill).unwrap();
+    let project_contents = "---\nname: Review\ndescription: Project review skill.\n---\n";
+    let user_contents = "---\nname: Review\ndescription: User review skill.\n---\n";
+    fs::write(project_skill.join("SKILL.md"), project_contents).unwrap();
+    fs::write(user_skill.join("SKILL.md"), user_contents).unwrap();
+
+    let listed = run(&directory, &profile_a, &["skill", "list", "--json"]);
+    assert!(listed.status.success());
+    let inventory: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(inventory["items"].as_array().unwrap().len(), 2);
+    let selected_id = inventory["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["target"]["path"].as_str().unwrap().contains(".github"))
+        .unwrap()["action_id"]
+        .as_str()
+        .unwrap();
+
+    let tracked = run(
+        &directory,
+        &profile_a,
+        &["skill", "track", selected_id, "--json"],
+    );
+    assert!(tracked.status.success());
+    let tracked: serde_json::Value = serde_json::from_slice(&tracked.stdout).unwrap();
+    assert_eq!(tracked["schemaVersion"], 1);
+    assert_eq!(tracked["command"], "skill track");
+    assert_eq!(tracked["result"]["count"], 1);
+    assert_eq!(tracked["result"]["tracked"][0]["id"], selected_id);
+
+    let listed = run(&directory, &profile_a, &["skill", "list", "--json"]);
+    let inventory: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let items = inventory["items"].as_array().unwrap();
+    assert!(items
+        .iter()
+        .find(|item| item["action_id"] == selected_id)
+        .unwrap()["tracked"]
+        .as_bool()
+        .unwrap());
+    assert_eq!(
+        items.iter().filter(|item| item["tracked"] == true).count(),
+        1
+    );
+    assert_eq!(
+        fs::read_to_string(project_skill.join("SKILL.md")).unwrap(),
+        project_contents
+    );
+    assert_eq!(
+        fs::read_to_string(user_skill.join("SKILL.md")).unwrap(),
+        user_contents
+    );
+
+    let other_profile = run(&directory, &profile_b, &["skill", "list", "--json"]);
+    let other_inventory: serde_json::Value = serde_json::from_slice(&other_profile.stdout).unwrap();
+    assert_eq!(
+        other_inventory["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["tracked"] == true)
+            .count(),
+        0
+    );
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn project_profile_wins_without_merging_and_user_profile_is_the_fallback() {
     let directory = test_dir();
     let home = directory.join("home");
@@ -1341,6 +1417,7 @@ fn discovery_commands_have_stable_envelopes_and_preview_never_installs() {
             .args(args)
             .env("PATH", &directory)
             .env("GH_HOST", "enterprise.example.com")
+            .env_remove("COPILOT_CLI_PATH")
             .env("HOME", directory.join("home"))
             .env("TASC_STATE_PATH", &state_path)
             .current_dir(&directory)
@@ -1362,14 +1439,59 @@ fn discovery_commands_have_stable_envelopes_and_preview_never_installs() {
         "alpha/skills"
     );
     let identity = search["result"]["items"][0]["id"].as_str().unwrap();
-    for alias in ["search", "discover"] {
-        let output = invoke(&[alias, "review", "--format", "json"]);
-        assert!(output.status.success());
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
-            search
-        );
-    }
+    let top_level_search = invoke(&["search", "review", "--format", "json"]);
+    assert!(top_level_search.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&top_level_search.stdout).unwrap(),
+        search
+    );
+    let discover = invoke(&["discover", "review", "--format", "json"]);
+    assert!(
+        discover.status.success(),
+        "{}",
+        String::from_utf8_lossy(&discover.stderr)
+    );
+    let discover: serde_json::Value = serde_json::from_slice(&discover.stdout).unwrap();
+    assert_eq!(discover["command"], "discover");
+    assert_ne!(discover["result"]["items"], search["result"]["items"]);
+    assert_eq!(discover["result"]["remoteExpansion"], "complete");
+    assert!(discover["result"]["items"][0]["matchReasons"]
+        .as_array()
+        .is_some());
+    assert!(discover["result"]["items"][0]["provenance"]["confidence"].is_string());
+
+    let offline = invoke(&["--offline", "discover", "review", "--json"]);
+    assert!(offline.status.success());
+    let offline: serde_json::Value = serde_json::from_slice(&offline.stdout).unwrap();
+    assert_eq!(offline["result"]["remoteExpansion"], "unavailable");
+    assert_eq!(
+        offline["result"]["diagnostics"][0]["code"],
+        "remote_expansion_unavailable"
+    );
+    let offline_rerank = invoke(&["--offline", "discover", "review", "--rerank", "--json"]);
+    assert!(offline_rerank.status.success());
+    let offline_rerank: serde_json::Value = serde_json::from_slice(&offline_rerank.stdout).unwrap();
+    assert_eq!(offline_rerank["result"]["reranking"], "unavailable");
+    assert_eq!(
+        offline_rerank["result"]["diagnostics"][1]["code"],
+        "model_reranking_unavailable"
+    );
+    let unavailable_rerank = invoke(&["discover", "review", "--rerank", "--json"]);
+    assert!(unavailable_rerank.status.success());
+    let unavailable_rerank: serde_json::Value =
+        serde_json::from_slice(&unavailable_rerank.stdout).unwrap();
+    assert_eq!(unavailable_rerank["result"]["reranking"], "unavailable");
+    assert_eq!(
+        unavailable_rerank["result"]["diagnostics"][0]["code"],
+        "copilot_sdk_unavailable"
+    );
+    assert_eq!(
+        unavailable_rerank["result"]["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        discover["result"]["items"].as_array().unwrap().len()
+    );
     let human = invoke(&["search", "review"]);
     let human = String::from_utf8(human.stdout).unwrap();
     assert!(human.contains("exact name match"));
