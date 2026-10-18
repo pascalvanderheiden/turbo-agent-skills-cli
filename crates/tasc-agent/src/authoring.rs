@@ -1196,13 +1196,15 @@ mod tests {
         let mut input = test_input(&workspace);
         let private_material = "unique-private-key-payload-for-regression";
         let assigned_private_material = "private-assignment-secret-regression";
+        let quoted_private_material = "quoted-private-assignment-secret";
         input.purpose = format!(
-            "Use this key:\n-----BEGIN RSA PRIVATE KEY-----\n{private_material}\n-----END RSA PRIVATE KEY-----\nfor local testing.\nPuTTY-User-Key-File-3: ssh-ed25519\nEncryption: none\nPrivate-Lines: 1\n{private_material}\nPrivate-MAC: 0123456789\nPrivateKey = {assigned_private_material}"
+            "Use this key:\n-----BEGIN RSA PRIVATE KEY-----\n{private_material}\n-----END RSA PRIVATE KEY-----\nfor local testing.\nPuTTY-User-Key-File-3: ssh-ed25519\nEncryption: none\nPrivate-Lines: 1\n{private_material}\nPrivate-MAC: 0123456789\nPrivateKey = {assigned_private_material}\n{{\"private_key\": \"{quoted_private_material}\"}}"
         );
 
         let draft = service.create(&input, true).unwrap();
         assert!(!draft.answers.purpose.contains(private_material));
         assert!(!draft.answers.purpose.contains(assigned_private_material));
+        assert!(!draft.answers.purpose.contains(quoted_private_material));
         assert!(draft
             .answers
             .purpose
@@ -1217,6 +1219,7 @@ mod tests {
         .unwrap();
         assert!(!saved.contains(private_material));
         assert!(!saved.contains(assigned_private_material));
+        assert!(!saved.contains(quoted_private_material));
         fs::remove_dir_all(root).unwrap();
     }
 

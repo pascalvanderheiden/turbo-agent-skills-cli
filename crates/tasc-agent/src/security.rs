@@ -1231,7 +1231,9 @@ fn has_secret_assignment(lower: &str) -> bool {
     .iter()
     .any(|key| {
         lower.match_indices(key).any(|(index, _)| {
-            let suffix = lower[index + key.len()..].trim_start();
+            let suffix = lower[index + key.len()..]
+                .trim_start_matches(['\'', '"', '`'])
+                .trim_start();
             let Some(value) = suffix
                 .strip_prefix('=')
                 .or_else(|| suffix.strip_prefix(':'))
