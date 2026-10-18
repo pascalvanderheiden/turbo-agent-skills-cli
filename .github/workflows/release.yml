@@ -35,9 +35,10 @@ jobs:
             --tag "$GITHUB_REF_NAME" \
             --version "$(sed -n 's/^version = "\(.*\)"/\1/p' crates/tasc-cli/Cargo.toml | head -1)" \
             --protected
+          python3 .github/scripts/release.py validate-version --version "$version"
           cargo build --locked -p tasc
           python3 docs/site/validate.py --binary target/debug/tasc --version "$version" --check-external
-          python3 -m unittest discover -s .github/scripts -p 'test_release.py'
+          python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 
   test:
     runs-on: ubuntu-24.04

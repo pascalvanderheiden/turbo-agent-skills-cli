@@ -13,6 +13,7 @@ from release import (
     make_command_skill_archive,
     validate_assets,
     validate_tag,
+    validate_version_metadata,
     write_checksums,
 )
 
@@ -48,6 +49,12 @@ class ReleaseTests(unittest.TestCase):
             with self.subTest(tag=tag, version=version, protected=protected):
                 with self.assertRaises(ValueError):
                     validate_tag(tag, version, protected)
+
+    def test_release_metadata_and_installer_versions_match(self):
+        root = Path(__file__).resolve().parents[2]
+        validate_version_metadata(root, "0.1.0")
+        with self.assertRaisesRegex(ValueError, "does not match release"):
+            validate_version_metadata(root, "0.2.0")
 
     def test_archives_reject_invalid_versions_and_targets(self):
         with tempfile.TemporaryDirectory() as directory:

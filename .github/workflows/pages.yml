@@ -28,10 +28,16 @@ jobs:
           toolchain: 1.99.0
       - name: Build CLI for command-example validation
         run: cargo build --locked -p tasc
+      - name: Verify README-generated landing page
+        run: python3 docs/site/generate.py --check
+      - name: Test documentation and release tooling
+        run: |
+          python3 -m unittest discover -s docs/site -p 'test_*.py'
+          python3 -m unittest discover -s .github/scripts -p 'test_*.py'
       - name: Validate links, HTML, accessibility, commands, and version
         run: python3 docs/site/validate.py --binary target/debug/tasc
       - name: Check external links
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 docs/site/validate.py --binary target/debug/tasc --check-external

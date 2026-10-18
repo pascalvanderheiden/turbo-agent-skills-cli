@@ -199,6 +199,24 @@ def check_links(page, parser, check_external):
         if parsed.scheme in ("http", "https"):
             if not parsed.netloc:
                 errors.append(f"{page}: invalid external link {href!r}")
+            elif parsed.hostname == "pascalvanderheiden.github.io":
+                site_prefix = "/turbo-agent-skills-cli"
+                if not parsed.path.startswith(site_prefix):
+                    errors.append(f"{page}: invalid Pages link {href!r}")
+                    continue
+                path_part = unquote(parsed.path[len(site_prefix) :]).lstrip("/")
+                target = SITE / path_part if path_part else SITE / "index.html"
+                if not target.exists():
+                    errors.append(f"{page}: broken Pages link target {href!r}")
+                    continue
+                if parsed.fragment:
+                    target_page = target if target.is_file() else target / "index.html"
+                    if not target_page.is_file():
+                        errors.append(f"{page}: Pages fragment target has no HTML page: {href!r}")
+                        continue
+                    linked_parser = parse_page(target_page)
+                    if parsed.fragment not in linked_parser.ids:
+                        errors.append(f"{page}: broken Pages fragment target {href!r}")
             elif check_external:
                 error = check_external_link(href)
                 if error:
@@ -252,6 +270,21 @@ def validate(version, binary, check_external):
     elif current_version != match.group(1):
         errors.append(f"docs version {current_version} is stale; tasc package is {match.group(1)}")
 
+    for relative_path, pattern in (
+        ("install.sh", r'^VERSION="([^"]+)"'),
+        ("install.ps1", r'^\$Version = "([^"]+)"'),
+    ):
+        installer = SITE.parent.parent / relative_path
+        installer_text = installer.read_text(encoding="utf-8")
+        installer_match = re.search(pattern, installer_text, re.MULTILINE)
+        if not installer_match:
+            errors.append(f"could not read installer version from {relative_path}")
+        elif current_version != installer_match.group(1):
+            errors.append(
+                f"{relative_path} version {installer_match.group(1)} does not match docs "
+                f"version {current_version}"
+            )
+
     version_page = SITE / f"v{current_version}" / "index.html"
     if not version_page.is_file():
         errors.append(f"versioned documentation page is missing: {version_page.relative_to(SITE)}")
@@ -266,8 +299,16 @@ def validate(version, binary, check_external):
     root_page = SITE / "index.html"
     if root_page.is_file():
         root_text = root_page.read_text(encoding="utf-8")
-        if f'href="v{current_version}/index.html"' not in root_text:
-            errors.append(f"documentation home does not link to version {current_version}")
+        if 'href="docs/index.html"' not in root_text:
+            errors.append("landing page does not link to the stable documentation index")
+    else:
+        errors.append("documentation landing page is missing")
+
+    docs_index = SITE / "docs" / "index.html"
+    if not docs_index.is_file():
+        errors.append("stable documentation index is missing")
+    elif f'href="../v{current_version}/index.html"' not in docs_index.read_text(encoding="utf-8"):
+        errors.append(f"stable documentation index does not link to version {current_version}")
 
     pages = sorted(SITE.rglob("*.html"))
     parsed_pages = {}

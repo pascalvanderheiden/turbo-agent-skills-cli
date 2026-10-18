@@ -2,16 +2,19 @@
 
 ## One-time repository configuration
 
+Public installs and Pages depend on the repository being publicly accessible. Confirm visibility in **Settings → General**; this repository-level setting cannot be enabled by a workflow.
+
 1. Create a repository ruleset for tag names `v*`. Restrict tag creation to release maintainers and block tag updates and deletions. The release workflow checks GitHub's `ref_protected` context and rejects an unprotected tag.
 2. Create the `release-approval` Actions environment. Require designated maintainers as reviewers and prevent the initiator from approving their own deployment. The publish job cannot start until all build, test, archive, checksum, and SBOM gates pass and an authorized reviewer approves it.
 3. In repository **Settings → General → Releases**, enable **Enable release immutability**. Published release assets and their tag cannot be changed or deleted.
 4. In the `release-approval` environment, set `TASC_IMMUTABLE_RELEASES_ENABLED=true` only after enabling that repository setting. The publish job requires this explicit configuration and verifies the API's immutable status after publishing; if GitHub reports a mutable release or status cannot be confirmed, it attempts to return the release to draft and fails. Manually verify and correct the release if the rollback also fails.
-5. Allow GitHub Actions to create attestations with the workflow's short-lived OIDC identity. No long-lived signing secret is required.
-6. Enable Pages with GitHub Actions as the build and deployment source.
+5. Allow GitHub Actions to create artifact attestations and use its short-lived OIDC identity. The release jobs request `id-token: write` and `attestations: write`; no long-lived signing secret is required.
+6. In **Settings → Pages**, select GitHub Actions as the build and deployment source. Ensure Actions can write Pages deployments and request an OIDC token; the Pages workflow validates a pull request but deploys only from the default branch or a published release.
+7. Keep the Pages landing page generated from the marked README section with `python3 docs/site/generate.py`. CI checks the generated output for drift. Agentic edits may propose a pull request; they do not publish content or releases directly.
 
 ## Stable release checklist
 
-1. Update the `tasc` package version, `Cargo.lock`, `skills/tasc-command/manifest.json`, `skills/tasc-command/SKILL.md`, and `docs/site/versions.json`; add the matching `docs/site/v<version>/` documentation snapshot. Keep package and documentation versions equal.
+1. Update the `tasc` package version, `Cargo.lock`, `skills/tasc-command/manifest.json`, `skills/tasc-command/SKILL.md`, `install.sh`, `install.ps1`, and `docs/site/versions.json`; add the matching `docs/site/v<version>/` documentation snapshot and list it in the stable `docs/site/docs/index.html`. Keep package, Command Skill, installer, and documentation versions equal. Check with `python3 .github/scripts/release.py validate-version --version <version>`.
 2. Merge the complete, tested change set. Create a protected `vMAJOR.MINOR.PATCH` tag at that commit; prerelease tags are not accepted by the stable release workflow.
 3. Confirm all five target builds, workspace tests, reproducible CLI and Command Skill archive packaging, the CycloneDX BOM, checksums, build-provenance attestations, and SBOM attestation pass. The workflow assembles the verified assets as a draft.
 4. Review the draft release notes and assets, then approve the protected `release-approval` environment. Approval publishes that draft. Never re-run a release by replacing or editing its published assets.
