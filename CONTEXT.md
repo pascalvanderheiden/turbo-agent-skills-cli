@@ -13,7 +13,7 @@ A first-party Agent Skill distributed with TASC and installable into supported A
 _Avoid_: Wrapper, magic proxy, alternate implementation
 
 **Skill Authoring**:
-The guided creation of a new Agent Skill from stated goals and constraints, producing skill files that are validated before optional installation or sharing.
+The guided creation of a new Agent Skill from stated goals and constraints, using TASC-authored grilling-style guidance by default and producing Skill Draft files that pass deterministic Agent Skills-standard validation before optional installation, Evaluation, export, sharing, or publication.
 _Avoid_: Installation, adoption
 
 **Skill Draft**:
