@@ -178,20 +178,36 @@ and `4` when an operational input is unavailable.
 
 ### Conversational agent
 
-`tasc agent` starts an interactive Copilot SDK session. Install and authenticate
-the GitHub Copilot CLI first, or set `COPILOT_CLI_PATH` to its executable:
+`tasc agent` starts a Copilot SDK session. Install and authenticate the GitHub
+Copilot CLI first, or set `COPILOT_CLI_PATH` to its executable. In a terminal,
+it shows the Turbo banner and a status line with GitHub CLI authentication,
+the selected model, SDK-reported token usage when available, and inventory,
+Tracking, and Watchlist counts. The banner and status are omitted in
+non-interactive mode. `NO_COLOR` disables ANSI styling; `--format json` emits
+versioned JSON events.
 
 ```bash
 tasc agent
 ```
 
-The agent can list and search skills, resolve references such as “the first
-result,” and delegate Evaluation, Consistency, and Security Checks to their
-existing use cases. It can also prepare update and removal plans. Plans do not
-change installations; review the proposed operation and enter `:approve <token>`
-to authorize it, or `:deny <token>` to decline. Approval tokens expire after
-five minutes and can be used only once. `:quit` exits the session. Press
-Ctrl-C during a request to cancel it.
+The agent accepts natural-language requests and noun-first Slash Commands such
+as `/skill list`, `/evaluation run <skill>`, `/consistency check <skills>`,
+`/security check <skills>`, `/audit`, `/stats`, `/profile status`, `/bundle
+validate <manifest>`. Use `/model` to list
+SDK-exposed models, `/model <id>` for a session-only override, and
+`/model profile <id>` to save a Profile preference. `auto` is the default.
+`/help` lists the shell commands.
+
+The saved model preference is stored separately from Local State alongside the
+selected Profile's state file. Command Skill management commands are recognized
+by the shell, but operations requiring a Command Skill management service are
+reported unavailable until that service is provided.
+
+Lifecycle requests can prepare plans but cannot mutate installations until
+explicitly approved. Review the proposed operation and enter `/approve <token>`
+to authorize it, or `/deny <token>` to decline; the existing `:approve`,
+`:deny`, and `:quit` spellings remain aliases. Approval tokens expire after
+five minutes and can be used only once. `/cancel` or Ctrl-C stops active work.
 
 The SDK receives only bounded summaries of local results, not skill contents,
 local filesystem paths, or detailed Security evidence. Session storage and SDK
