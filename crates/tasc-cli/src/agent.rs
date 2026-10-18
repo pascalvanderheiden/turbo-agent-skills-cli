@@ -961,15 +961,14 @@ fn display_count(status: &Value, key: &str) -> String {
         .unwrap_or_else(|| "unavailable".to_string())
 }
 
-const TURBO_BANNER_LINES: [&str; 6] = [
-    "  _________   _____ ______",
-    " /_  __/   | / ___// ____/",
-    "  / / / /| | \\__ \\/ /",
-    " / / / ___ |___/ / /___",
-    "/_/ /_/  |_/____/\\____/",
-    "   TURBO AGENT SKILLS CLI",
+const TURBO_BANNER_LINES: [&str; 5] = [
+    "______________________________",
+    "___  __/__    |_  ___/_  ____/",
+    "__  /  __  /| |____ \\_  /",
+    "_  /   _  ___ |___/ // /___",
+    "/_/    /_/  |_/____/ \\____/",
 ];
-const RAINBOW_ANSI: [&str; 6] = ["91", "93", "92", "96", "94", "95"];
+const RAINBOW_ANSI: [&str; 5] = ["91", "93", "92", "96", "94"];
 
 fn turbo_banner(color: bool) -> String {
     TURBO_BANNER_LINES
@@ -1822,8 +1821,7 @@ mod tests {
         assert!(rendered.contains("\"command\":\"agent.dashboard\""));
         let plain_dashboard = dashboard_output(&status, false, false);
         assert!(!plain_dashboard.contains("\u{1b}["));
-        assert!(plain_dashboard.contains("  _________   _____ ______"));
-        assert!(plain_dashboard.contains("TURBO AGENT SKILLS CLI"));
+        assert!(plain_dashboard.contains("___  __/__    |_  ___/_  ____/"));
         let rainbow_dashboard = dashboard_output(&status, true, false);
         for color in RAINBOW_ANSI {
             assert!(rainbow_dashboard.contains(&format!("\x1b[1;{color}m")));

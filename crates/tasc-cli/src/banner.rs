@@ -4,15 +4,13 @@ use std::{
     time::Duration,
 };
 
-const LOGO_LINES: [&str; 6] = [
-    "  _________   _____ ______",
-    " /_  __/   | / ___// ____/",
-    "  / / / /| | \\__ \\/ /",
-    " / / / ___ |___/ / /___",
-    "/_/ /_/  |_/____/\\____/",
-    "   TURBO AGENT SKILLS CLI",
+const LOGO_LINES: [&str; 5] = [
+    "______________________________",
+    "___  __/__    |_  ___/_  ____/",
+    "__  /  __  /| |____ \\_  /",
+    "_  /   _  ___ |___/ // /___",
+    "/_/    /_/  |_/____/ \\____/",
 ];
-const COLORS: [&str; 6] = ["91", "93", "92", "96", "94", "95"];
 const FRAME_COUNT: usize = 32;
 const FRAME_DELAY: Duration = Duration::from_millis(75);
 
@@ -44,16 +42,14 @@ fn frame(index: usize, color: bool) -> String {
     let motion = " ".repeat(position);
     let mut output = format!("{motion}━━━━⚡\n\n");
 
-    for (line_index, line) in LOGO_LINES.iter().enumerate() {
+    for line in LOGO_LINES {
         if color {
-            output.push_str(&format!("\x1b[1;{}m{line}\x1b[0m\n", COLORS[line_index]));
+            output.push_str(&format!("\x1b[97m{line}\x1b[0m\n"));
         } else {
             output.push_str(line);
             output.push('\n');
         }
     }
-
-    output.push_str("      FAST • LOCAL • SAFE\n");
     output
 }
 
@@ -85,9 +81,9 @@ mod tests {
         let rendered = frame(0, false);
 
         assert!(rendered.contains("⚡"));
-        assert!(!rendered.contains("🚀"));
-        assert!(rendered.contains("TURBO AGENT SKILLS CLI"));
-        assert!(rendered.contains("FAST • LOCAL • SAFE"));
+        assert_eq!(rendered.matches('⚡').count(), 1);
+        assert!(rendered.contains("______________________________"));
+        assert!(rendered.contains("___  __/__    |_  ___/_  ____/"));
         assert!(!rendered.contains("\x1b["));
     }
 

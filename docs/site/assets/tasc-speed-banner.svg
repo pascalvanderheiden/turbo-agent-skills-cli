@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 650 190" role="img" aria-labelledby="title description">
+  <title id="title">TASC speed ASCII art banner</title>
+  <desc id="description">TASC rendered in the compact FIGlet speed style.</desc>
+  <rect width="650" height="190" fill="#08090d"/>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="30" font-weight="400" fill="#f5f7ff" xml:space="preserve">
+    <text x="24" y="38">______________________________</text>
+    <text x="24" y="70">___  __/__    |_  ___/_  ____/</text>
+    <text x="24" y="102">__  /  __  /| |____ \_  /</text>
+    <text x="24" y="134">_  /   _  ___ |___/ // /___</text>
+    <text x="24" y="166">/_/    /_/  |_/____/ \____/</text>
+  </g>
+</svg>
