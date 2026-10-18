@@ -592,15 +592,29 @@ fn validate_state_version(state: &LocalState) -> Result<(), String> {
 
 fn installation_scope(target_path: &str) -> String {
     let path = Path::new(target_path);
-    if std::env::var_os("HOME")
+    let canonical = fs::canonicalize(path).ok();
+    if path.starts_with(Path::new(".github").join("skills")) {
+        "project".to_string()
+    } else if std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
-        .is_some_and(|home| path.starts_with(PathBuf::from(home).join(".copilot").join("skills")))
+        .is_some_and(|home| {
+            let user_skills = PathBuf::from(home).join(".copilot").join("skills");
+            path.starts_with(&user_skills)
+                || canonical
+                    .as_ref()
+                    .zip(fs::canonicalize(user_skills).ok().as_ref())
+                    .is_some_and(|(path, root)| path.starts_with(root))
+        })
     {
         "user".to_string()
-    } else if std::env::current_dir()
-        .ok()
-        .is_some_and(|current| path.starts_with(current.join(".github").join("skills")))
-    {
+    } else if std::env::current_dir().ok().is_some_and(|current| {
+        let project_skills = current.join(".github").join("skills");
+        path.starts_with(&project_skills)
+            || canonical
+                .as_ref()
+                .zip(fs::canonicalize(project_skills).ok().as_ref())
+                .is_some_and(|(path, root)| path.starts_with(root))
+    }) {
         "project".to_string()
     } else {
         "unknown".to_string()

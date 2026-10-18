@@ -119,3 +119,52 @@ pub struct SecurityArtifact {
     pub unavailable_checks: Vec<SecurityUnavailableCheck>,
     pub diagnostics: Vec<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SecurityRequirementStatus {
+    Complete,
+    Failed,
+    Unavailable,
+    Inconclusive,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityRequirementEvidence {
+    pub name: String,
+    pub status: SecurityRequirementStatus,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LifecycleSecurityEvidence {
+    pub policy: SecurityPolicy,
+    pub source_revision: SourceRevision,
+    pub content_digest: Option<String>,
+    pub required_checks: Vec<SecurityRequirementEvidence>,
+    pub findings: Vec<SecurityFinding>,
+    pub diagnostics: Vec<String>,
+}
+
+impl LifecycleSecurityEvidence {
+    pub fn required_checks_complete(&self) -> bool {
+        self.required_checks
+            .iter()
+            .all(|check| check.status == SecurityRequirementStatus::Complete)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityOverrideAudit {
+    pub id: String,
+    pub operation: String,
+    pub plan_id: String,
+    pub skill_id: String,
+    pub target_id: String,
+    pub source_revision: SourceRevision,
+    pub reason: String,
+    pub approved_at_unix_ms: u128,
+}
