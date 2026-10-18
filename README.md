@@ -299,20 +299,22 @@ original package changes or disappears.
 `skill create` is guided Skill Authoring, not Installation. It requires an
 explicit existing Skill Workspace, inspects the nearest local `CONTEXT.md` for
 headings and a digest, and asks for the skill name, purpose, description,
-activation guidance, and non-goals that were not supplied. it uses TASC-owned grilling questions with a deterministic offline path, previews
-the proposed `SKILL.md`, and requires interactive approval or `--yes` before writing.
-`--dry-run` never writes. Draft records are durable in a sibling
-`<state-stem>.drafts` directory; incomplete drafts are marked in their package
-and are excluded from ready-skill discovery. Structured authoring answers are
+activation guidance, and non-goals that were not supplied. It uses TASC-owned
+grilling questions with a deterministic offline path, previews the proposed
+`SKILL.md`, and requires interactive approval or `--yes` before writing.
+`--dry-run` never writes. Draft records are durable in the selected Workspace's
+`.tasc/drafts` directory; `skill drafts` requires `--workspace`.
+Incomplete drafts are marked in their package and are excluded from ready-skill
+discovery. Structured authoring answers are
 redacted before persistence; no interview transcript is retained. `skill resume`
 reads the saved answers for the selected Workspace without writing files.
 Validation separates readiness-blocking normative diagnostics from optional
 quality guidance. Failed drafts remain available for correction. The bounded
 `skill remediate` action only adds a missing
 description, records a pre-change copy under `.tasc-recovery`, validates the
-result, and restores the original file if validation fails. Every skill-content
-write is confined to the selected Workspace; an Installation or discovered
-installed copy is never an authoring target.
+result, and restores the original file if validation fails. Every authoring write,
+including resumable Draft records, is confined to the selected Workspace; an
+Installation or discovered installed copy is never an authoring target.
 
 A ready draft does not install, evaluate, export, share, commit, push, or publish.
 Each such follow-up requires a separate explicit user action. Authoring does not

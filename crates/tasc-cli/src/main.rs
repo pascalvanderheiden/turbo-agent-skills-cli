@@ -334,10 +334,10 @@ enum SkillCommands {
         #[command(flatten)]
         output: JsonOutput,
     },
-    /// List durable Skill Drafts, optionally scoped to a Workspace.
+    /// List durable Skill Drafts in the selected Workspace.
     Drafts {
         #[arg(long, value_name = "PATH")]
-        workspace: Option<std::path::PathBuf>,
+        workspace: std::path::PathBuf,
         #[command(flatten)]
         output: JsonOutput,
     },
@@ -2376,7 +2376,7 @@ async fn run_local(
             let service = SkillAuthoringService::new(
                 CopilotAdapter::local(),
                 repository,
-                FsSkillDraftRepository::new(state_path.with_extension("drafts")),
+                FsSkillDraftRepository::new(input.workspace.clone()),
             );
             let plan = service.plan(&input).map_err(local_error)?;
             if dry_run {
@@ -2423,7 +2423,7 @@ async fn run_local(
             let service = SkillAuthoringService::new(
                 CopilotAdapter::local(),
                 repository,
-                FsSkillDraftRepository::new(state_path.with_extension("drafts")),
+                FsSkillDraftRepository::new(workspace.clone()),
             );
             let validation = service
                 .validate_report(&id, &workspace)
@@ -2440,9 +2440,9 @@ async fn run_local(
             let service = SkillAuthoringService::new(
                 CopilotAdapter::local(),
                 repository,
-                FsSkillDraftRepository::new(state_path.with_extension("drafts")),
+                FsSkillDraftRepository::new(workspace.clone()),
             );
-            let drafts = service.list(workspace.as_deref()).map_err(local_error)?;
+            let drafts = service.list(Some(&workspace)).map_err(local_error)?;
             render_local_artifact(
                 serde_json::json!({ "drafts": drafts }),
                 "skill drafts",
@@ -2460,7 +2460,7 @@ async fn run_local(
             let service = SkillAuthoringService::new(
                 CopilotAdapter::local(),
                 repository,
-                FsSkillDraftRepository::new(state_path.with_extension("drafts")),
+                FsSkillDraftRepository::new(workspace.clone()),
             );
             let draft = service.resume(&id, &workspace).map_err(local_error)?;
             render_local_artifact(
@@ -2487,7 +2487,7 @@ async fn run_local(
             let service = SkillAuthoringService::new(
                 CopilotAdapter::local(),
                 repository,
-                FsSkillDraftRepository::new(state_path.with_extension("drafts")),
+                FsSkillDraftRepository::new(workspace.clone()),
             );
             let plan = service
                 .plan_missing_description(&id, &workspace, &description)

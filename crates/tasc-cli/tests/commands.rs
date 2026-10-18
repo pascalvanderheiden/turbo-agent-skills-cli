@@ -2292,6 +2292,11 @@ fn skill_authoring_requires_workspace_and_approval_and_preserves_remediable_draf
         3
     );
     let draft_id = created["result"]["draft"]["id"].as_str().unwrap();
+    assert!(workspace
+        .join(".tasc/drafts")
+        .join(format!("{draft_id}.json"))
+        .is_file());
+    assert!(!state_path.with_extension("drafts").exists());
     let skill_dir = workspace.join("review-helper");
     let skill_file = skill_dir.join("SKILL.md");
     assert!(fs::read_to_string(&skill_file)
@@ -2401,6 +2406,8 @@ fn skill_authoring_requires_workspace_and_approval_and_preserves_remediable_draf
     let human_drafts = String::from_utf8(human_drafts.stdout).unwrap();
     assert!(human_drafts.contains("status: ready"));
     assert!(human_drafts.contains("review-helper"));
+    let unscoped_drafts = invoke(&["skill", "drafts", "--json"]);
+    assert_eq!(unscoped_drafts.status.code(), Some(2));
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -2598,6 +2605,7 @@ fn skill_authoring_refuses_adapter_target_workspaces_before_they_can_become_inst
     assert_eq!(output.status.code(), Some(4));
     assert!(String::from_utf8_lossy(&output.stderr).contains("overlaps an Adapter Target"));
     assert!(!target.join("new-draft").exists());
+    assert!(!target.join(".tasc").exists());
     assert!(!state_path.with_extension("drafts").exists());
     fs::remove_dir_all(directory).unwrap();
 }

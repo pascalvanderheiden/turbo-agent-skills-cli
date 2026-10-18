@@ -68,28 +68,37 @@ pub trait SkillDraftRepository {
 
 #[derive(Debug, Clone)]
 pub struct FsSkillDraftRepository {
-    directory: PathBuf,
+    workspace: PathBuf,
 }
 
 impl FsSkillDraftRepository {
-    pub fn new(directory: PathBuf) -> Self {
-        Self { directory }
+    pub fn new(workspace: PathBuf) -> Self {
+        Self { workspace }
     }
 }
 
 impl SkillDraftRepository for FsSkillDraftRepository {
     fn save(&self, draft: &SkillDraft) -> Result<(), String> {
         validate_draft_id(&draft.id)?;
+        let workspace = validate_workspace(&self.workspace)?;
+        if Path::new(&draft.workspace_path) != workspace {
+            return Err("Skill Draft Workspace does not match its Draft repository".to_string());
+        }
+        let directory = self
+            .draft_directory(true)?
+            .ok_or_else(|| "cannot initialize Skill Draft directory".to_string())?;
         let bytes = serde_json::to_vec_pretty(draft)
             .map_err(|error| format!("cannot serialize Skill Draft: {error}"))?;
-        atomic_write(&self.directory.join(format!("{}.json", draft.id)), &bytes)
+        atomic_write(&directory.join(format!("{}.json", draft.id)), &bytes)
     }
 
     fn list(&self) -> Result<Vec<SkillDraft>, String> {
         let mut drafts = Vec::new();
-        let entries = match fs::read_dir(&self.directory) {
+        let Some(directory) = self.draft_directory(false)? else {
+            return Ok(drafts);
+        };
+        let entries = match fs::read_dir(&directory) {
             Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(drafts),
             Err(error) => return Err(format!("cannot list Skill Drafts: {error}")),
         };
         for entry in entries {
@@ -122,7 +131,10 @@ impl SkillDraftRepository for FsSkillDraftRepository {
 
     fn get(&self, id: &str) -> Result<SkillDraft, String> {
         validate_draft_id(id)?;
-        let path = self.directory.join(format!("{id}.json"));
+        let directory = self
+            .draft_directory(false)?
+            .ok_or_else(|| "Skill Draft directory does not exist in this Workspace".to_string())?;
+        let path = directory.join(format!("{id}.json"));
         let metadata = fs::symlink_metadata(&path)
             .map_err(|error| format!("cannot inspect Skill Draft '{id}': {error}"))?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -136,6 +148,71 @@ impl SkillDraftRepository for FsSkillDraftRepository {
             return Err(format!("Skill Draft ID does not match '{id}'"));
         }
         Ok(draft)
+    }
+}
+
+impl FsSkillDraftRepository {
+    fn draft_directory(&self, create: bool) -> Result<Option<PathBuf>, String> {
+        let workspace = validate_workspace(&self.workspace)?;
+        let metadata_dir = workspace.join(".tasc");
+        let drafts_dir = metadata_dir.join("drafts");
+        for directory in [&metadata_dir, &drafts_dir] {
+            match fs::symlink_metadata(directory) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                    return Err(format!(
+                        "Skill Draft metadata path '{}' must be a non-symlink directory",
+                        directory.display()
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound && !create => {
+                    return Ok(None);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    match fs::create_dir(directory) {
+                        Ok(()) => {}
+                        Err(create_error)
+                            if create_error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                        Err(create_error) => {
+                            return Err(format!(
+                                "cannot create Skill Draft metadata directory '{}': {create_error}",
+                                directory.display()
+                            ));
+                        }
+                    }
+                    let metadata = fs::symlink_metadata(directory).map_err(|error| {
+                        format!(
+                            "cannot inspect Skill Draft metadata directory '{}': {error}",
+                            directory.display()
+                        )
+                    })?;
+                    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                        return Err(format!(
+                            "Skill Draft metadata path '{}' must be a non-symlink directory",
+                            directory.display()
+                        ));
+                    }
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "cannot inspect Skill Draft metadata directory '{}': {error}",
+                        directory.display()
+                    ));
+                }
+            }
+        }
+        let canonical_directory = fs::canonicalize(&drafts_dir).map_err(|error| {
+            format!(
+                "cannot resolve Skill Draft metadata directory '{}': {error}",
+                drafts_dir.display()
+            )
+        })?;
+        if !canonical_directory.starts_with(&workspace) {
+            return Err(
+                "Skill Draft metadata directory resolves outside its Workspace".to_string(),
+            );
+        }
+        Ok(Some(canonical_directory))
     }
 }
 
@@ -1089,12 +1166,12 @@ mod tests {
     }
 
     fn test_service(
-        root: &Path,
+        workspace: &Path,
     ) -> SkillAuthoringService<NoSkills, MemoryState, FsSkillDraftRepository> {
         SkillAuthoringService::new(
             NoSkills,
             MemoryState(LocalState::default()),
-            FsSkillDraftRepository::new(root.join("draft-records")),
+            FsSkillDraftRepository::new(workspace.to_path_buf()),
         )
     }
 
@@ -1120,12 +1197,31 @@ mod tests {
         root
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn draft_repository_rejects_metadata_symlinks_outside_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_root();
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        fs::create_dir(&workspace).unwrap();
+        fs::create_dir(&outside).unwrap();
+        symlink(&outside, workspace.join(".tasc")).unwrap();
+        let service = test_service(&workspace);
+
+        let error = service.create(&test_input(&workspace), true).unwrap_err();
+        assert!(error.contains("must be a non-symlink directory"));
+        assert!(!outside.join("drafts").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn remediation_rejects_a_draft_changed_after_approval_plan() {
         let root = test_root();
         let workspace = root.join("workspace");
         fs::create_dir(&workspace).unwrap();
-        let service = test_service(&root);
+        let service = test_service(&workspace);
         let input = test_input(&workspace);
         let draft = service.create(&input, true).unwrap();
         let skill_file = Path::new(&draft.skill_path).join("SKILL.md");
@@ -1150,7 +1246,7 @@ mod tests {
         let root = test_root();
         let workspace = root.join("workspace");
         fs::create_dir(&workspace).unwrap();
-        let service = test_service(&root);
+        let service = test_service(&workspace);
         let input = test_input(&workspace);
         let draft = service.create(&input, true).unwrap();
         let skill_file = Path::new(&draft.skill_path).join("SKILL.md");
@@ -1176,7 +1272,7 @@ mod tests {
         let root = test_root();
         let workspace = root.join("workspace");
         fs::create_dir(&workspace).unwrap();
-        let service = test_service(&root);
+        let service = test_service(&workspace);
         let mut input = test_input(&workspace);
         input.purpose = "Use api_key=credential-value-123 to test.".to_string();
         let draft = service.create(&input, true).unwrap();
@@ -1194,7 +1290,8 @@ mod tests {
             .eq(&draft.answers));
 
         let saved = fs::read_to_string(
-            root.join("draft-records")
+            workspace
+                .join(".tasc/drafts")
                 .join(format!("{}.json", draft.id)),
         )
         .unwrap();
@@ -1212,7 +1309,7 @@ mod tests {
         let root = test_root();
         let workspace = root.join("workspace");
         fs::create_dir(&workspace).unwrap();
-        let service = test_service(&root);
+        let service = test_service(&workspace);
         let mut input = test_input(&workspace);
         let private_material = "unique-private-key-payload-for-regression";
         let assigned_private_material = "private-assignment-secret-regression";
@@ -1238,7 +1335,8 @@ mod tests {
         assert!(!skill_file.contains(yaml_secret_material));
         assert!(skill_file.contains("safe: retained"));
         let saved = fs::read_to_string(
-            root.join("draft-records")
+            workspace
+                .join(".tasc/drafts")
                 .join(format!("{}.json", draft.id)),
         )
         .unwrap();
@@ -1254,7 +1352,7 @@ mod tests {
         let root = test_root();
         let workspace = root.join("workspace");
         fs::create_dir(&workspace).unwrap();
-        let service = test_service(&root);
+        let service = test_service(&workspace);
         let draft = service.create(&test_input(&workspace), true).unwrap();
         let skill_file = Path::new(&draft.skill_path).join("SKILL.md");
         fs::write(
