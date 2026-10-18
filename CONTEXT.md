@@ -76,6 +76,14 @@ _Avoid_: Cache, registry
 A named user or project scope over Local State that groups tracked skills, watchlists, status, policies, and related run references without owning installed or authored skill content. Project operations select the project Profile when one exists and otherwise fall back to the user Profile; the two Profiles are not merged and records are not migrated automatically.
 _Avoid_: Skill Workspace, installation target
 
+**Slash Command**:
+A deterministic command addressed to the TASC agent using noun-first syntax, with compatibility aliases normalized to one canonical command. Slash Commands and natural-language requests share the same authorized TASC operations.
+_Avoid_: Prompt shortcut, alternate API
+
+**Agent Session**:
+One interactive TASC agent conversation with its selected Profile, model preference, status, pending approvals, progress state, and run references. Session preferences may override Profile preferences without changing them unless explicitly saved.
+_Avoid_: Profile, Run Artifact
+
 **Evaluation**:
 A repeatable assessment of an Agent Skill against defined scenarios and quality criteria.
 _Avoid_: Test, review
