@@ -972,6 +972,7 @@ struct StatsSummary {
     tracking: BTreeMap<String, usize>,
     watchlist: BTreeMap<String, usize>,
     provenance: BTreeMap<String, usize>,
+    provenance_confidence: BTreeMap<String, usize>,
     lifecycle: BTreeMap<String, usize>,
     repositories: BTreeMap<String, usize>,
     comparable_outcomes: BTreeMap<String, usize>,
@@ -1149,7 +1150,8 @@ fn stats_report(
         &mut findings,
     );
     sort_findings(&mut findings);
-    let audit_findings = summarize_findings(&findings);
+    let mut audit_findings = summarize_findings(&findings);
+    audit_findings.inventory_count = inventory.as_ref().map_or(0, |inventory| inventory.total);
     let mut summary = StatsSummary {
         identities: state.as_ref().map_or(0, |state| state.identities.len()),
         targets: state.as_ref().map_or(0, |state| state.targets.len()),
@@ -1170,6 +1172,13 @@ fn stats_report(
                     .ok()
                     .and_then(|value| value.as_str().map(str::to_string))
                     .unwrap_or_else(|| "unknown".to_string()),
+            );
+            increment(
+                &mut summary.provenance_confidence,
+                &serde_json::to_value(item.provenance.confidence)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_string))
+                    .unwrap_or_else(|| "unavailable".to_string()),
             );
             if let Some(status) = item.lifecycle_state {
                 increment(

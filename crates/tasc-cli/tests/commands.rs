@@ -76,7 +76,9 @@ fn audit_and_stats_are_profile_scoped_and_report_untracked_inventory() {
     assert_eq!(stats["summary"]["tracking"]["untracked"], 1);
     assert_eq!(stats["summary"]["watchlist"]["not_watched"], 1);
     assert_eq!(stats["summary"]["scope"]["project"], 1);
+    assert_eq!(stats["summary"]["auditFindings"]["inventoryCount"], 1);
     assert!(stats["summary"]["provenance"].is_object());
+    assert_eq!(stats["summary"]["provenanceConfidence"]["inferred"], 1);
     assert!(stats["summary"]["repositories"].is_object());
     assert!(stats["summary"]["lifecycle"]["installed"]
         .as_u64()
@@ -124,7 +126,9 @@ fn audit_detects_conflicts_broken_references_and_missing_targets() {
                 {"id":"skill:duplicate","name":"one","source":"local","relative_path":"one"},
                 {"id":"skill:duplicate","name":"two","source":"local","relative_path":"two"}
             ],
-            "targets": [],
+            "targets": [
+                {"id":"target:orphan","assistant":"copilot","path":"missing-target"}
+            ],
             "installations": [
                 {"id":"installation:broken","skill_id":"skill:missing","target_id":"target:missing","path":"missing"}
             ]
@@ -145,6 +149,56 @@ fn audit_detects_conflicts_broken_references_and_missing_targets() {
     assert!(codes.contains(&"broken_identity_reference"));
     assert!(codes.contains(&"broken_target_reference"));
     assert!(codes.contains(&"missing_installation"));
+    assert!(codes.contains(&"missing_target"));
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn audit_detects_modified_installation_content() {
+    let directory = test_dir();
+    let skill_dir = directory.join(".github/skills/review");
+    let state_path = directory.join("state/state.json");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: Review\ndescription: Review changes.\n---\n",
+    )
+    .unwrap();
+    let inventory = run(&directory, &state_path, &["skill", "list", "--json"]);
+    assert!(inventory.status.success());
+    let inventory: serde_json::Value = serde_json::from_slice(&inventory.stdout).unwrap();
+    let item = &inventory["items"][0];
+    let state = serde_json::json!({
+        "version": 2,
+        "identities": [item["identity"]],
+        "targets": [item["target"]],
+        "installations": [{
+            "id": item["installation_id"],
+            "skill_id": item["identity"]["id"],
+            "target_id": item["target"]["id"],
+            "path": item["path"],
+            "content_digest": "recorded-before-content-change",
+            "status": "installed",
+            "source_revision": null,
+            "last_error": null
+        }],
+        "sources": [],
+        "watchlists": []
+    });
+    fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+    fs::write(&state_path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+
+    let audit = run(&directory, &state_path, &["audit", "--json"]);
+    assert!(audit.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap();
+    assert!(report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| {
+            finding["code"] == "modified_installation" && finding["severity"] == "warning"
+        }));
 
     fs::remove_dir_all(directory).unwrap();
 }
