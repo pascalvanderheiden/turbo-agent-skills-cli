@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::{ProvenanceEvidence, SkillIdentity};
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillSource {
@@ -25,6 +27,50 @@ pub struct RankedSkill {
     pub rank: usize,
     pub reason: String,
     pub skill: SearchHit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredSkill {
+    pub id: String,
+    pub rank: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_rank: Option<usize>,
+    pub identity: SkillIdentity,
+    pub source: SkillSource,
+    pub description: String,
+    pub categories: Vec<String>,
+    pub capabilities: Vec<String>,
+    pub provenance: ProvenanceEvidence,
+    pub match_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteExpansionStatus {
+    #[default]
+    Complete,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RerankingStatus {
+    #[default]
+    NotRequested,
+    Applied,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoverResult {
+    pub query: String,
+    pub items: Vec<DiscoveredSkill>,
+    pub eligible_sources: Vec<SkillSource>,
+    pub remote_expansion: RemoteExpansionStatus,
+    pub reranking: RerankingStatus,
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

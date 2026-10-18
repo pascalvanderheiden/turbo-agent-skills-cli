@@ -34,6 +34,10 @@ tasc skill list --json
 tasc skill adopt skill:file:///path/to/.github/skills/example
 # Record an already-discovered installation without changing its files
 
+tasc skill track <installation-id> --json
+tasc skill track --all --json
+# Track selected installations or all currently untracked installations
+
 tasc state status
 # Show versioned Local State and discovery counts
 
@@ -110,7 +114,8 @@ tasc source capabilities --json
 # Probe installed gh version and search/preview support
 
 tasc skill search review --format json
-# Also available as `tasc search review` or `tasc discover review`
+tasc discover "review code changes" --format json
+# Strict lookup and intent-oriented discovery have separate result contracts
 
 tasc skill preview 'skill:https://github.com/owner/repo/skills/review/SKILL.md'
 tasc skill preview skills/review/SKILL.md --source owner/repo --json
@@ -134,12 +139,42 @@ description excerpt for each Installation or watched-only interest. Use
 `--provenance`, `--tracking`, `--watch`, or `--detail <stable-id>` to select
 rows; display row numbers are local to the current view.
 
+On an interactive first inventory of an untracked installation cohort, TASC
+offers to track all, select installations, or defer. Deferral is remembered for
+that cohort; discovering another installation presents a new prompt. `skill track`
+can explicitly adopt one or more stable Installation IDs, or `--all` to track
+every untracked installation in the selected Profile. Tracking only records
+metadata and never reinstalls or edits skill files. Tracking is scoped to both
+the selected Profile and Adapter Target.
+
 Project operations select `.tasc/state.json` when that project Profile exists;
 otherwise they use the user Profile at `$XDG_STATE_HOME/tasc/state.json` or
 `~/.local/state/tasc/state.json`. Profiles are not merged. Set
 `TASC_STATE_PATH` to select a custom state file. Existing version-1 Local State
 is migrated atomically to version 2 when loaded; malformed or unsupported
 versions are left untouched.
+
+### Audit and statistics
+
+`tasc audit` checks the selected Profile's Local State, installations, Adapter
+Targets, references, and existing Evaluation, Consistency, and Security evidence.
+It is read-only: version-1 Local State is interpreted in memory, and immutable
+artifacts are never refreshed or rewritten. Evidence freshness compares recorded
+source revisions or content digests with the currently available inputs; age
+alone does not make evidence stale. Findings are classified as `error`,
+`warning`, or `optimization`.
+
+`tasc stats` reports the same profile-scoped inventory and summarizes scope,
+Tracking, Watchlist, provenance, lifecycle, repositories, audit findings, and
+comparable evidence outcomes. Both commands support `--json` and `--format json`;
+their version-1 JSON reports include the command, generation time, Profile,
+summary, typed findings or outcomes, diagnostics, and exit code.
+
+`tasc doctor` aliases `tasc audit`, and `tasc statistics` aliases `tasc stats`.
+Audit exits `0` when there are no error findings (warnings and optimizations are
+non-fatal), `1` when error findings exist, and `4` when required profile or
+evidence inputs cannot be inspected. Stats exits `0` when inputs are available
+and `4` when an operational input is unavailable.
 
 ### Conversational agent
 
@@ -178,10 +213,10 @@ Discovery is explicitly bound to `github.com`, irrespective of inherited
 `GH_HOST` or GitHub CLI's configured default host.
 
 Source commands manage TASC metadata, not a second GitHub catalog. `source show`
-inspects that metadata; search discovers available skills and preview inspects
-their contents. Adding a source does not scope subsequent global searches.
-Source add requires `--yes` to write; `--dry-run` returns the normalized record
-without writing.
+inspects that metadata; Search discovers exact GitHub matches and preview
+inspects their contents. Adding a source does not scope subsequent global
+Searches. Source add requires `--yes` to write; `--dry-run` returns the
+normalized record without writing.
 
 Discovery results use a versioned envelope with `schemaVersion`, `command`,
 `result`, and `warnings`. Both `--json` and `--format json` select JSON. Preview
@@ -190,14 +225,32 @@ metadata. Human output escapes terminal control sequences. Diagnostics go to
 stderr (structured with JSON output), with stable code, category, origin,
 message, remediation, and candidate IDs for ambiguous selections.
 
-Search fetches up to 100 results from the first delegated page. Ranking is
-deterministic within those results: exact name, name substring, description
-substring, then other delegated matches; ties use descending repository stars
-and ascending Skill Identity. Each result includes a rank and explanation.
-Duplicate identities are collapsed. Name-based preview requires one exact
-match; ambiguity returns candidate IDs without selecting or previewing any.
-Use a returned Skill Identity or an exact `SKILL.md` path with `--source` for
-automation. Search and preview do not write Local State or installation files.
+`search` is strict lookup, not intent inference. It fetches up to 100 results
+from the first delegated GitHub page and retains exact names, paths, identities,
+or complete keyword matches in returned metadata. Results and duplicate
+identity selection use ascending Skill Identity, independently of GitHub's
+result order or star counts. Name-based preview requires one exact match;
+ambiguity returns candidate IDs without selecting or previewing any. Use a
+returned Skill Identity or an exact `SKILL.md` path with `--source` for
+automation.
+
+`discover` ranks local tracked and untracked skills together with remote GitHub
+matches. It uses name and description intent, declared `metadata.categories`
+and `metadata.capabilities`, and source provenance evidence; results include
+stable Skill Identity references and the match reasons and provenance
+confidence behind the ranking. Recorded Profile sources and Watchlist sources
+are exposed as eligible sources. With `--offline`, local results are still
+returned and `remoteExpansion` is `unavailable` with a diagnostic instead of
+silently presenting a local-only result as complete. A failed remote expansion
+also preserves local results and reports its diagnostic.
+
+Pass `--rerank` to explicitly ask the Copilot CLI to rerank the same candidates.
+This sends candidate names, descriptions, Categories, capabilities, and
+provenance metadata to the model, but not skill contents or local paths.
+Deterministic ranks remain in `rank`; model ordering is annotated in
+`modelRank` and `reranking`. Invalid or unavailable model output leaves the
+deterministic order intact and is reported in `diagnostics`. Search and
+Discover do not write Local State or installation files.
 
 ### Installation lifecycle
 
@@ -229,6 +282,8 @@ Checks record prior and observed commit revisions, report unavailable sources
 or GitHub CLI failures explicitly, and never update Installations. Repeated
 observations of the same revision reuse the same immutable check reference. A
 source selector matching multiple watched paths must use an exact Watchlist ID.
+An exact skill Watchlist entry is retired when that skill is explicitly tracked
+or installed; a broader source Watchlist remains and excludes installed matches.
 
 `eval run` performs deterministic package-only smoke validation of a local
 `SKILL.md` (frontmatter `name` and `description`) without executing skill

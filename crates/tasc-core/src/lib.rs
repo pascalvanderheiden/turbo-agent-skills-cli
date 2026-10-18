@@ -80,6 +80,8 @@ pub struct LocalState {
     pub sources: Vec<discovery::SkillSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub watchlists: Vec<Watchlist>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tracking_cohorts: Vec<TrackingCohort>,
 }
 
 impl Default for LocalState {
@@ -91,8 +93,18 @@ impl Default for LocalState {
             installations: Vec::new(),
             sources: Vec::new(),
             watchlists: Vec::new(),
+            tracking_cohorts: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackingCohort {
+    pub installation_ids: Vec<String>,
+    pub decision: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
