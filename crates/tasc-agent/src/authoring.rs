@@ -630,9 +630,21 @@ fn redact_input(input: &SkillDraftInput) -> SkillDraftInput {
 
 fn redact_answer(value: &str) -> String {
     let mut in_private_key = false;
+    let mut in_putty_key = false;
     let mut redacted_lines = Vec::new();
     for line in value.lines() {
         let lower = line.to_ascii_lowercase();
+        if in_putty_key {
+            if lower.starts_with("private-mac:") {
+                in_putty_key = false;
+            }
+            continue;
+        }
+        if lower.starts_with("putty-user-key-file-") {
+            redacted_lines.push("[REDACTED PRIVATE KEY MATERIAL]".to_string());
+            in_putty_key = true;
+            continue;
+        }
         if in_private_key {
             if lower.contains("-----end") && lower.contains("private key") {
                 in_private_key = false;
@@ -1184,7 +1196,7 @@ mod tests {
         let mut input = test_input(&workspace);
         let private_material = "unique-private-key-payload-for-regression";
         input.purpose = format!(
-            "Use this key:\n-----BEGIN RSA PRIVATE KEY-----\n{private_material}\n-----END RSA PRIVATE KEY-----\nfor local testing."
+            "Use this key:\n-----BEGIN RSA PRIVATE KEY-----\n{private_material}\n-----END RSA PRIVATE KEY-----\nfor local testing.\nPuTTY-User-Key-File-3: ssh-ed25519\nEncryption: none\nPrivate-Lines: 1\n{private_material}\nPrivate-MAC: 0123456789"
         );
 
         let draft = service.create(&input, true).unwrap();
@@ -1193,6 +1205,7 @@ mod tests {
             .answers
             .purpose
             .contains("[REDACTED PRIVATE KEY MATERIAL]"));
+        assert!(!draft.answers.purpose.contains("PuTTY-User-Key-File"));
         let skill_file = fs::read_to_string(Path::new(&draft.skill_path).join("SKILL.md")).unwrap();
         assert!(!skill_file.contains(private_material));
         let saved = fs::read_to_string(
