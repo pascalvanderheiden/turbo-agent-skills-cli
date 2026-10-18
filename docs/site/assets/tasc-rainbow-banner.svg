@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 260" role="img" aria-labelledby="title description">
+  <title id="title">TASC rainbow ASCII art banner</title>
+  <desc id="description">Turbo Agent Skills CLI rendered as six lines of colorful terminal-style ASCII art.</desc>
+  <rect width="800" height="260" fill="#050816"/>
+  <rect x="1.5" y="1.5" width="797" height="257" fill="none" stroke="#273469" stroke-width="3"/>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="29" font-weight="700" xml:space="preserve">
+    <text x="74" y="48" fill="#ff4d6d"> _____   ___    ____    ____</text>
+    <text x="74" y="86" fill="#ffb703">|_   _| / _ \  / ___|  / ___|</text>
+    <text x="74" y="124" fill="#8ac926">  | |  / /_\ \ \___ \ | |</text>
+    <text x="74" y="162" fill="#00c2ff">  | |  |  _  |  ___) || |___</text>
+    <text x="74" y="200" fill="#6c63ff">  |_|  |_| |_| |____/  \____|</text>
+    <text x="132" y="238" fill="#d946ef" letter-spacing="5">TURBO AGENT SKILLS CLI</text>
+  </g>
+</svg>

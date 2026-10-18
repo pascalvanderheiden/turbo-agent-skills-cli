@@ -4,26 +4,52 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="Discover, install, create, and safely manage coding-agent skills with TASC.">
+    <link rel="icon" href="assets/tasc-rainbow-banner.svg" type="image/svg+xml">
     <title>TASC | Turbo Agent Skills CLI</title>
     <style>
-      :root { color-scheme: light; font: 100%/1.65 ui-monospace, monospace; color: #17202a; background: #f8efcf; }
-      body { max-width: 64rem; margin: 0 auto; padding: 1.5rem 1rem 4rem; }
-      a { color: #173f8a; text-decoration-thickness: .12em; text-underline-offset: .2em; }
-      a:focus { outline: 3px solid #a33b00; outline-offset: 3px; }
+      :root { color-scheme: dark; font: 100%/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #f4f7ff; background: #050816; }
+      * { box-sizing: border-box; }
+      body { max-width: 68rem; margin: 0 auto; padding: 1rem 1rem 4rem; background-image: radial-gradient(circle at 12% 18%, #f4f7ff 0 1px, transparent 1.5px), radial-gradient(circle at 78% 12%, #00c2ff 0 1px, transparent 1.5px), radial-gradient(circle at 64% 64%, #d946ef 0 1px, transparent 1.5px); background-size: 9rem 9rem, 13rem 13rem, 17rem 17rem; }
+      a { color: #67e8f9; text-decoration-thickness: .12em; text-underline-offset: .2em; }
+      a:hover { color: #f9e64f; }
+      a:focus-visible { outline: 3px solid #f9e64f; outline-offset: 4px; }
       .skip-link { position: absolute; left: -10000px; }
-      .skip-link:focus { left: 1rem; top: 1rem; background: #fff; padding: .5rem; }
-      header, nav, main { background: #fff9e8; border: 3px solid #17202a; box-shadow: 6px 6px 0 #17202a; margin: 1.5rem 0; padding: 1rem 1.25rem; }
-      nav ul { display: flex; flex-wrap: wrap; gap: .5rem 1.5rem; padding-left: 1.25rem; }
-      h1, h2 { color: #8b2b20; line-height: 1.2; }
-      .banner { color: #8b2b20; font-weight: 700; letter-spacing: .12em; }
-      pre { overflow-x: auto; padding: 1rem; background: #17202a; color: #fff9e8; }
-      code { font-family: inherit; }
+      .skip-link:focus { left: 1rem; top: 1rem; z-index: 2; background: #111936; color: #fff; padding: .5rem; }
+      header, main { background: #091027; border: 2px solid #273469; box-shadow: .5rem .5rem 0 #02030a; margin: 1.5rem 0; padding: 1.25rem; }
+      header { position: relative; overflow: hidden; }
+      header::before { content: ""; display: block; height: .35rem; margin: -1.25rem -1.25rem 1.25rem; background: linear-gradient(90deg, #ff4d6d 0 16.6%, #ffb703 16.6% 33.2%, #8ac926 33.2% 49.8%, #00c2ff 49.8% 66.4%, #6c63ff 66.4% 83%, #d946ef 83%); }
+      .logo { display: block; width: min(100%, 50rem); height: auto; margin: 0 auto; }
+      .fleet { display: flex; justify-content: center; gap: clamp(1rem, 7vw, 5rem); margin: 1rem 0; color: #8ac926; font-weight: 800; line-height: 1.05; text-align: center; white-space: pre; }
+      .fleet span:nth-child(2) { color: #00c2ff; }
+      .fleet span:nth-child(3) { color: #d946ef; }
+      nav { border-top: 1px solid #273469; margin-top: 1rem; padding-top: .5rem; }
+      nav ul { display: flex; flex-wrap: wrap; gap: .5rem 1.5rem; margin: 0; padding-left: 1.25rem; }
+      h1, h2 { color: #f4f7ff; line-height: 1.2; text-transform: uppercase; letter-spacing: .06em; }
+      main h2 { border-left: .35rem solid #00c2ff; padding-left: .7rem; }
+      main h2:nth-of-type(2n) { border-color: #d946ef; }
+      .banner { color: #f9e64f; font-weight: 700; letter-spacing: .12em; }
+      li::marker { color: #8ac926; }
+      pre { overflow-x: auto; padding: 1rem; background: #02030a; color: #f4f7ff; border: 1px solid #273469; border-left: .35rem solid #ff4d6d; }
+      code { font-family: inherit; color: #f9e64f; }
+      pre code { color: inherit; }
+      @media (max-width: 40rem) { body { padding-inline: .75rem; } header, main { padding: 1rem; box-shadow: .3rem .3rem 0 #02030a; } header::before { margin: -1rem -1rem 1rem; } .fleet { font-size: .75rem; gap: .6rem; } nav ul { display: grid; gap: .4rem; } }
     </style>
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to main content</a>
     <header>
-      <p><strong>TASC // TURBO AGENT SKILLS CLI</strong></p>
+      <img class="logo" src="assets/tasc-rainbow-banner.svg" alt="TASC — Turbo Agent Skills CLI rainbow ASCII art">
+      <div class="fleet" aria-hidden="true">
+        <span> /\
+[oo]
+/||\</span>
+        <span> /\
+[oo]
+/||\</span>
+        <span> /\
+[oo]
+/||\</span>
+      </div>
       <nav aria-label="Project links">
         <ul>
           <li><a href="docs/index.html">Stable documentation index</a></li>

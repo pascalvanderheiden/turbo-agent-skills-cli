@@ -74,10 +74,14 @@ tasc state status</code></pre>
         <h2>Manage skills safely</h2>
         <p>Inventory local Copilot skills and see which ones are tracked in TASC Local State:</p>
         <pre><code data-validate-command="skill list --json">tasc skill list --json</code></pre>
-        <p>Install, update, and remove delegate to supported <code>gh skill</code> commands. Start with a dry run; an interactive mutation shows a plan and asks for approval. Non-interactive mutations require <code>--yes</code>. Updating or removing locally modified content additionally requires <code>--force</code> and approval.</p>
-        <pre><code data-validate-command="skill install review --source owner/repo --dry-run;skill install review --source owner/repo --yes">tasc skill install review --source owner/repo --dry-run
-tasc skill install review --source owner/repo --yes</code></pre>
-        <p>Adopting a discovered but untracked Installation records it without reinstalling or changing skill files. Removal only deletes the selected recorded skill directory. TASC never silently updates skills from a Watchlist or Insight.</p>
+        <p>Install and update resolve an exact GitHub commit, fetch the candidate without mutating a target, and run the required static Security Policy check before presenting a versioned lifecycle plan. The plan shows the selected Profile and scope, Adapter Target, Source Revision, Security evidence, approval requirement, expiry, force state, and existing-content digest. Start with a dry run; interactive changes require approval and non-interactive changes require <code>--yes</code>.</p>
+        <pre><code data-validate-command="skill install review --source owner/repo --dry-run;skill install review --source owner/repo --yes;skill update example-installation --security-override reviewed --yes">tasc skill install review --source owner/repo --dry-run
+tasc skill install review --source owner/repo --yes
+
+tasc skill update &lt;installation-id&gt; \
+  --security-override "Required check unavailable; exact commit reviewed separately." --yes</code></pre>
+        <p>Deterministic findings require explicit approval. Missing, failed, unavailable, or inconclusive required checks fail closed. A single operation can proceed with <code>--security-override &lt;reason&gt;</code> plus approval; the plan-bound reason, target, revision, and approval time remain in Local State for audit. Updating or removing locally modified content additionally requires <code>--force</code> and approval.</p>
+        <p>Successful installs are automatically tracked with their Adapter Target, exact Source Revision, and local content digest. Failed or cancelled installs do not create a tracked Installation. Adopting a discovered but untracked Installation records it without reinstalling or changing skill files. TASC never silently updates skills from a Watchlist or Insight.</p>
         <p>Local State is stored at <code>$XDG_STATE_HOME/tasc/state.json</code> or <code>~/.local/state/tasc/state.json</code>; set <code>TASC_STATE_PATH</code> to select a different file. Evaluation, Consistency, Watch, and Insight evidence is kept in separate immutable artifact directories beside the state file. Credentials are not copied into Local State.</p>
       </section>
 
