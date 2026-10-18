@@ -909,6 +909,7 @@ fn discovery_commands_have_stable_envelopes_and_preview_never_installs() {
             .args(args)
             .env("PATH", &directory)
             .env("GH_HOST", "enterprise.example.com")
+            .env_remove("COPILOT_CLI_PATH")
             .env("HOME", directory.join("home"))
             .env("TASC_STATE_PATH", &state_path)
             .current_dir(&directory)
@@ -930,14 +931,59 @@ fn discovery_commands_have_stable_envelopes_and_preview_never_installs() {
         "alpha/skills"
     );
     let identity = search["result"]["items"][0]["id"].as_str().unwrap();
-    for alias in ["search", "discover"] {
-        let output = invoke(&[alias, "review", "--format", "json"]);
-        assert!(output.status.success());
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
-            search
-        );
-    }
+    let top_level_search = invoke(&["search", "review", "--format", "json"]);
+    assert!(top_level_search.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&top_level_search.stdout).unwrap(),
+        search
+    );
+    let discover = invoke(&["discover", "review", "--format", "json"]);
+    assert!(
+        discover.status.success(),
+        "{}",
+        String::from_utf8_lossy(&discover.stderr)
+    );
+    let discover: serde_json::Value = serde_json::from_slice(&discover.stdout).unwrap();
+    assert_eq!(discover["command"], "discover");
+    assert_ne!(discover["result"]["items"], search["result"]["items"]);
+    assert_eq!(discover["result"]["remoteExpansion"], "complete");
+    assert!(discover["result"]["items"][0]["matchReasons"]
+        .as_array()
+        .is_some());
+    assert!(discover["result"]["items"][0]["provenance"]["confidence"].is_string());
+
+    let offline = invoke(&["--offline", "discover", "review", "--json"]);
+    assert!(offline.status.success());
+    let offline: serde_json::Value = serde_json::from_slice(&offline.stdout).unwrap();
+    assert_eq!(offline["result"]["remoteExpansion"], "unavailable");
+    assert_eq!(
+        offline["result"]["diagnostics"][0]["code"],
+        "remote_expansion_unavailable"
+    );
+    let offline_rerank = invoke(&["--offline", "discover", "review", "--rerank", "--json"]);
+    assert!(offline_rerank.status.success());
+    let offline_rerank: serde_json::Value = serde_json::from_slice(&offline_rerank.stdout).unwrap();
+    assert_eq!(offline_rerank["result"]["reranking"], "unavailable");
+    assert_eq!(
+        offline_rerank["result"]["diagnostics"][1]["code"],
+        "model_reranking_unavailable"
+    );
+    let unavailable_rerank = invoke(&["discover", "review", "--rerank", "--json"]);
+    assert!(unavailable_rerank.status.success());
+    let unavailable_rerank: serde_json::Value =
+        serde_json::from_slice(&unavailable_rerank.stdout).unwrap();
+    assert_eq!(unavailable_rerank["result"]["reranking"], "unavailable");
+    assert_eq!(
+        unavailable_rerank["result"]["diagnostics"][0]["code"],
+        "copilot_sdk_unavailable"
+    );
+    assert_eq!(
+        unavailable_rerank["result"]["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        discover["result"]["items"].as_array().unwrap().len()
+    );
     let human = invoke(&["search", "review"]);
     let human = String::from_utf8(human.stdout).unwrap();
     assert!(human.contains("exact name match"));

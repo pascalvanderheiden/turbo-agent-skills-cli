@@ -3,17 +3,17 @@ use std::io::IsTerminal;
 use tasc_agent::{
     authoring::{FsSkillDraftRepository, SkillAuthoringService, SkillDraftInput},
     consistency::{ConsistencyService, FsConsistencyArtifactRepository},
-    discovery::DiscoveryService,
+    discovery::{apply_model_ranking, DiscoveryService},
     evaluation::{EvaluationService, FsRunArtifactRepository},
     gh::{Cancellation, GhSkill},
     insights::{FsInsightArtifactRepository, FsInsightLifecycleRepository, InsightService},
     lifecycle::{LifecycleResult, LifecycleService},
     security::{FsSecurityArtifactRepository, FsSecuritySuppressionRepository, SecurityService},
-    service::FsStateRepository,
+    service::{FsStateRepository, SkillAdapter},
     AgentService, CopilotAdapter, FsWatchCheckRepository, WatchService,
 };
 use tasc_core::{
-    discovery::{Diagnostic, Envelope},
+    discovery::{Diagnostic, Envelope, RerankingStatus},
     insights::InsightStatus,
     security::SecuritySeverity,
     Inventory, InventoryQuery, SkillIdentity, StateStatus,
@@ -48,9 +48,10 @@ enum Commands {
         #[command(subcommand)]
         command: SourceCommands,
     },
-    /// Search public GitHub skills.
-    #[command(visible_alias = "discover")]
+    /// Strictly search public GitHub skills by exact fields or keywords.
     Search(SearchArgs),
+    /// Discover skills by intent across local and remote sources.
+    Discover(DiscoverArgs),
     /// Show skills discovered by local assistant adapters.
     Skill {
         #[command(subcommand)]
@@ -315,7 +316,7 @@ enum SkillCommands {
         #[command(flatten)]
         output: JsonOutput,
     },
-    /// Search public GitHub skills with deterministic ranking.
+    /// Strictly search public GitHub skills by exact fields or keywords.
     Search(SearchArgs),
     /// Preview upstream files without installing or executing them.
     Preview {
@@ -382,6 +383,16 @@ enum InstallScope {
 #[derive(Args)]
 struct SearchArgs {
     query: String,
+    #[command(flatten)]
+    output: JsonOutput,
+}
+
+#[derive(Args)]
+struct DiscoverArgs {
+    query: String,
+    /// Explicitly ask Copilot to rerank the deterministic results.
+    #[arg(long)]
+    rerank: bool,
     #[command(flatten)]
     output: JsonOutput,
 }
@@ -495,6 +506,7 @@ async fn main() {
             | Commands::Skill {
                 command: SkillCommands::Search(args),
             } => args.output.json,
+            Commands::Discover(args) => args.output.json,
             Commands::Skill {
                 command: SkillCommands::Preview { output, .. },
             } => output.json,
@@ -628,6 +640,7 @@ async fn main() {
         | Commands::Skill {
             command: SkillCommands::Search(_),
         } => "skill search",
+        Commands::Discover(_) => "discover",
         Commands::Skill {
             command: SkillCommands::Preview { .. },
         } => "skill preview",
@@ -742,6 +755,38 @@ async fn run(
         } => serde_json::json!({
             "query": args.query, "items": discovery.search(&args.query, cancel).await?
         }),
+        Commands::Discover(args) => {
+            let local = CopilotAdapter::local().discover().map_err(local_error)?;
+            let mut result = discovery
+                .discover(&args.query, local, !cli.offline, cancel)
+                .await?;
+            if args.rerank {
+                if cli.offline {
+                    result.reranking = RerankingStatus::Unavailable;
+                    result.diagnostics.push(Diagnostic::new(
+                        "model_reranking_unavailable",
+                        "dependency",
+                        "tasc",
+                        "Model-assisted reranking was not run because offline mode is enabled.",
+                        "Remove --offline to explicitly allow Copilot model access.",
+                    ));
+                } else {
+                    match agent::rerank_discovery(&args.query, &result.items, cancel).await {
+                        Ok(ids) => {
+                            if let Err(diagnostic) = apply_model_ranking(&mut result, &ids) {
+                                result.reranking = RerankingStatus::Unavailable;
+                                result.diagnostics.push(diagnostic);
+                            }
+                        }
+                        Err(diagnostic) => {
+                            result.reranking = RerankingStatus::Unavailable;
+                            result.diagnostics.push(diagnostic);
+                        }
+                    }
+                }
+            }
+            serde_json::to_value(result).map_err(|error| local_error(error.to_string()))?
+        }
         Commands::Skill {
             command: SkillCommands::Preview {
                 selector, source, ..
