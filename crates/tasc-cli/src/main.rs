@@ -975,6 +975,7 @@ struct StatsSummary {
     lifecycle: BTreeMap<String, usize>,
     repositories: BTreeMap<String, usize>,
     comparable_outcomes: BTreeMap<String, usize>,
+    evidence_freshness: BTreeMap<String, usize>,
 }
 
 #[derive(serde::Serialize)]
@@ -1165,7 +1166,10 @@ fn stats_report(
             increment(&mut summary.watchlist, &item.watch_state);
             increment(
                 &mut summary.provenance,
-                &format!("{:?}", item.provenance.kind).to_lowercase(),
+                &serde_json::to_value(item.provenance.kind)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_string))
+                    .unwrap_or_else(|| "unknown".to_string()),
             );
             if let Some(status) = item.lifecycle_state {
                 increment(
@@ -1193,13 +1197,15 @@ fn stats_report(
         &mut diagnostics,
     );
     for outcome in &outcomes {
-        increment(
-            &mut summary.comparable_outcomes,
-            &serde_json::to_value(&outcome.outcome)
-                .ok()
-                .and_then(|value| value.as_str().map(str::to_string))
-                .unwrap_or_else(|| "unknown".to_string()),
-        );
+        let status = serde_json::to_value(&outcome.outcome)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_else(|| "unknown".to_string());
+        let freshness = freshness_name(outcome.freshness);
+        increment(&mut summary.evidence_freshness, freshness);
+        if matches!(outcome.freshness, EvidenceFreshness::Current) {
+            increment(&mut summary.comparable_outcomes, &status);
+        }
     }
     let exit_code = if diagnostics
         .iter()
@@ -1294,6 +1300,15 @@ fn append_state_findings(state: &LocalState, findings: &mut Vec<AuditFinding>) {
                 AuditSeverity::Error,
                 &installation.id,
                 "Installation refers to a missing Adapter Target.".to_string(),
+            );
+        }
+        if !std::path::Path::new(&installation.path).exists() {
+            push_finding(
+                findings,
+                "missing_installation",
+                AuditSeverity::Error,
+                &installation.id,
+                "Recorded installation path is missing.".to_string(),
             );
         }
     }
@@ -1400,7 +1415,8 @@ fn append_evidence_findings(
                 "Consistency evidence recorded inputs differ from the currently available inputs."
                     .to_string(),
             );
-        } else {
+        } else if evidence_freshness_consistency(artifact, inventory) == EvidenceFreshness::Current
+        {
             for finding in &artifact.findings {
                 if finding.status == ConsistencyStatus::Found
                     && finding.revision_status != tasc_core::consistency::RevisionStatus::Stale
@@ -1421,7 +1437,7 @@ fn append_evidence_findings(
         }
     }
     for artifact in security {
-        if evidence_freshness_security(artifact) == EvidenceFreshness::Stale {
+        if evidence_freshness_security(artifact, inventory) == EvidenceFreshness::Stale {
             push_finding(
                 findings,
                 "stale_evidence",
@@ -1429,7 +1445,7 @@ fn append_evidence_findings(
                 &artifact.id,
                 "Security evidence recorded content differs from the current content.".to_string(),
             );
-        } else {
+        } else if evidence_freshness_security(artifact, inventory) == EvidenceFreshness::Current {
             for finding in &artifact.findings {
                 if !artifact
                     .suppressed_fingerprints
@@ -1482,9 +1498,12 @@ fn evidence_freshness_evaluation(
             }
         }
     }
-    if let Some(recorded) = artifact.package_digest.as_ref() {
-        if let Some(path) = artifact.package_path.as_deref() {
-            match tasc_agent::service::skill_content_digest(std::path::Path::new(path)) {
+    if let Some(path) = artifact.package_path.as_deref() {
+        if std::path::Path::new(path) != std::path::Path::new(&item.path) {
+            return EvidenceFreshness::Stale;
+        }
+        if let Some(recorded) = artifact.package_digest.as_ref() {
+            match tasc_agent::service::skill_content_digest(std::path::Path::new(&item.path)) {
                 Ok(current) => {
                     compared = true;
                     if &current != recorded {
@@ -1518,7 +1537,17 @@ fn evidence_freshness_consistency(
         {
             return EvidenceFreshness::Stale;
         }
-        match tasc_agent::service::skill_content_digest(std::path::Path::new(&skill.path)) {
+        let Some(current_item) = inventory
+            .items
+            .iter()
+            .find(|item| item.kind == "installation" && item.identity.id == skill.identity.id)
+        else {
+            return EvidenceFreshness::Stale;
+        };
+        if current_item.path != skill.path {
+            return EvidenceFreshness::Stale;
+        }
+        match tasc_agent::service::skill_content_digest(std::path::Path::new(&current_item.path)) {
             Ok(current) => {
                 compared = true;
                 if current != skill.content_digest {
@@ -1537,13 +1566,27 @@ fn evidence_freshness_consistency(
 
 fn evidence_freshness_security(
     artifact: &tasc_core::security::SecurityArtifact,
+    inventory: Option<&Inventory>,
 ) -> EvidenceFreshness {
     let mut compared = false;
     for skill in &artifact.skills {
+        let Some(inventory) = inventory else {
+            return EvidenceFreshness::Unavailable;
+        };
+        let Some(current_item) = inventory
+            .items
+            .iter()
+            .find(|item| item.kind == "installation" && item.identity.id == skill.identity.id)
+        else {
+            return EvidenceFreshness::Stale;
+        };
+        if current_item.path != skill.path {
+            return EvidenceFreshness::Stale;
+        }
         let Some(recorded) = skill.content_digest.as_ref() else {
             continue;
         };
-        match tasc_agent::service::skill_content_digest(std::path::Path::new(&skill.path)) {
+        match tasc_agent::service::skill_content_digest(std::path::Path::new(&current_item.path)) {
             Ok(current) => {
                 compared = true;
                 if &current != recorded {
@@ -1597,11 +1640,17 @@ fn evidence_outcomes(
                 SecurityCheckStatus::Complete => OutcomeStatus::Failed,
                 SecurityCheckStatus::Partial => OutcomeStatus::Inconclusive,
             },
-            freshness: evidence_freshness_security(artifact),
+            freshness: evidence_freshness_security(artifact, inventory),
             execution_outcome: None,
         });
     }
-    for component in ["evaluations", "consistency_checks", "security_checks"] {
+    for component in [
+        "local_state",
+        "inventory",
+        "evaluations",
+        "consistency_checks",
+        "security_checks",
+    ] {
         if diagnostics.iter().any(|diagnostic| {
             diagnostic.component == component && diagnostic.status == "unavailable"
         }) {
@@ -1711,6 +1760,15 @@ fn summarize_findings(findings: &[AuditFinding]) -> AuditSummary {
 
 fn increment(counts: &mut BTreeMap<String, usize>, key: &str) {
     *counts.entry(key.to_string()).or_default() += 1;
+}
+
+fn freshness_name(freshness: EvidenceFreshness) -> &'static str {
+    match freshness {
+        EvidenceFreshness::Current => "current",
+        EvidenceFreshness::Stale => "stale",
+        EvidenceFreshness::Unavailable => "unavailable",
+        EvidenceFreshness::Unknown => "unknown",
+    }
 }
 
 fn repository_key(source: &str) -> String {

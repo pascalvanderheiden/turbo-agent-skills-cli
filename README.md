@@ -131,6 +131,28 @@ otherwise they use the user Profile at `$XDG_STATE_HOME/tasc/state.json` or
 is migrated atomically to version 2 when loaded; malformed or unsupported
 versions are left untouched.
 
+### Audit and statistics
+
+`tasc audit` checks the selected Profile's Local State, installations, Adapter
+Targets, references, and existing Evaluation, Consistency, and Security evidence.
+It is read-only: version-1 Local State is interpreted in memory, and immutable
+artifacts are never refreshed or rewritten. Evidence freshness compares recorded
+source revisions or content digests with the currently available inputs; age
+alone does not make evidence stale. Findings are classified as `error`,
+`warning`, or `optimization`.
+
+`tasc stats` reports the same profile-scoped inventory and summarizes scope,
+Tracking, Watchlist, provenance, lifecycle, repositories, audit findings, and
+comparable evidence outcomes. Both commands support `--json` and `--format json`;
+their version-1 JSON reports include the command, generation time, Profile,
+summary, typed findings or outcomes, diagnostics, and exit code.
+
+`tasc doctor` aliases `tasc audit`, and `tasc statistics` aliases `tasc stats`.
+Audit exits `0` when there are no error findings (warnings and optimizations are
+non-fatal), `1` when error findings exist, and `4` when required profile or
+evidence inputs cannot be inspected. Stats exits `0` when inputs are available
+and `4` when an operational input is unavailable.
+
 ### Conversational agent
 
 `tasc agent` starts an interactive Copilot SDK session. Install and authenticate

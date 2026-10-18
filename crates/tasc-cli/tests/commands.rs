@@ -35,6 +35,274 @@ fn run_with_resolved_profile(directory: &PathBuf, home: &PathBuf, args: &[&str])
 }
 
 #[test]
+fn audit_and_stats_are_profile_scoped_and_report_untracked_inventory() {
+    let directory = test_dir();
+    let skill_dir = directory.join(".github/skills/review");
+    let state_path = directory.join("state/state.json");
+    fs::create_dir_all(&directory).unwrap();
+
+    let clean = run(&directory, &state_path, &["audit", "--json"]);
+    assert!(clean.status.success());
+    let clean: serde_json::Value = serde_json::from_slice(&clean.stdout).unwrap();
+    assert_eq!(clean["summary"]["errors"], 0);
+    assert_eq!(clean["summary"]["warnings"], 0);
+    assert!(clean["findings"].as_array().unwrap().is_empty());
+
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: Review\ndescription: Review changes.\n---\n",
+    )
+    .unwrap();
+
+    let audit = run(&directory, &state_path, &["doctor", "--json"]);
+    assert!(audit.status.success());
+    let audit: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap();
+    assert_eq!(audit["command"], "audit");
+    assert_eq!(audit["schemaVersion"], 1);
+    assert_eq!(audit["profile"]["id"], "custom");
+    assert!(audit["generatedAtUnixMs"].as_u64().is_some());
+    assert_eq!(audit["summary"]["errors"], 0);
+    assert_eq!(audit["summary"]["warnings"], 1);
+    assert_eq!(audit["findings"][0]["code"], "untracked_installation");
+    assert_eq!(audit["exitCode"], 0);
+
+    let stats = run(&directory, &state_path, &["statistics", "--json"]);
+    assert!(stats.status.success());
+    let stats: serde_json::Value = serde_json::from_slice(&stats.stdout).unwrap();
+    assert_eq!(stats["command"], "stats");
+    assert_eq!(stats["profile"]["id"], "custom");
+    assert_eq!(stats["summary"]["inventoryItems"], 1);
+    assert_eq!(stats["summary"]["tracking"]["untracked"], 1);
+    assert_eq!(stats["summary"]["watchlist"]["not_watched"], 1);
+    assert_eq!(stats["summary"]["scope"]["project"], 1);
+    assert!(stats["summary"]["provenance"].is_object());
+    assert!(stats["summary"]["repositories"].is_object());
+    assert!(stats["summary"]["lifecycle"]["installed"]
+        .as_u64()
+        .is_some());
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn audit_keeps_legacy_state_unchanged_and_reports_unreadable_state() {
+    let directory = test_dir();
+    let state_path = directory.join("state/state.json");
+    fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+    let legacy = r#"{"version":1,"identities":[],"targets":[],"installations":[]}"#;
+    fs::write(&state_path, legacy).unwrap();
+
+    let audit = run(&directory, &state_path, &["audit", "--json"]);
+    assert!(audit.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap();
+    assert_eq!(report["summary"]["errors"], 0);
+    assert_eq!(fs::read_to_string(&state_path).unwrap(), legacy);
+
+    fs::write(&state_path, b"{broken").unwrap();
+    let audit = run(&directory, &state_path, &["audit", "--json"]);
+    assert_eq!(audit.status.code(), Some(4));
+    let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap();
+    assert_eq!(report["exitCode"], 4);
+    assert_eq!(report["findings"][0]["code"], "local_state_unreadable");
+    assert_eq!(report["diagnostics"][0]["status"], "unavailable");
+    assert_eq!(fs::read(&state_path).unwrap(), b"{broken");
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn audit_detects_conflicts_broken_references_and_missing_targets() {
+    let directory = test_dir();
+    let state_path = directory.join("state/state.json");
+    fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+    fs::write(
+        &state_path,
+        r#"{
+            "version": 2,
+            "identities": [
+                {"id":"skill:duplicate","name":"one","source":"local","relative_path":"one"},
+                {"id":"skill:duplicate","name":"two","source":"local","relative_path":"two"}
+            ],
+            "targets": [],
+            "installations": [
+                {"id":"installation:broken","skill_id":"skill:missing","target_id":"target:missing","path":"missing"}
+            ]
+        }"#,
+    )
+    .unwrap();
+
+    let audit = run(&directory, &state_path, &["audit", "--json"]);
+    assert_eq!(audit.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap();
+    let codes: Vec<&str> = report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|finding| finding["code"].as_str())
+        .collect();
+    assert!(codes.contains(&"conflicting_records"));
+    assert!(codes.contains(&"broken_identity_reference"));
+    assert!(codes.contains(&"broken_target_reference"));
+    assert!(codes.contains(&"missing_installation"));
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn stats_preserves_stale_inconclusive_and_not_run_evaluation_outcomes() {
+    let directory = test_dir();
+    let state_path = directory.join("state/state.json");
+    let skill_dir = directory.join(".github/skills/review");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: Review\ndescription: Review changes.\n---\n",
+    )
+    .unwrap();
+    let inventory = run(&directory, &state_path, &["skill", "list", "--json"]);
+    assert!(inventory.status.success());
+    let inventory: serde_json::Value = serde_json::from_slice(&inventory.stdout).unwrap();
+    let item = &inventory["items"][0];
+    let artifact_dir = state_path.with_extension("evaluations");
+    fs::create_dir_all(&artifact_dir).unwrap();
+    let artifact = serde_json::json!({
+        "schemaVersion": 1,
+        "id": "eval-stale",
+        "createdAtUnixMs": 1,
+        "completedAtUnixMs": 2,
+        "selector": "review",
+        "identity": item["identity"],
+        "sourceRevision": null,
+        "target": item["target"],
+        "installationId": item["installation_id"],
+        "packagePath": skill_dir,
+        "packageDigest": "recorded-before-content-change",
+        "analyzer": {"name": "test", "version": "1", "configuration": []},
+        "policy": {
+            "mode": "package",
+            "packageValidation": "smoke",
+            "scenarioExecution": "not_run"
+        },
+        "outcome": "inconclusive",
+        "packageOutcome": "inconclusive",
+        "executionOutcome": "not_run",
+        "diagnostics": []
+    });
+    fs::write(
+        artifact_dir.join("eval-stale.json"),
+        serde_json::to_vec_pretty(&artifact).unwrap(),
+    )
+    .unwrap();
+
+    let stats = run(&directory, &state_path, &["stats", "--json"]);
+    assert!(stats.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&stats.stdout).unwrap();
+    assert_eq!(report["outcomes"][0]["outcome"], "inconclusive");
+    assert_eq!(report["outcomes"][0]["executionOutcome"], "not_run");
+    assert_eq!(report["outcomes"][0]["freshness"], "stale");
+    assert!(report["summary"]["comparableOutcomes"]["inconclusive"].is_null());
+    assert_eq!(report["summary"]["evidenceFreshness"]["stale"], 1);
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn stats_reports_unavailable_evidence_without_refreshing_it() {
+    let directory = test_dir();
+    let state_path = directory.join("state/state.json");
+    let artifact_dir = state_path.with_extension("evaluations");
+    fs::create_dir_all(&artifact_dir).unwrap();
+    fs::write(artifact_dir.join("broken.json"), b"{broken").unwrap();
+
+    let stats = run(&directory, &state_path, &["stats", "--json"]);
+    assert_eq!(stats.status.code(), Some(4));
+    let report: serde_json::Value = serde_json::from_slice(&stats.stdout).unwrap();
+    assert_eq!(report["outcomes"][0]["outcome"], "unavailable");
+    assert_eq!(report["outcomes"][0]["freshness"], "unavailable");
+    assert_eq!(report["diagnostics"][0]["status"], "unavailable");
+    assert_eq!(
+        fs::read(artifact_dir.join("broken.json")).unwrap(),
+        b"{broken"
+    );
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn audit_reports_unresolved_current_evidence_findings() {
+    let directory = test_dir();
+    let state_path = directory.join("state/state.json");
+    let skill_dir = directory.join(".github/skills/review");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: Review\ndescription: Review changes.\n---\n",
+    )
+    .unwrap();
+    let inventory = run(&directory, &state_path, &["skill", "list", "--json"]);
+    assert!(inventory.status.success());
+    let inventory: serde_json::Value = serde_json::from_slice(&inventory.stdout).unwrap();
+    let item = &inventory["items"][0];
+    let content_digest = tasc_agent::service::skill_content_digest(&skill_dir).unwrap();
+    let artifact_dir = state_path.with_extension("security-checks");
+    fs::create_dir_all(&artifact_dir).unwrap();
+    let artifact = serde_json::json!({
+        "schemaVersion": 1,
+        "id": "security-1",
+        "createdAtUnixMs": 1,
+        "completedAtUnixMs": 2,
+        "selectors": [],
+        "allInstalled": true,
+        "analyzer": "test",
+        "analyzerVersion": "1",
+        "ruleVersion": "1",
+        "status": "complete",
+        "policy": {"failOn": null, "minimumConfidence": 0},
+        "skills": [{
+            "identity": item["identity"],
+            "sourceRevision": null,
+            "contentDigest": content_digest,
+            "path": item["path"]
+        }],
+        "findings": [{
+            "id": "finding-1",
+            "fingerprint": "fingerprint-1",
+            "category": "suspicious_reference",
+            "detector": "test",
+            "severity": "high",
+            "confidenceScore": 100,
+            "deterministic": true,
+            "rationale": "Unresolved test finding.",
+            "recommendation": "Review the evidence.",
+            "skillId": item["identity"]["id"],
+            "evidence": []
+        }],
+        "suppressedFingerprints": [],
+        "unavailableChecks": [],
+        "diagnostics": []
+    });
+    fs::write(
+        artifact_dir.join("security-1.json"),
+        serde_json::to_vec_pretty(&artifact).unwrap(),
+    )
+    .unwrap();
+
+    let audit = run(&directory, &state_path, &["audit", "--json"]);
+    assert_eq!(audit.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap();
+    assert!(report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| {
+            finding["code"] == "unresolved_finding" && finding["severity"] == "error"
+        }));
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn skill_inventory_adoption_and_state_status_share_the_same_facts() {
     let directory = test_dir();
     let skill_dir = directory.join(".github/skills/review");
