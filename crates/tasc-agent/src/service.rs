@@ -138,7 +138,7 @@ impl<A: SkillAdapter, R: StateRepository> AgentService<A, R> {
                 source_revision: installation
                     .and_then(|record| record.source_revision.clone())
                     .or(skill.source_revision),
-                provenance: provenance(&skill.identity.source),
+                provenance: installation_provenance(&skill.identity.source, installation),
                 description_excerpt: InventoryItem::description_excerpt(&skill.description),
                 description: skill.description.clone(),
             });
@@ -196,7 +196,7 @@ impl<A: SkillAdapter, R: StateRepository> AgentService<A, R> {
                     InstallationStatus::Missing
                 }),
                 source_revision: installation.source_revision.clone(),
-                provenance: provenance(&identity.source),
+                provenance: installation_provenance(&identity.source, Some(installation)),
                 description_excerpt: InventoryItem::description_excerpt(&description),
                 description,
             });
@@ -635,7 +635,16 @@ fn normalized_skill_path(path: &str) -> &str {
 }
 
 fn provenance(source: &str) -> ProvenanceEvidence {
-    if source.starts_with("https://github.com/") {
+    if source == crate::command_skill::COMMAND_SKILL_SOURCE {
+        ProvenanceEvidence {
+            kind: ProvenanceKind::BundledFirstParty,
+            confidence: ProvenanceConfidence::Inferred,
+            raw_evidence: Some(source.to_string()),
+            explanation:
+                "Skill metadata declares the bundled first-party TASC Command Skill source."
+                    .to_string(),
+        }
+    } else if source.starts_with("https://github.com/") {
         ProvenanceEvidence {
             kind: ProvenanceKind::GithubRepository,
             confidence: ProvenanceConfidence::Probable,
@@ -657,6 +666,27 @@ fn provenance(source: &str) -> ProvenanceEvidence {
             explanation: "No supported provenance evidence was available.".to_string(),
         }
     }
+}
+
+fn installation_provenance(
+    source: &str,
+    installation: Option<&Installation>,
+) -> ProvenanceEvidence {
+    let mut evidence = provenance(source);
+    let bundled_digest = crate::command_skill::package_digest();
+    if source == crate::command_skill::COMMAND_SKILL_SOURCE
+        && installation.is_some_and(|installation| {
+            installation.source_revision.as_deref()
+                == Some(crate::command_skill::COMMAND_SKILL_VERSION)
+                && installation.content_digest.as_deref() == Some(bundled_digest.as_str())
+        })
+    {
+        evidence.confidence = ProvenanceConfidence::Verified;
+        evidence.explanation =
+            "TASC Local State records the bundled Command Skill version and package digest."
+                .to_string();
+    }
+    evidence
 }
 
 fn inventory_priority(item: &InventoryItem) -> u8 {
@@ -718,6 +748,44 @@ impl CopilotAdapter {
             assistant: "copilot".to_string(),
             path: path.to_string_lossy().into_owned(),
         })
+    }
+
+    pub fn target_for_plan(scope: &str) -> Result<AdapterTarget, String> {
+        let path = match scope {
+            "project" => std::env::current_dir()
+                .map_err(|error| format!("cannot locate project target: {error}"))?
+                .join(".github")
+                .join("skills"),
+            "user" => {
+                let home = std::env::var_os("HOME")
+                    .or_else(|| std::env::var_os("USERPROFILE"))
+                    .ok_or_else(|| {
+                        "cannot locate user target: home directory is not set".to_string()
+                    })?;
+                PathBuf::from(home).join(".copilot").join("skills")
+            }
+            _ => return Err(format!("unsupported Copilot installation scope '{scope}'")),
+        };
+        let path = canonicalize_missing_path(path)
+            .map_err(|error| format!("cannot resolve {scope} target: {error}"))?;
+        let source = local_source(&path);
+        Ok(AdapterTarget {
+            id: format!("target:copilot:{source}"),
+            assistant: "copilot".to_string(),
+            path: path.to_string_lossy().into_owned(),
+        })
+    }
+}
+
+fn canonicalize_missing_path(path: PathBuf) -> std::io::Result<PathBuf> {
+    match fs::canonicalize(&path) {
+        Ok(path) => Ok(normalize_private_root(path)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path.parent().ok_or(error)?;
+            Ok(canonicalize_missing_path(parent.to_path_buf())?
+                .join(path.file_name().unwrap_or_default()))
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -785,6 +853,8 @@ impl SkillAdapter for CopilotAdapter {
                 let content_digest = skill_content_digest(&path)?;
                 let remote_source = frontmatter_value(&contents, "github-repo")
                     .filter(|value| value.starts_with("https://github.com/"));
+                let first_party_source = frontmatter_value(&contents, "tasc-source")
+                    .filter(|value| value == crate::command_skill::COMMAND_SKILL_SOURCE);
                 let source_locator = remote_source
                     .map(|source| {
                         source
@@ -792,9 +862,11 @@ impl SkillAdapter for CopilotAdapter {
                             .trim_end_matches(".git")
                             .to_ascii_lowercase()
                     })
+                    .or(first_party_source)
                     .unwrap_or_else(|| source.clone());
-                let remote_path = frontmatter_value(&contents, "github-path");
-                let identity_path = remote_path.unwrap_or_else(|| relative_path.clone());
+                let identity_path = frontmatter_value(&contents, "github-path")
+                    .or_else(|| frontmatter_value(&contents, "tasc-path"))
+                    .unwrap_or_else(|| relative_path.clone());
                 let identity = SkillIdentity {
                     id: format!("skill:{source_locator}/{}", encode_uri_path(&identity_path)),
                     name: skill_name(&path.join("SKILL.md")).unwrap_or_else(|| {
@@ -808,6 +880,7 @@ impl SkillAdapter for CopilotAdapter {
                 };
                 let source_revision = frontmatter_value(&contents, "github-tree-sha")
                     .or_else(|| frontmatter_value(&contents, "github-sha"))
+                    .or_else(|| frontmatter_value(&contents, "tasc-version"))
                     .or_else(|| Some(format!("sha256:{content_digest}")));
                 skills.push(DiscoveredSkill {
                     identity,

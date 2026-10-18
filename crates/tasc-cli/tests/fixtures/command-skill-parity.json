@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "surfaces": ["cli", "tasc-agent-slash", "external-command-skill"],
+  "scenarios": [
+    {
+      "id": "capability-handshake",
+      "cliArgs": [
+        "skill",
+        "command",
+        "capabilities",
+        "--skill-version",
+        "0.1.0",
+        "--policy-semantics-version",
+        "1",
+        "--json"
+      ],
+      "agentSlash": "/command-skill capabilities --skill-version 0.1.0 --policy-semantics-version 1 --json",
+      "externalInvocation": "tasc skill command capabilities --skill-version 0.1.0 --policy-semantics-version 1 --json",
+      "expected": {
+        "compatibility": "compatible",
+        "schemaVersion": 1
+      }
+    },
+    {
+      "id": "explicit-install-plan",
+      "cliArgs": [
+        "skill",
+        "command",
+        "install",
+        "--adapter",
+        "copilot",
+        "--scope",
+        "project",
+        "--dry-run",
+        "--json"
+      ],
+      "agentSlash": "/command-skill install --adapter copilot --scope project --dry-run --json",
+      "externalInvocation": "tasc skill command install --adapter copilot --scope project --dry-run --json",
+      "expected": {
+        "dryRun": true,
+        "scope": "project",
+        "requiredApproval": "mutation",
+        "noDurableEffects": true
+      }
+    },
+    {
+      "id": "adapter-selection-required",
+      "cliArgs": [
+        "skill",
+        "command",
+        "install",
+        "--scope",
+        "project",
+        "--json"
+      ],
+      "agentSlash": "/command-skill install --scope project --json",
+      "externalInvocation": "tasc skill command install --scope project --json",
+      "expected": {
+        "diagnosticCode": "adapter_selection_required",
+        "noDurableEffects": true
+      }
+    },
+    {
+      "id": "human-approval-required",
+      "cliArgs": [
+        "skill",
+        "command",
+        "install",
+        "--adapter",
+        "copilot",
+        "--scope",
+        "project",
+        "--json"
+      ],
+      "agentSlash": "/command-skill install --adapter copilot --scope project --json",
+      "externalInvocation": "tasc skill command install --adapter copilot --scope project --json",
+      "expected": {
+        "diagnosticCode": "command_skill_approval_required",
+        "noDurableEffects": true
+      }
+    }
+  ]
+}

@@ -18,9 +18,30 @@ It is designed around a local-first Rust core that the CLI and Copilot SDK agent
 ```bash
 cargo install --path crates/tasc-cli
 
+tasc setup
 tasc skill list
 tasc state status
 ```
+
+`tasc setup` offers the optional first-party TASC Command Skill and never
+installs it automatically. Choose a supported adapter and `user` or `project`
+scope explicitly:
+
+```bash
+tasc skill command adapters --scope user --json
+tasc skill command capabilities --skill-version 0.1.0 --policy-semantics-version 1 --json
+tasc skill command install --adapter copilot --scope user --dry-run
+tasc skill command install --adapter copilot --scope user
+tasc skill command update --adapter copilot --scope user --dry-run
+tasc skill command repair --adapter copilot --scope user
+tasc skill command uninstall --adapter copilot --scope user
+```
+
+`--all-supported` is an explicit alternative to `--adapter`; it selects only
+supported adapters detected for the chosen scope. The managed Installation is
+tracked after approval. Updates and removal refuse to replace user modifications
+unless `--force` is explicitly approved. The release also publishes the exact,
+inspectable `tasc-command-skill-v<version>.tar.gz` package asset.
 
 ## Command surface
 
@@ -199,9 +220,10 @@ SDK-exposed models, `/model <id>` for a session-only override, and
 `/help` lists the shell commands.
 
 The saved model preference is stored separately from Local State alongside the
-selected Profile's state file. Command Skill management commands are recognized
-by the shell, but operations requiring a Command Skill management service are
-reported unavailable until that service is provided.
+selected Profile's state file. The `/command-skill` slash command supports
+`adapters`, `capabilities`, `list`, `install`, `update`, `repair`, and
+`uninstall`; it delegates to the same versioned CLI contracts as the packaged
+Command Skill.
 
 Lifecycle requests can prepare plans but cannot mutate installations until
 explicitly approved. Review the proposed operation and enter `/approve <token>`

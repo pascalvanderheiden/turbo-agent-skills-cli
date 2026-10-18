@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "adapter": "copilot",
+  "userTarget": "~/.copilot/skills",
+  "projectTarget": ".github/skills",
+  "skillDirectory": "tasc-command"
+}

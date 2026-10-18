@@ -11,13 +11,13 @@
 
 ## Stable release checklist
 
-1. Update the `tasc` package version, `Cargo.lock`, and `docs/site/versions.json`; add the matching `docs/site/v<version>/` documentation snapshot. Keep package and documentation versions equal.
+1. Update the `tasc` package version, `Cargo.lock`, `skills/tasc-command/manifest.json`, `skills/tasc-command/SKILL.md`, and `docs/site/versions.json`; add the matching `docs/site/v<version>/` documentation snapshot. Keep package and documentation versions equal.
 2. Merge the complete, tested change set. Create a protected `vMAJOR.MINOR.PATCH` tag at that commit; prerelease tags are not accepted by the stable release workflow.
-3. Confirm all five target builds, workspace tests, reproducible archive packaging, the CycloneDX BOM, checksums, build-provenance attestations, and SBOM attestation pass. The workflow assembles the verified assets as a draft.
+3. Confirm all five target builds, workspace tests, reproducible CLI and Command Skill archive packaging, the CycloneDX BOM, checksums, build-provenance attestations, and SBOM attestation pass. The workflow assembles the verified assets as a draft.
 4. Review the draft release notes and assets, then approve the protected `release-approval` environment. Approval publishes that draft. Never re-run a release by replacing or editing its published assets.
 5. Confirm the versioned Pages documentation is deployed after the release is published.
 
-Each release includes five `tasc-v<version>-<target>.tar.gz` archives, `tasc.cdx.json`, and `SHA256SUMS.txt`. Build provenance is attached to each archive and the SBOM attestation carries the CycloneDX BOM predicate for the archives.
+Each release includes five `tasc-v<version>-<target>.tar.gz` archives, the inspectable `tasc-command-skill-v<version>.tar.gz` package, `tasc.cdx.json`, and `SHA256SUMS.txt`. Build provenance is attached to each binary archive and the SBOM attestation carries the CycloneDX BOM predicate for the archives.
 
 If assembly creates a draft but the workflow must be retried, delete only that unpublished draft before rerunning. Never delete or replace a published release.
 

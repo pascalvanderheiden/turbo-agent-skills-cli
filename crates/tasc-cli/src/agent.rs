@@ -779,6 +779,11 @@ fn parse_shell_command(input: &str) -> Result<ShellCommand, String> {
             args.extend(arguments.split_whitespace().skip(1).map(str::to_string));
             Ok(ShellCommand::Cli(args))
         }
+        "command-skill" | "command-skills" if !arguments.is_empty() => {
+            let mut args = vec!["skill".to_string(), "command".to_string()];
+            args.extend(arguments.split_whitespace().map(str::to_string));
+            Ok(ShellCommand::Cli(args))
+        }
         "skill" | "evaluation" | "eval" | "consistency" | "security" | "profile" | "profiles"
         | "bundle" | "bundles" | "command-skill" | "command-skills" => {
             if arguments.is_empty() && !matches!(name, "profiles") {
@@ -1323,7 +1328,7 @@ fn print_help(json_output: bool) {
         "/stats",
         "/profile status",
         "/bundle validate ...",
-        "/command-skill list|install|update|remove ...",
+        "/command-skill adapters|capabilities|list|install|update|repair|uninstall ...",
         "/model [list|MODEL|profile MODEL]",
         "/status",
         "/help",
@@ -1726,13 +1731,46 @@ mod tests {
         ));
         assert!(matches!(
             parse_shell_command("/command-skill install").unwrap(),
-            ShellCommand::Request(_)
+            ShellCommand::Cli(args) if args == ["skill", "command", "install"]
+        ));
+        assert!(matches!(
+            parse_shell_command(
+                "/command-skill install --adapter copilot --scope project --dry-run"
+            )
+            .unwrap(),
+            ShellCommand::Cli(args)
+                if args == ["skill", "command", "install", "--adapter", "copilot", "--scope", "project", "--dry-run"]
         ));
         assert_eq!(
             parse_shell_command(":approve tasc-approve-token").unwrap(),
             ShellCommand::Approve("tasc-approve-token".to_string())
         );
         assert!(parse_shell_command("/unknown").is_err());
+    }
+
+    #[test]
+    fn command_skill_golden_scenarios_delegate_to_the_canonical_cli_args() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/command-skill-parity.json"))
+                .unwrap();
+        assert_eq!(fixture["schemaVersion"], 1);
+        for scenario in fixture["scenarios"].as_array().unwrap() {
+            let parsed = parse_shell_command(scenario["agentSlash"].as_str().unwrap()).unwrap();
+            let ShellCommand::Cli(args) = parsed else {
+                panic!("Command Skill slash scenario did not delegate to the CLI");
+            };
+            let expected = scenario["cliArgs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap().to_string())
+                .collect::<Vec<_>>();
+            assert_eq!(args, expected);
+            assert_eq!(
+                scenario["externalInvocation"].as_str().unwrap(),
+                format!("tasc {}", expected.join(" "))
+            );
+        }
     }
 
     #[test]
