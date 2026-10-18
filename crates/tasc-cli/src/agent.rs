@@ -6,8 +6,11 @@ use github_copilot_sdk::{
 };
 use serde_json::{json, Value};
 use std::{
+    io::{IsTerminal, Write},
     path::{Path, PathBuf},
+    process::Command,
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tasc_agent::{
     consistency::{ConsistencyService, FsConsistencyArtifactRepository},
@@ -25,11 +28,12 @@ use tasc_agent::{
 use tasc_core::discovery::{Diagnostic, Envelope};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-const SYSTEM_MESSAGE: &str = "You are TASC, a local-first Agent Skill assistant. Use only the registered tasc_* tools for TASC data and actions; never use shell, filesystem, or other ambient tools. Search is remote and only available when the user has not selected --offline. Summarize results and explain rankings. Resolve list positions against the latest result set. Security requests must use the Security Check tools. Tool results intentionally omit local paths, skill excerpts, and detailed security evidence; tell the user which local TASC command can inspect them. Lifecycle changes are never executed by a tool: call tasc_plan_lifecycle, show its exact plan, then wait for the human to enter :approve <token> at the TASC prompt. Never treat conversational consent or a model tool call as human approval. TASC does not retain chat transcripts; do not ask to persist conversation history.";
+const SYSTEM_MESSAGE: &str = "You are TASC, a local-first Agent Skill assistant. Use only the registered tasc_* tools for TASC data and actions; never use shell, filesystem, or other ambient tools. Search is remote and only available when the user has not selected --offline. Summarize results and explain rankings. Resolve list positions against the latest result set. Security requests must use the Security Check tools. Tool results intentionally omit local paths, skill excerpts, and detailed Security evidence; tell the user which local TASC command can inspect them. If a requested operation has no registered TASC tool, explain that it is unavailable and do not claim it was performed. Lifecycle changes are never executed by a tool: call tasc_plan_lifecycle, show its exact plan, then wait for the human to approve its token at the TASC prompt. Never treat conversational consent or a model tool call as human approval. TASC does not retain chat transcripts; do not ask to persist conversation history.";
 
 struct AgentContext {
     state_path: PathBuf,
     offline: bool,
+    json_output: bool,
     session: Mutex<AgentSession>,
     cancellation: Mutex<Cancellation>,
 }
@@ -109,10 +113,11 @@ fn lifecycle_summary(result: &LifecycleResult) -> Value {
 }
 
 impl AgentContext {
-    fn new(state_path: PathBuf, offline: bool) -> Self {
+    fn new(state_path: PathBuf, offline: bool, json_output: bool) -> Self {
         Self {
             state_path,
             offline,
+            json_output,
             session: Mutex::new(AgentSession::default()),
             cancellation: Mutex::new(Cancellation::default()),
         }
@@ -185,6 +190,23 @@ impl AgentContext {
                     .resolve_references(&reference)?;
                 success("agent.resolve_reference", json!({ "ids": ids }))
             }
+            AgentToolRequest::TrackSkills { selectors, all } => {
+                let installations = AgentService::new(
+                    CopilotAdapter::local(),
+                    FsStateRepository::new(self.state_path.clone()),
+                )
+                .track(&selectors, all)
+                .map_err(state_error)?;
+                success(
+                    "skill track",
+                    json!({
+                        "trackedInstallationIds": installations
+                            .iter()
+                            .map(|installation| &installation.id)
+                            .collect::<Vec<_>>()
+                    }),
+                )
+            }
             AgentToolRequest::RunEvaluation { selector } => {
                 let service = EvaluationService::new(
                     CopilotAdapter::local(),
@@ -255,15 +277,30 @@ impl AgentContext {
                     .lock()
                     .map_err(|_| state_error("agent session state is unavailable".to_string()))?
                     .prepare_approval(plan);
-                eprintln!(
-                    "TASC plan: {}\nScope: {}\nTarget: {}\nRevision: {}\nApproval token: {} ({} seconds)",
-                    result.plan,
-                    approval.plan.scope,
-                    approval.plan.target,
-                    approval.plan.revision.as_deref().unwrap_or("current"),
-                    approval.token,
-                    approval.expires_in_seconds
-                );
+                let plan = json!({
+                    "operation": result.operation,
+                    "scope": approval.plan.scope,
+                    "target": approval.plan.target,
+                    "revision": approval.plan.revision,
+                    "approvalToken": approval.token,
+                    "expiresInSeconds": approval.expires_in_seconds
+                });
+                if self.json_output {
+                    println!(
+                        "{}",
+                        json!({"schemaVersion":1,"command":"agent.plan","result":plan})
+                    );
+                } else {
+                    eprintln!(
+                        "PLAN: {}\nScope: {}\nTarget: {}\nRevision: {}\nApproval token: {} ({} seconds)",
+                        result.plan,
+                        approval.plan.scope,
+                        approval.plan.target,
+                        approval.plan.revision.as_deref().unwrap_or("current"),
+                        approval.token,
+                        approval.expires_in_seconds
+                    );
+                }
                 success(
                     &format!("skill {operation}"),
                     json!({
@@ -472,9 +509,10 @@ impl ToolHandler for Dispatcher {
     }
 }
 
-pub async fn run(offline: bool) -> Result<(), Diagnostic> {
+pub async fn run(offline: bool, json_output: bool) -> Result<(), Diagnostic> {
     let (state_path, _) = FsStateRepository::selected_profile_path().map_err(state_error)?;
-    let context = Arc::new(AgentContext::new(state_path, offline));
+    let profile_model = read_profile_model(&state_path)?;
+    let context = Arc::new(AgentContext::new(state_path, offline, json_output));
     let program = std::env::var_os("COPILOT_CLI_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("copilot"));
@@ -485,7 +523,19 @@ pub async fn run(offline: bool) -> Result<(), Diagnostic> {
         .with_base_directory(copilot_home);
     let client = Client::start(options).await.map_err(sdk_start_error)?;
     let dispatcher = Arc::new(Dispatcher(context.clone()));
-    let session_config = session_config(tools(dispatcher));
+    let initial_model = if let Some(model) = profile_model.as_deref() {
+        match client.list_models().await {
+            Ok(models)
+                if model == "auto" || models.iter().any(|available| available.id == model) =>
+            {
+                model
+            }
+            _ => "auto",
+        }
+    } else {
+        "auto"
+    };
+    let session_config = session_config(tools(dispatcher), initial_model);
     let session = match client.create_session(session_config).await {
         Ok(session) => session,
         Err(error) => {
@@ -493,7 +543,7 @@ pub async fn run(offline: bool) -> Result<(), Diagnostic> {
             return Err(sdk_error(error));
         }
     };
-    let result = interact(&session, context).await;
+    let result = interact(&client, &session, context, Some(initial_model.to_string())).await;
     let _ = session.disconnect().await;
     let _ = client.stop().await;
     result
@@ -606,9 +656,10 @@ pub async fn rerank_discovery(
     result
 }
 
-fn session_config(tools: Vec<Tool>) -> SessionConfig {
+fn session_config(tools: Vec<Tool>, model: &str) -> SessionConfig {
     SessionConfig::default()
         .with_client_name("tasc")
+        .with_model(model)
         .with_streaming(true)
         .with_available_tools(Vec::<String>::new())
         .with_enable_session_store(false)
@@ -618,19 +669,258 @@ fn session_config(tools: Vec<Tool>) -> SessionConfig {
         .with_tools(tools)
 }
 
-async fn interact(session: &Session, context: Arc<AgentContext>) -> Result<(), Diagnostic> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ShellCommand {
+    Quit,
+    Help,
+    Status,
+    ModelList,
+    ModelSession(String),
+    ModelProfile(String),
+    Approve(String),
+    Deny(String),
+    Cancel,
+    Request(String),
+}
+
+fn parse_shell_command(input: &str) -> Result<ShellCommand, String> {
+    let input = input.trim();
+    if !input.starts_with('/') && !input.starts_with(':') {
+        return Ok(ShellCommand::Request(input.to_string()));
+    }
+    let command = input
+        .strip_prefix('/')
+        .or_else(|| input.strip_prefix(':'))
+        .unwrap_or_default();
+    let (name, arguments) = command
+        .split_once(char::is_whitespace)
+        .map_or((command, ""), |(name, rest)| (name, rest.trim()));
+    match name {
+        "quit" | "exit" => Ok(ShellCommand::Quit),
+        "help" => Ok(ShellCommand::Help),
+        "status" => Ok(ShellCommand::Status),
+        "approve" if !arguments.is_empty() => Ok(ShellCommand::Approve(arguments.to_string())),
+        "deny" if !arguments.is_empty() => Ok(ShellCommand::Deny(arguments.to_string())),
+        "cancel" => Ok(ShellCommand::Cancel),
+        "model" => match arguments.split_whitespace().collect::<Vec<_>>().as_slice() {
+            [] | ["list"] => Ok(ShellCommand::ModelList),
+            ["profile", model] | ["save", model] => {
+                Ok(ShellCommand::ModelProfile((*model).to_string()))
+            }
+            [model] => Ok(ShellCommand::ModelSession((*model).to_string())),
+            _ => Err("Usage: /model [list|MODEL|profile MODEL]".to_string()),
+        },
+        "skill" | "evaluation" | "eval" | "consistency" | "security" | "audit" | "stats"
+        | "profile" | "profiles" | "bundle" | "bundles" | "command-skill" | "command-skills" => {
+            if arguments.is_empty() && !matches!(name, "audit" | "stats" | "profiles") {
+                return Err(format!("Usage: /{name} OPERATION [ARGUMENTS]"));
+            }
+            let noun = match name {
+                "eval" => "evaluation",
+                "profiles" => "profile",
+                "bundles" => "bundle",
+                "command-skills" => "command-skill",
+                _ => name,
+            };
+            let request = if arguments.is_empty() {
+                noun.to_string()
+            } else {
+                format!("{noun} {arguments}")
+            };
+            Ok(ShellCommand::Request(format!(
+                "Run the TASC {request} operation using its registered TASC tools only."
+            )))
+        }
+        _ => Err(format!(
+            "Unknown TASC command '/{name}'. Use /help to list commands."
+        )),
+    }
+}
+
+fn model_preferences_path(state_path: &Path) -> PathBuf {
+    state_path.with_extension("agent-preferences.json")
+}
+
+fn read_profile_model(state_path: &Path) -> Result<Option<String>, Diagnostic> {
+    let path = model_preferences_path(state_path);
+    let contents = match std::fs::read(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(state_error(error.to_string())),
+    };
+    let preferences: Value = serde_json::from_slice(&contents).map_err(serialization_error)?;
+    Ok(preferences
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|model| !model.trim().is_empty())
+        .map(str::to_string))
+}
+
+fn save_profile_model(state_path: &Path, model: &str) -> Result<(), Diagnostic> {
+    let path = model_preferences_path(state_path);
+    let parent = path
+        .parent()
+        .ok_or_else(|| state_error("agent preference path has no parent directory".to_string()))?;
+    std::fs::create_dir_all(parent).map_err(|error| state_error(error.to_string()))?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = path.with_extension(format!("tmp-{}-{timestamp}", std::process::id()));
+    let contents = serde_json::to_vec(&json!({"schemaVersion":1,"model":model}))
+        .map_err(serialization_error)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| state_error(error.to_string()))?;
+    if let Err(error) = file.write_all(&contents) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(state_error(error.to_string()));
+    }
+    drop(file);
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(state_error(error.to_string()));
+    }
+    Ok(())
+}
+
+fn gh_authenticated() -> bool {
+    Command::new("gh")
+        .args(["auth", "status", "--hostname", "github.com"])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn dashboard_status(state_path: &Path, model: &str, token_usage: Option<(i64, i64)>) -> Value {
+    let inventory = AgentService::new(
+        CopilotAdapter::local(),
+        FsStateRepository::new(state_path.to_path_buf()),
+    )
+    .inventory()
+    .ok();
+    let items = inventory
+        .map(|inventory| inventory.items)
+        .unwrap_or_default();
+    json!({
+        "githubCliAuthenticated": gh_authenticated(),
+        "model": model,
+        "tokenUsage": token_usage.map(|(input, output)| json!({
+            "inputTokens": input,
+            "outputTokens": output,
+            "totalTokens": input.saturating_add(output)
+        })),
+        "skillCount": items.len(),
+        "trackedCount": items.iter().filter(|item| item.tracked).count(),
+        "watchedCount": items.iter().filter(|item| item.watch_state != "not_watched").count()
+    })
+}
+
+fn dashboard_output(status: &Value, color: bool, json_output: bool) -> String {
+    if json_output {
+        return json!({"schemaVersion":1,"command":"agent.dashboard","result":status}).to_string();
+    }
+    let banner = "Turbo Agent Skills CLI";
+    let banner = if color {
+        format!("\x1b[1;36m{banner}\x1b[0m")
+    } else {
+        banner.to_string()
+    };
+    format!(
+        "{banner}\nGitHub CLI: {} · Model: {} · Tokens: {} · Skills: {} ({} tracked, {} watched)\nFirst steps: /skill list · /help · /quit",
+        if status["githubCliAuthenticated"] == true {
+            "authenticated"
+        } else {
+            "not authenticated"
+        },
+        status["model"].as_str().unwrap_or("auto"),
+        status["tokenUsage"]
+            .get("totalTokens")
+            .and_then(Value::as_i64)
+            .map(|tokens| tokens.to_string())
+            .unwrap_or_else(|| "unavailable".to_string()),
+        status["skillCount"].as_u64().unwrap_or_default(),
+        status["trackedCount"].as_u64().unwrap_or_default(),
+        status["watchedCount"].as_u64().unwrap_or_default()
+    )
+}
+
+fn render_dashboard(status: &Value, color: bool, json_output: bool) {
+    println!("{}", dashboard_output(status, color, json_output));
+}
+
+async fn list_models(client: &Client) -> Result<Vec<String>, Diagnostic> {
+    let models = client.list_models().await.map_err(sdk_error)?;
+    let mut ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
+    ids.sort();
+    Ok(ids)
+}
+
+async fn set_session_model(
+    client: &Client,
+    session: &Session,
+    model: &str,
+) -> Result<(), Diagnostic> {
+    let models = list_models(client).await?;
+    if model != "auto" && !models.iter().any(|available| available == model) {
+        return Err(selection_error(
+            "unknown_model",
+            "That model is not exposed by the Copilot SDK for this account.",
+        ));
+    }
+    session.set_model(model, None).await.map_err(sdk_error)?;
+    println!("Session model set to {model}; Profile preference unchanged.");
+    Ok(())
+}
+
+async fn interact(
+    client: &Client,
+    session: &Session,
+    context: Arc<AgentContext>,
+    profile_model: Option<String>,
+) -> Result<(), Diagnostic> {
     let mut input = BufReader::new(tokio::io::stdin());
     let mut events = session.subscribe();
     let mut stdout = tokio::io::stdout();
+    let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let color = interactive && std::env::var_os("NO_COLOR").is_none() && !context.json_output;
+    let mut model = profile_model.unwrap_or_else(|| "auto".to_string());
+    if interactive || context.json_output {
+        let usage = session
+            .rpc()
+            .usage()
+            .get_metrics()
+            .await
+            .ok()
+            .map(|metrics| {
+                metrics
+                    .model_metrics
+                    .values()
+                    .fold((0_i64, 0_i64), |(input, output), metric| {
+                        (
+                            input.saturating_add(metric.usage.input_tokens),
+                            output.saturating_add(metric.usage.output_tokens),
+                        )
+                    })
+            });
+        render_dashboard(
+            &dashboard_status(&context.state_path, &model, usage),
+            color,
+            context.json_output,
+        );
+    }
     loop {
-        stdout
-            .write_all(b"tasc> ")
-            .await
-            .map_err(|error| state_error(error.to_string()))?;
-        stdout
-            .flush()
-            .await
-            .map_err(|error| state_error(error.to_string()))?;
+        if interactive && !context.json_output {
+            stdout
+                .write_all(b"tasc> ")
+                .await
+                .map_err(|error| state_error(error.to_string()))?;
+            stdout
+                .flush()
+                .await
+                .map_err(|error| state_error(error.to_string()))?;
+        }
         let mut line = String::new();
         let count = tokio::select! {
             result = input.read_line(&mut line) => result.map_err(|error| state_error(error.to_string()))?,
@@ -642,80 +932,236 @@ async fn interact(session: &Session, context: Arc<AgentContext>) -> Result<(), D
         if count == 0 {
             break;
         }
-        let prompt = line.trim();
-        if prompt.is_empty() {
+        let shell_input = line.trim();
+        if shell_input.is_empty() {
             continue;
         }
-        if prompt == ":quit" || prompt == ":exit" {
-            break;
-        }
-        if let Some(token) = prompt.strip_prefix(":approve ") {
-            let approval = context.approve(token.trim());
-            tokio::pin!(approval);
-            tokio::select! {
-                result = &mut approval => match result {
-                    Ok(result) => println!("{}", result),
-                    Err(error) => eprintln!("{}", json!({"schemaVersion":1,"command":"agent.approve","diagnostic":error})),
-                },
-                _ = tokio::signal::ctrl_c() => {
-                    context.cancel();
-                    return Err(cancelled_error());
-                }
+        let command = match parse_shell_command(shell_input) {
+            Ok(command) => command,
+            Err(error) => {
+                print_shell_event("error", &error, context.json_output);
+                continue;
             }
-            continue;
-        }
-        if let Some(token) = prompt.strip_prefix(":deny ") {
-            match context.deny(token.trim()) {
-                Ok(()) => println!("Approval declined; no changes were made."),
-                Err(error) => eprintln!(
-                    "{}",
-                    json!({"schemaVersion":1,"command":"agent.deny","diagnostic":error})
-                ),
+        };
+        match command {
+            ShellCommand::Quit => break,
+            ShellCommand::Help => {
+                print_help(context.json_output);
+                continue;
             }
-            continue;
-        }
-        if prompt == ":cancel" {
-            println!("No active operation. Press Ctrl-C while a request is running to cancel it.");
-            continue;
-        }
-        context.reset_cancellation();
-        let turn = session.send_and_wait(prompt);
-        tokio::pin!(turn);
-        let mut events_open = true;
-        loop {
-            tokio::select! {
-                result = &mut turn => {
-                    match result {
-                        Ok(Some(response)) => {
-                            let message = response.data.get("content").and_then(Value::as_str).unwrap_or_default();
-                            println!("{}", safe_text(message));
+            ShellCommand::Status => {
+                let usage = session
+                    .rpc()
+                    .usage()
+                    .get_metrics()
+                    .await
+                    .ok()
+                    .map(|metrics| {
+                        metrics.model_metrics.values().fold(
+                            (0_i64, 0_i64),
+                            |(input, output), metric| {
+                                (
+                                    input.saturating_add(metric.usage.input_tokens),
+                                    output.saturating_add(metric.usage.output_tokens),
+                                )
+                            },
+                        )
+                    });
+                render_dashboard(
+                    &dashboard_status(&context.state_path, &model, usage),
+                    false,
+                    context.json_output,
+                );
+                continue;
+            }
+            ShellCommand::ModelList => {
+                match list_models(client).await {
+                    Ok(models) => {
+                        if context.json_output {
+                            println!(
+                                "{}",
+                                json!({
+                                    "schemaVersion":1,
+                                    "command":"agent.models",
+                                    "result":{
+                                        "default":"auto",
+                                        "currentSessionModel":model,
+                                        "models":models
+                                    }
+                                })
+                            );
+                        } else {
+                            println!("Models: auto (default), {}", models.join(", "));
+                            println!("Current session model: {model}");
                         }
-                        Ok(None) => return Err(selection_error(
-                            "empty_agent_response",
-                            "Copilot completed the turn without an assistant message.",
-                        )),
-                        Err(error) => return Err(sdk_error(error)),
                     }
-                    break;
+                    Err(error) => print_shell_event("error", &error.message, context.json_output),
                 }
-                _ = tokio::signal::ctrl_c() => {
-                    context.cancel();
-                    let _ = session.abort().await;
-                    return Err(cancelled_error());
+                continue;
+            }
+            ShellCommand::ModelSession(selected) => {
+                match set_session_model(client, session, &selected).await {
+                    Ok(()) => model = selected,
+                    Err(error) => print_shell_event("error", &error.message, context.json_output),
                 }
-                event = events.recv(), if events_open => {
-                    match event {
-                        Ok(event) => render_event(&event.event_type, &event.data),
-                        Err(error) if error.to_string().contains("lagged") => {
-                            eprintln!("tasc agent: progress events were skipped; the request is still running");
+                continue;
+            }
+            ShellCommand::ModelProfile(selected) => {
+                match set_session_model(client, session, &selected).await {
+                    Ok(()) => match save_profile_model(&context.state_path, &selected) {
+                        Ok(()) => {
+                            model = selected.clone();
+                            print_shell_event(
+                                "result",
+                                &format!("Profile model preference saved as {selected}."),
+                                context.json_output,
+                            );
                         }
-                        Err(_) => events_open = false,
+                        Err(error) => {
+                            print_shell_event("error", &error.message, context.json_output)
+                        }
+                    },
+                    Err(error) => print_shell_event("error", &error.message, context.json_output),
+                }
+                continue;
+            }
+            ShellCommand::Approve(token) => {
+                let approval = context.approve(&token);
+                tokio::pin!(approval);
+                tokio::select! {
+                    result = &mut approval => match result {
+                        Ok(result) => print_shell_event("result", &result.to_string(), context.json_output),
+                        Err(error) => print_shell_event("error", &error.message, context.json_output),
+                    },
+                    _ = tokio::signal::ctrl_c() => {
+                        context.cancel();
+                        return Err(cancelled_error());
+                    }
+                }
+                continue;
+            }
+            ShellCommand::Deny(token) => {
+                match context.deny(&token) {
+                    Ok(()) => print_shell_event(
+                        "result",
+                        "Approval declined; no changes were made.",
+                        context.json_output,
+                    ),
+                    Err(error) => print_shell_event("error", &error.message, context.json_output),
+                }
+                continue;
+            }
+            ShellCommand::Cancel => {
+                print_shell_event(
+                    "result",
+                    "No active operation. Press Ctrl-C while a request is running to cancel it.",
+                    context.json_output,
+                );
+                continue;
+            }
+            ShellCommand::Request(prompt) => {
+                context.reset_cancellation();
+                let turn = session.send_and_wait(prompt);
+                tokio::pin!(turn);
+                let mut events_open = true;
+                let mut control_input_open = interactive;
+                let mut control_line = String::new();
+                loop {
+                    tokio::select! {
+                        result = &mut turn => {
+                            match result {
+                                Ok(Some(response)) => {
+                                    let message = response.data.get("content").and_then(Value::as_str).unwrap_or_default();
+                                    print_shell_event("result", &safe_text(message), context.json_output);
+                                }
+                                Ok(None) => return Err(selection_error(
+                                    "empty_agent_response",
+                                    "Copilot completed the turn without an assistant message.",
+                                )),
+                                Err(error) => return Err(sdk_error(error)),
+                            }
+                            break;
+                        }
+                        result = input.read_line(&mut control_line), if control_input_open => {
+                            match result {
+                                Ok(0) => control_input_open = false,
+                                Ok(_) => {
+                                    let command = control_line.trim();
+                                    if matches!(parse_shell_command(command), Ok(ShellCommand::Cancel)) {
+                                        context.cancel();
+                                        let _ = session.abort().await;
+                                        print_shell_event("cancelled", "The active request was cancelled.", context.json_output);
+                                        break;
+                                    }
+                                    if !command.is_empty() {
+                                        print_shell_event("warning", "Only /cancel or Ctrl-C is accepted while an operation is running.", context.json_output);
+                                    }
+                                    control_line.clear();
+                                }
+                                Err(error) => return Err(state_error(error.to_string())),
+                            }
+                        }
+                        _ = tokio::signal::ctrl_c() => {
+                            context.cancel();
+                            let _ = session.abort().await;
+                            print_shell_event("cancelled", "The active request was cancelled.", context.json_output);
+                            break;
+                        }
+                        event = events.recv(), if events_open => {
+                            match event {
+                                Ok(event) => render_event(&event.event_type, &event.data, context.json_output),
+                                Err(error) if error.to_string().contains("lagged") => {
+                                    print_shell_event("warning", "Progress events were skipped; the request is still running.", context.json_output);
+                                }
+                                Err(_) => events_open = false,
+                            }
+                        }
                     }
                 }
             }
         }
     }
     Ok(())
+}
+
+fn print_shell_event(kind: &str, message: &str, json_output: bool) {
+    if json_output {
+        println!(
+            "{}",
+            json!({"schemaVersion":1,"command":"agent.event","type":kind,"message":message})
+        );
+    } else if kind == "error" || kind == "warning" || kind == "activity" || kind == "plan" {
+        eprintln!("{kind}: {message}");
+    } else {
+        println!("{kind}: {message}");
+    }
+}
+
+fn print_help(json_output: bool) {
+    let commands = [
+        "/quit",
+        "/skill list|search|...",
+        "/evaluation run|list|show ...",
+        "/consistency check|list|show ...",
+        "/security check|list|show ...",
+        "/audit",
+        "/stats",
+        "/profile status",
+        "/bundle validate ...",
+        "/command-skill list|install|update|remove ...",
+        "/model [list|MODEL|profile MODEL]",
+        "/status",
+        "/help",
+    ];
+    if json_output {
+        println!(
+            "{}",
+            json!({"schemaVersion":1,"command":"agent.help","result":{"commands":commands}})
+        );
+    } else {
+        println!("TASC commands: {}", commands.join("; "));
+        println!("Natural-language requests use the same registered TASC tools.");
+    }
 }
 
 fn tools(dispatcher: Arc<Dispatcher>) -> Vec<Tool> {
@@ -734,6 +1180,11 @@ fn tools(dispatcher: Arc<Dispatcher>) -> Vec<Tool> {
             "tasc_resolve_reference",
             "Resolve a list position or group against the latest TASC results.",
             json!({"type":"object","properties":{"reference":{"type":"string"}},"required":["reference"],"additionalProperties":false}),
+        ),
+        (
+            "tasc_track_skills",
+            "Track explicitly selected or all discovered skills in the selected Profile.",
+            json!({"type":"object","properties":{"selectors":{"type":"array","items":{"type":"string"}},"all":{"type":"boolean"}},"required":["selectors","all"],"additionalProperties":false}),
         ),
         (
             "tasc_run_evaluation",
@@ -836,6 +1287,7 @@ fn tool_command(name: &str) -> &'static str {
         "tasc_list_skills" => "skill list",
         "tasc_search_skills" => "skill search",
         "tasc_resolve_reference" => "agent.resolve_reference",
+        "tasc_track_skills" => "skill track",
         "tasc_run_evaluation" => "eval run",
         "tasc_check_consistency" => "consistency check",
         "tasc_check_security" => "security check",
@@ -858,12 +1310,12 @@ fn looks_like_reference(selector: &str) -> bool {
         || normalized.parse::<usize>().is_ok()
 }
 
-fn render_event(name: &str, data: &Value) {
+fn render_event(name: &str, data: &Value, json_output: bool) {
     match translate_sdk_event(name, data) {
-        Some(AgentEvent::ToolStarted(tool)) => eprintln!("tasc agent: running {tool}"),
-        Some(AgentEvent::ToolCompleted(tool)) => eprintln!("tasc agent: completed {tool}"),
+        Some(AgentEvent::ToolStarted(tool)) => print_shell_event("activity", &tool, json_output),
+        Some(AgentEvent::ToolCompleted(tool)) => print_shell_event("progress", &tool, json_output),
         Some(AgentEvent::Warning(message)) => {
-            eprintln!("tasc agent: {}", safe_text(&message))
+            print_shell_event("warning", &safe_text(&message), json_output)
         }
         Some(AgentEvent::MessageDelta(_) | AgentEvent::TurnFinished) | None => {}
     }
@@ -993,19 +1445,92 @@ fn safe_text(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{lifecycle_summary, session_config};
+    use super::{
+        dashboard_output, dashboard_status, lifecycle_summary, model_preferences_path,
+        parse_shell_command, read_profile_model, save_profile_model, session_config, ShellCommand,
+    };
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
     use tasc_agent::lifecycle::LifecycleResult;
     use tasc_core::{Installation, InstallationStatus};
 
+    fn test_path() -> PathBuf {
+        let time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "tasc-agent-test-{}-{time}/state.json",
+            std::process::id()
+        ))
+    }
+
     #[test]
     fn session_disables_transcript_persistence_and_telemetry() {
-        let config = session_config(Vec::new());
+        let config = session_config(Vec::new(), "auto");
         assert_eq!(config.enable_session_store, Some(false));
         assert_eq!(config.enable_session_telemetry, Some(false));
         assert!(config.session_id.is_none());
         assert!(config.name.is_none());
+        assert_eq!(config.model.as_deref(), Some("auto"));
         assert_eq!(config.enable_skills, Some(false));
         assert!(config.available_tools.as_ref().is_some_and(Vec::is_empty));
+    }
+
+    #[test]
+    fn parses_canonical_commands_and_legacy_approval_aliases() {
+        assert_eq!(parse_shell_command("/quit").unwrap(), ShellCommand::Quit);
+        assert_eq!(
+            parse_shell_command("/model claude-sonnet").unwrap(),
+            ShellCommand::ModelSession("claude-sonnet".to_string())
+        );
+        assert_eq!(
+            parse_shell_command("/model profile claude-sonnet").unwrap(),
+            ShellCommand::ModelProfile("claude-sonnet".to_string())
+        );
+        assert_eq!(
+            parse_shell_command("/evaluation run skill:example")
+                .unwrap(),
+            ShellCommand::Request(
+                "Run the TASC evaluation run skill:example operation using its registered TASC tools only."
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            parse_shell_command(":approve tasc-approve-token").unwrap(),
+            ShellCommand::Approve("tasc-approve-token".to_string())
+        );
+        assert!(parse_shell_command("/unknown").is_err());
+    }
+
+    #[test]
+    fn profile_model_preference_is_separate_from_session_default() {
+        let state_path = test_path();
+        assert_eq!(read_profile_model(&state_path).unwrap(), None);
+        save_profile_model(&state_path, "claude-sonnet").unwrap();
+        assert_eq!(
+            read_profile_model(&state_path).unwrap().as_deref(),
+            Some("claude-sonnet")
+        );
+        let contents = fs::read_to_string(model_preferences_path(&state_path)).unwrap();
+        assert!(contents.contains("\"schemaVersion\":1"));
+        fs::remove_dir_all(state_path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn dashboard_status_preserves_unavailable_token_usage_and_is_semantic_json() {
+        let status = dashboard_status(&test_path(), "auto", None);
+        assert_eq!(status["model"], "auto");
+        assert!(status["tokenUsage"].is_null());
+        assert!(status["skillCount"].is_number());
+        let rendered = dashboard_output(&status, false, true);
+        assert!(!rendered.contains("\u{1b}["));
+        assert!(rendered.contains("\"command\":\"agent.dashboard\""));
+        assert!(!dashboard_output(&status, false, false).contains("\u{1b}["));
+        assert!(dashboard_output(&status, true, false).contains("\u{1b}["));
     }
 
     #[test]

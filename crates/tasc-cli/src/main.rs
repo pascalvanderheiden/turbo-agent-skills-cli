@@ -809,7 +809,7 @@ async fn run(
         ));
     }
     let value = match cli.command {
-        Commands::Agent => return agent::run(cli.offline).await,
+        Commands::Agent => return agent::run(cli.offline, cli.format == OutputFormat::Json).await,
         Commands::Source {
             command: SourceCommands::List(_),
         } => serde_json::json!({ "sources": discovery.sources()? }),

@@ -17,6 +17,10 @@ pub enum AgentToolRequest {
     ResolveReference {
         reference: String,
     },
+    TrackSkills {
+        selectors: Vec<String>,
+        all: bool,
+    },
     RunEvaluation {
         selector: String,
     },
@@ -225,6 +229,13 @@ pub fn translate_tool_call(
         }),
         "tasc_resolve_reference" => Ok(AgentToolRequest::ResolveReference {
             reference: string_argument(&arguments, "reference").ok_or_else(invalid)?,
+        }),
+        "tasc_track_skills" => Ok(AgentToolRequest::TrackSkills {
+            selectors: string_list(&arguments, "selectors").ok_or_else(invalid)?,
+            all: arguments
+                .get("all")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
         }),
         "tasc_run_evaluation" => Ok(AgentToolRequest::RunEvaluation {
             selector: string_argument(&arguments, "selector").ok_or_else(invalid)?,
