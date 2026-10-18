@@ -69,6 +69,14 @@ class InstallerTests(unittest.TestCase):
 
             bin_directory = root / "bin"
             bin_directory.mkdir()
+            uname = bin_directory / "uname"
+            uname.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = "-s" ]; then printf "Linux\\n"; '
+                'else printf "x86_64\\n"; fi\n',
+                encoding="utf-8",
+            )
+            uname.chmod(0o755)
             curl = bin_directory / "curl"
             curl.write_text(
                 "#!/bin/sh\n"
