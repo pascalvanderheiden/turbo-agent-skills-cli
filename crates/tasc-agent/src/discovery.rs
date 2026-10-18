@@ -4,11 +4,10 @@ use crate::{
 };
 use tasc_core::{
     discovery::{
-        Capabilities, DiscoverResult, Diagnostic, DiscoveredSkill, Preview, RankedSkill,
+        Capabilities, Diagnostic, DiscoverResult, DiscoveredSkill, Preview, RankedSkill,
         RemoteExpansionStatus, RerankingStatus, SearchHit, SkillSource,
     },
-    ProvenanceConfidence, ProvenanceEvidence, ProvenanceKind, SkillIdentity,
-    LOCAL_STATE_VERSION,
+    ProvenanceConfidence, ProvenanceEvidence, ProvenanceKind, SkillIdentity, LOCAL_STATE_VERSION,
 };
 
 pub struct DiscoveryService<G, R> {
@@ -44,7 +43,12 @@ impl<G: GhSkillGateway, R: StateRepository> DiscoveryService<G, R> {
     pub fn discoverable_sources(&self) -> Result<Vec<SkillSource>, Diagnostic> {
         let state = self.state()?;
         let mut sources = state.sources;
-        sources.extend(state.watchlists.into_iter().map(|watchlist| watchlist.source));
+        sources.extend(
+            state
+                .watchlists
+                .into_iter()
+                .map(|watchlist| watchlist.source),
+        );
         sources.sort_by(|a, b| a.id.cmp(&b.id));
         sources.dedup_by(|a, b| a.id == b.id);
         Ok(sources)
@@ -303,7 +307,8 @@ fn validate_path(path: &str) -> Result<(), Diagnostic> {
 }
 
 fn rank_search(query: &str, hits: Vec<SearchHit>) -> Result<Vec<RankedSkill>, Diagnostic> {
-    let query = query.trim().to_lowercase();
+    let exact_query = query.trim();
+    let query = exact_query.to_lowercase();
     let query_terms = query
         .split_whitespace()
         .map(str::to_lowercase)
@@ -326,8 +331,8 @@ fn rank_search(query: &str, hits: Vec<SearchHit>) -> Result<Vec<RankedSkill>, Di
         };
         let direct_match = hit.skill_name.eq_ignore_ascii_case(&query)
             || full_name.eq_ignore_ascii_case(&query)
-            || hit.path.eq_ignore_ascii_case(&query)
-            || format!("skill:{}/{}", source.locator, hit.path).eq_ignore_ascii_case(&query);
+            || hit.path == exact_query
+            || format!("skill:{}/{}", source.locator, hit.path) == exact_query;
         let searchable_terms = terms(&format!("{} {}", hit.description, hit.repo));
         let keyword_match = !query_terms.is_empty()
             && query_terms
@@ -340,8 +345,8 @@ fn rank_search(query: &str, hits: Vec<SearchHit>) -> Result<Vec<RankedSkill>, Di
             || full_name.eq_ignore_ascii_case(&query)
         {
             "exact name match"
-        } else if hit.path.eq_ignore_ascii_case(&query)
-            || format!("skill:{}/{}", source.locator, hit.path).eq_ignore_ascii_case(&query)
+        } else if hit.path == exact_query
+            || format!("skill:{}/{}", source.locator, hit.path) == exact_query
         {
             "exact path match"
         } else {
@@ -372,6 +377,7 @@ fn rank_search(query: &str, hits: Vec<SearchHit>) -> Result<Vec<RankedSkill>, Di
 #[derive(Clone)]
 struct DiscoverCandidate {
     item: DiscoveredSkill,
+    score: usize,
     source_priority: u8,
     provenance_priority: u8,
 }
@@ -397,6 +403,7 @@ fn local_candidate(skill: LocalSkill) -> Result<DiscoverCandidate, Diagnostic> {
             provenance: provenance.clone(),
             match_reasons: Vec::new(),
         },
+        score: 0,
         source_priority: 0,
         provenance_priority: provenance_priority(provenance.confidence),
     })
@@ -444,6 +451,7 @@ fn remote_candidates(hits: Vec<SearchHit>) -> Result<Vec<DiscoverCandidate>, Dia
                 provenance: provenance.clone(),
                 match_reasons: Vec::new(),
             },
+            score: 0,
             source_priority: 1,
             provenance_priority: provenance_priority(provenance.confidence),
         });
@@ -453,15 +461,14 @@ fn remote_candidates(hits: Vec<SearchHit>) -> Result<Vec<DiscoverCandidate>, Dia
 
 fn rank_discover(query: &str, mut candidates: Vec<DiscoverCandidate>) -> Vec<DiscoveredSkill> {
     let normalized_query = query.to_lowercase();
-    let (category_query, capability_query, query) = if let Some(value) =
-        normalized_query.strip_prefix("category:")
-    {
-        (Some(value.trim().to_string()), None, String::new())
-    } else if let Some(value) = normalized_query.strip_prefix("capability:") {
-        (None, Some(value.trim().to_string()), String::new())
-    } else {
-        (None, None, normalized_query)
-    };
+    let (category_query, capability_query, query) =
+        if let Some(value) = normalized_query.strip_prefix("category:") {
+            (Some(value.trim().to_string()), None, String::new())
+        } else if let Some(value) = normalized_query.strip_prefix("capability:") {
+            (None, Some(value.trim().to_string()), String::new())
+        } else {
+            (None, None, normalized_query)
+        };
     let query_terms = terms(&query);
     candidates.retain_mut(|candidate| {
         let name = candidate.item.identity.name.to_lowercase();
@@ -544,14 +551,18 @@ fn rank_discover(query: &str, mut candidates: Vec<DiscoverCandidate>) -> Vec<Dis
                 reasons.push(format!("metadata keyword matches: {matched_terms}"));
             }
             let category_matches = categories.iter().filter(|category| {
-                query_terms.iter().any(|term| terms(category).contains(term))
+                query_terms
+                    .iter()
+                    .any(|term| terms(category).contains(term))
             });
             for category in category_matches {
                 score += 15;
                 reasons.push(format!("category evidence: {category}"));
             }
             let capability_matches = capabilities.iter().filter(|capability| {
-                query_terms.iter().any(|term| terms(capability).contains(term))
+                query_terms
+                    .iter()
+                    .any(|term| terms(capability).contains(term))
             });
             for capability in capability_matches {
                 score += 15;
@@ -567,11 +578,13 @@ fn rank_discover(query: &str, mut candidates: Vec<DiscoverCandidate>) -> Vec<Dis
             candidate.item.provenance.confidence
         ));
         candidate.item.match_reasons = reasons;
+        candidate.score = score;
         true
     });
     candidates.sort_by(|left, right| {
-        discover_score(&right.item.match_reasons)
-            .cmp(&discover_score(&left.item.match_reasons))
+        right
+            .score
+            .cmp(&left.score)
             .then_with(|| right.provenance_priority.cmp(&left.provenance_priority))
             .then_with(|| left.source_priority.cmp(&right.source_priority))
             .then_with(|| left.item.id.cmp(&right.item.id))
@@ -581,49 +594,11 @@ fn rank_discover(query: &str, mut candidates: Vec<DiscoverCandidate>) -> Vec<Dis
     let mut seen = std::collections::BTreeSet::new();
     candidates
         .into_iter()
-        .filter_map(|candidate| seen.insert(candidate.item.id.clone()).then_some(candidate.item))
+        .filter_map(|candidate| {
+            seen.insert(candidate.item.id.clone())
+                .then_some(candidate.item)
+        })
         .collect()
-}
-
-fn discover_score(reasons: &[String]) -> usize {
-    let mut score = 0usize;
-    if reasons.iter().any(|reason| reason == "exact name match") {
-        score += 100;
-    } else if reasons.iter().any(|reason| reason == "name contains intent") {
-        score += 75;
-    } else if let Some(reason) = reasons
-        .iter()
-        .find(|reason| reason.starts_with("name keyword matches: "))
-    {
-        score += reason
-            .rsplit_once(' ')
-            .and_then(|(_, count)| count.parse::<usize>().ok())
-            .unwrap_or_default()
-            * 5
-            + 50;
-    }
-    if reasons
-        .iter()
-        .any(|reason| reason == "description contains intent")
-    {
-        score += 35;
-    }
-    for reason in reasons {
-        if let Some((_, count)) = reason.rsplit_once(' ') {
-            if reason.starts_with("metadata keyword matches: ") {
-                score += count.parse::<usize>().unwrap_or_default() * 8;
-            }
-            if reason.starts_with("category match: ") || reason.starts_with("capability match: ") {
-                score += 80;
-            }
-            if reason.starts_with("category evidence: ")
-                || reason.starts_with("capability evidence: ")
-            {
-                score += 15;
-            }
-        }
-    }
-    score
 }
 
 pub fn apply_model_ranking(
@@ -639,7 +614,9 @@ pub fn apply_model_ranking(
         .iter()
         .map(String::as_str)
         .collect::<std::collections::BTreeSet<_>>();
-    if ordered_ids.len() != result.items.len() || proposed.len() != ordered_ids.len() || known != proposed
+    if ordered_ids.len() != result.items.len()
+        || proposed.len() != ordered_ids.len()
+        || known != proposed
     {
         return Err(usage(
             "invalid_rerank_output",
@@ -690,8 +667,8 @@ fn metadata_values(contents: &str, key: &str) -> Vec<String> {
         }
         if let Some((name, value)) = trimmed.split_once(':') {
             let nested = indent > 0;
-            let is_key = name.trim() == key
-                && ((!nested && !in_metadata) || (nested && in_metadata));
+            let is_key =
+                name.trim() == key && ((!nested && !in_metadata) || (nested && in_metadata));
             if is_key {
                 let value = value.trim();
                 if !value.is_empty() {
@@ -732,7 +709,8 @@ fn provenance(source: &str) -> ProvenanceEvidence {
             kind: ProvenanceKind::GithubRepository,
             confidence: ProvenanceConfidence::Probable,
             raw_evidence: Some(source.to_string()),
-            explanation: "The skill metadata declares a GitHub repository as its source.".to_string(),
+            explanation: "The skill metadata declares a GitHub repository as its source."
+                .to_string(),
         }
     } else if source.starts_with("file:") {
         ProvenanceEvidence {
@@ -860,6 +838,26 @@ mod tests {
         }
     }
 
+    struct UnavailableGateway;
+
+    impl GhSkillGateway for UnavailableGateway {
+        async fn capabilities(&self, _: &Cancellation) -> Result<Capabilities, Diagnostic> {
+            unreachable!()
+        }
+        async fn search(&self, _: &str, _: &Cancellation) -> Result<Vec<SearchHit>, Diagnostic> {
+            Err(Diagnostic::new(
+                "gh_authentication",
+                "dependency",
+                "gh",
+                "GitHub authentication is unavailable.",
+                "Authenticate with GitHub CLI and retry.",
+            ))
+        }
+        async fn preview(&self, _: &str, _: &str, _: &Cancellation) -> Result<String, Diagnostic> {
+            unreachable!()
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn namespaced_selectors_search_by_name_then_match_exactly() {
         let service = DiscoveryService::new(NamespacedGateway, Repository::default());
@@ -966,7 +964,9 @@ mod tests {
         assert_eq!(expected[1].skill.repo, "beta/skills");
         assert_eq!(expected[0].reason, "exact name match");
         assert_eq!(expected[2].reason, "exact keyword match");
-        assert!(!expected.iter().any(|item| item.skill.skill_name == "review-helper"));
+        assert!(!expected
+            .iter()
+            .any(|item| item.skill.skill_name == "review-helper"));
         let service =
             DiscoveryService::new(Gateway(original, RefCell::default()), Repository::default());
         let cancel = Cancellation::default();
@@ -1041,6 +1041,7 @@ mod tests {
                 provenance: provenance.clone(),
                 match_reasons: Vec::new(),
             },
+            score: 0,
             source_priority,
             provenance_priority: provenance_priority(provenance.confidence),
         }
@@ -1113,6 +1114,35 @@ mod tests {
             .match_reasons
             .iter()
             .any(|reason| reason == "category match: security"));
+
+        let capability = rank_discover(
+            "capability:review code",
+            vec![discover_candidate(
+                "skill:review",
+                "review",
+                "Reviews code",
+                &[],
+                &["review code"],
+                1,
+            )],
+        );
+        assert_eq!(capability.len(), 1);
+        assert!(capability[0]
+            .match_reasons
+            .iter()
+            .any(|reason| reason == "capability match: review code"));
+
+        let tied = rank_discover(
+            "review",
+            vec![
+                discover_candidate("skill:z", "review", "Review code", &[], &[], 1),
+                discover_candidate("skill:a", "review", "Review code", &[], &[], 1),
+            ],
+        );
+        assert_eq!(
+            tied.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+            vec!["skill:a", "skill:z"]
+        );
     }
 
     #[test]
@@ -1143,17 +1173,15 @@ mod tests {
             .iter()
             .map(|item| (item.id.clone(), item.rank))
             .collect::<std::collections::BTreeMap<_, _>>();
-        apply_model_ranking(
-            &mut result,
-            &["skill:b".to_string(), "skill:a".to_string()],
-        )
-        .unwrap();
+        apply_model_ranking(&mut result, &["skill:b".to_string(), "skill:a".to_string()]).unwrap();
         assert_eq!(result.reranking, RerankingStatus::Applied);
         assert_eq!(result.items[0].id, "skill:b");
         assert_eq!(result.items[0].model_rank, Some(1));
         assert_eq!(result.items[0].rank, baseline["skill:b"]);
         assert_eq!(
-            apply_model_ranking(&mut result, &["skill:a".to_string()]).unwrap_err().code,
+            apply_model_ranking(&mut result, &["skill:a".to_string()])
+                .unwrap_err()
+                .code,
             "invalid_rerank_output"
         );
     }
@@ -1193,17 +1221,18 @@ mod tests {
             content_digest: "digest".into(),
         };
         let repository = Repository::default();
-        repository.0.borrow_mut().watchlists.push(tasc_core::Watchlist {
-            id: "watchlist:alpha".into(),
-            source: normalize_source("alpha/skills").unwrap(),
-            path: None,
-            last_observed_revision: None,
-            last_check_id: None,
-        });
-        let service = DiscoveryService::new(
-            Gateway(Vec::new(), RefCell::default()),
-            repository,
-        );
+        repository
+            .0
+            .borrow_mut()
+            .watchlists
+            .push(tasc_core::Watchlist {
+                id: "watchlist:alpha".into(),
+                source: normalize_source("alpha/skills").unwrap(),
+                path: None,
+                last_observed_revision: None,
+                last_check_id: None,
+            });
+        let service = DiscoveryService::new(Gateway(Vec::new(), RefCell::default()), repository);
         let result = service
             .discover("review code", vec![local], false, &Cancellation::default())
             .await
@@ -1211,15 +1240,26 @@ mod tests {
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].categories, vec!["engineering"]);
         assert_eq!(result.items[0].capabilities, vec!["review code"]);
-        assert_eq!(result.items[0].provenance.kind, ProvenanceKind::LocalWorkspace);
+        assert_eq!(
+            result.items[0].provenance.kind,
+            ProvenanceKind::LocalWorkspace
+        );
         assert_eq!(result.items[0].id, "skill:file:///skills/review");
         assert_eq!(result.eligible_sources.len(), 1);
         assert_eq!(result.remote_expansion, RemoteExpansionStatus::Unavailable);
-        assert_eq!(
-            result.diagnostics[0].code,
-            "remote_expansion_unavailable"
-        );
+        assert_eq!(result.diagnostics[0].code, "remote_expansion_unavailable");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unavailable_remote_discovery_preserves_diagnostic_in_result() {
+        let service = DiscoveryService::new(UnavailableGateway, Repository::default());
+        let result = service
+            .discover("review", Vec::new(), true, &Cancellation::default())
+            .await
+            .unwrap();
+        assert_eq!(result.remote_expansion, RemoteExpansionStatus::Unavailable);
+        assert_eq!(result.diagnostics[0].code, "gh_authentication");
     }
 
     #[tokio::test(flavor = "current_thread")]

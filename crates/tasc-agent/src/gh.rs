@@ -25,7 +25,7 @@ impl Cancellation {
         self.0.store(true, Ordering::Relaxed);
     }
 
-    async fn cancelled(&self) {
+    pub async fn cancelled(&self) {
         while !self.0.load(Ordering::Relaxed) {
             time::sleep(Duration::from_millis(10)).await;
         }

@@ -100,7 +100,8 @@ tasc source capabilities --json
 # Probe installed gh version and search/preview support
 
 tasc skill search review --format json
-# Also available as `tasc search review` or `tasc discover review`
+tasc discover "review code changes" --format json
+# Strict lookup and intent-oriented discovery have separate result contracts
 
 tasc skill preview 'skill:https://github.com/owner/repo/skills/review/SKILL.md'
 tasc skill preview skills/review/SKILL.md --source owner/repo --json
@@ -168,10 +169,10 @@ Discovery is explicitly bound to `github.com`, irrespective of inherited
 `GH_HOST` or GitHub CLI's configured default host.
 
 Source commands manage TASC metadata, not a second GitHub catalog. `source show`
-inspects that metadata; search discovers available skills and preview inspects
-their contents. Adding a source does not scope subsequent global searches.
-Source add requires `--yes` to write; `--dry-run` returns the normalized record
-without writing.
+inspects that metadata; Search discovers exact GitHub matches and preview
+inspects their contents. Adding a source does not scope subsequent global
+Searches. Source add requires `--yes` to write; `--dry-run` returns the
+normalized record without writing.
 
 Discovery results use a versioned envelope with `schemaVersion`, `command`,
 `result`, and `warnings`. Both `--json` and `--format json` select JSON. Preview
@@ -180,14 +181,32 @@ metadata. Human output escapes terminal control sequences. Diagnostics go to
 stderr (structured with JSON output), with stable code, category, origin,
 message, remediation, and candidate IDs for ambiguous selections.
 
-Search fetches up to 100 results from the first delegated page. Ranking is
-deterministic within those results: exact name, name substring, description
-substring, then other delegated matches; ties use descending repository stars
-and ascending Skill Identity. Each result includes a rank and explanation.
-Duplicate identities are collapsed. Name-based preview requires one exact
-match; ambiguity returns candidate IDs without selecting or previewing any.
-Use a returned Skill Identity or an exact `SKILL.md` path with `--source` for
-automation. Search and preview do not write Local State or installation files.
+`search` is strict lookup, not intent inference. It fetches up to 100 results
+from the first delegated GitHub page and retains exact names, paths, identities,
+or complete keyword matches in returned metadata. Results and duplicate
+identity selection use ascending Skill Identity, independently of GitHub's
+result order or star counts. Name-based preview requires one exact match;
+ambiguity returns candidate IDs without selecting or previewing any. Use a
+returned Skill Identity or an exact `SKILL.md` path with `--source` for
+automation.
+
+`discover` ranks local tracked and untracked skills together with remote GitHub
+matches. It uses name and description intent, declared `metadata.categories`
+and `metadata.capabilities`, and source provenance evidence; results include
+stable Skill Identity references and the match reasons and provenance
+confidence behind the ranking. Recorded Profile sources and Watchlist sources
+are exposed as eligible sources. With `--offline`, local results are still
+returned and `remoteExpansion` is `unavailable` with a diagnostic instead of
+silently presenting a local-only result as complete. A failed remote expansion
+also preserves local results and reports its diagnostic.
+
+Pass `--rerank` to explicitly ask the Copilot CLI to rerank the same candidates.
+This sends candidate names, descriptions, Categories, capabilities, and
+provenance metadata to the model, but not skill contents or local paths.
+Deterministic ranks remain in `rank`; model ordering is annotated in
+`modelRank` and `reranking`. Invalid or unavailable model output leaves the
+deterministic order intact and is reported in `diagnostics`. Search and
+Discover do not write Local State or installation files.
 
 ### Installation lifecycle
 
