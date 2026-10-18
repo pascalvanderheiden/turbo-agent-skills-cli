@@ -1,22 +1,31 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use tasc_agent::{
     authoring::{FsSkillDraftRepository, SkillAuthoringService, SkillDraftInput},
-    consistency::{ConsistencyService, FsConsistencyArtifactRepository},
+    consistency::{
+        ConsistencyArtifactRepository, ConsistencyService, FsConsistencyArtifactRepository,
+    },
     discovery::{apply_model_ranking, DiscoveryService},
-    evaluation::{EvaluationService, FsRunArtifactRepository},
+    evaluation::{EvaluationService, FsRunArtifactRepository, RunArtifactRepository},
     gh::{Cancellation, GhSkill},
     insights::{FsInsightArtifactRepository, FsInsightLifecycleRepository, InsightService},
     lifecycle::{LifecycleResult, LifecycleService},
-    security::{FsSecurityArtifactRepository, FsSecuritySuppressionRepository, SecurityService},
+    security::{
+        FsSecurityArtifactRepository, FsSecuritySuppressionRepository, SecurityArtifactRepository,
+        SecurityService,
+    },
     service::{FsStateRepository, SkillAdapter},
     AgentService, CopilotAdapter, FsWatchCheckRepository, WatchService,
 };
 use tasc_core::{
+    consistency::ConsistencyStatus,
     discovery::{Diagnostic, Envelope, RerankingStatus},
+    evaluation::EvaluationOutcome,
     insights::InsightStatus,
-    security::SecuritySeverity,
-    Inventory, InventoryQuery, SkillIdentity, StateStatus,
+    security::{SecurityCheckStatus, SecuritySeverity},
+    InstallationStatus, Inventory, InventoryQuery, LocalState, ProvenanceConfidence, SkillIdentity,
+    StateStatus, TascProfile,
 };
 
 mod agent;
@@ -62,6 +71,12 @@ enum Commands {
         #[command(subcommand)]
         command: StateCommands,
     },
+    /// Audit the selected Profile without changing state or evidence.
+    #[command(visible_alias = "doctor")]
+    Audit(JsonOutput),
+    /// Summarize comparable inventory and evidence for the selected Profile.
+    #[command(visible_alias = "statistics")]
+    Stats(JsonOutput),
     /// Manage watched GitHub sources and skill-relative paths.
     Watch {
         #[command(subcommand)]
@@ -564,6 +579,7 @@ async fn main() {
                 | InsightCommands::Propose { output, .. } => output.json,
                 InsightCommands::List { output, .. } => output.json,
             },
+            Commands::Audit(output) | Commands::Stats(output) => output.json,
             _ => false,
         };
     let command = match &cli.command {
@@ -645,6 +661,8 @@ async fn main() {
         Commands::Insight {
             command: InsightCommands::Propose { .. },
         } => "insight propose",
+        Commands::Audit(_) => "audit",
+        Commands::Stats(_) => "stats",
         Commands::Agent => "agent",
         Commands::Search(_)
         | Commands::Skill {
@@ -810,6 +828,15 @@ async fn run(
                 .await?
         ),
         Commands::Watch { command } => run_watch(command, state_path, cancel).await?,
+        command @ (Commands::Audit(_) | Commands::Stats(_)) => {
+            return run_local(
+                command,
+                state_path,
+                cli.format == OutputFormat::Json,
+                cancel,
+            )
+            .await;
+        }
         Commands::Eval { command } => {
             return run_local(
                 Commands::Eval { command },
@@ -913,6 +940,971 @@ fn unix_ms() -> u128 {
         .as_millis()
 }
 
+#[derive(serde::Serialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum AuditSeverity {
+    Error,
+    Warning,
+    Optimization,
+}
+
+#[derive(serde::Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum EvidenceFreshness {
+    Current,
+    Stale,
+    Unavailable,
+    Unknown,
+}
+
+#[derive(serde::Serialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum OutcomeStatus {
+    Passed,
+    Failed,
+    Inconclusive,
+    NotRun,
+    Unavailable,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuditFinding {
+    code: String,
+    severity: AuditSeverity,
+    subject: String,
+    message: String,
+}
+
+#[derive(serde::Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AuditSummary {
+    errors: usize,
+    warnings: usize,
+    optimizations: usize,
+    inventory_count: usize,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionDiagnostic {
+    code: String,
+    component: String,
+    status: String,
+    message: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuditReport {
+    command: &'static str,
+    schema_version: u32,
+    generated_at_unix_ms: u128,
+    profile: TascProfile,
+    summary: AuditSummary,
+    findings: Vec<AuditFinding>,
+    diagnostics: Vec<ProjectionDiagnostic>,
+    exit_code: i32,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EvidenceOutcome {
+    source: String,
+    id: String,
+    outcome: OutcomeStatus,
+    freshness: EvidenceFreshness,
+    execution_outcome: Option<EvaluationOutcome>,
+}
+
+#[derive(serde::Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct StatsSummary {
+    identities: usize,
+    targets: usize,
+    installations: usize,
+    inventory_items: usize,
+    watched_interests: usize,
+    audit_findings: AuditSummary,
+    scope: BTreeMap<String, usize>,
+    tracking: BTreeMap<String, usize>,
+    watchlist: BTreeMap<String, usize>,
+    provenance: BTreeMap<String, usize>,
+    provenance_confidence: BTreeMap<String, usize>,
+    lifecycle: BTreeMap<String, usize>,
+    repositories: BTreeMap<String, usize>,
+    comparable_outcomes: BTreeMap<String, usize>,
+    evidence_freshness: BTreeMap<String, usize>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StatsReport {
+    command: &'static str,
+    schema_version: u32,
+    generated_at_unix_ms: u128,
+    profile: TascProfile,
+    summary: StatsSummary,
+    outcomes: Vec<EvidenceOutcome>,
+    diagnostics: Vec<ProjectionDiagnostic>,
+    exit_code: i32,
+}
+
+fn projection_inputs(
+    repository: &FsStateRepository,
+    service: &AgentService<CopilotAdapter, FsStateRepository>,
+) -> (
+    Option<LocalState>,
+    Option<Inventory>,
+    Vec<ProjectionDiagnostic>,
+) {
+    let mut diagnostics = Vec::new();
+    let state = match repository.load_read_only() {
+        Ok(state) => Some(state),
+        Err(error) => {
+            diagnostics.push(ProjectionDiagnostic {
+                code: "local_state_unreadable".to_string(),
+                component: "local_state".to_string(),
+                status: "unavailable".to_string(),
+                message: error,
+            });
+            None
+        }
+    };
+    let inventory = state
+        .as_ref()
+        .and_then(|state| match service.inventory_from_state(state) {
+            Ok(inventory) => Some(inventory),
+            Err(error) => {
+                diagnostics.push(ProjectionDiagnostic {
+                    code: "inventory_unavailable".to_string(),
+                    component: "inventory".to_string(),
+                    status: "unavailable".to_string(),
+                    message: error,
+                });
+                None
+            }
+        });
+    (state, inventory, diagnostics)
+}
+
+fn audit_report(
+    state_path: &std::path::Path,
+    profile: TascProfile,
+    repository: &FsStateRepository,
+    service: &AgentService<CopilotAdapter, FsStateRepository>,
+) -> AuditReport {
+    let (state, inventory, mut diagnostics) = projection_inputs(repository, service);
+    let evaluations = FsRunArtifactRepository::new(state_path.with_extension("evaluations")).list();
+    let consistencies =
+        FsConsistencyArtifactRepository::new(state_path.with_extension("consistency-checks"))
+            .list();
+    let security =
+        FsSecurityArtifactRepository::new(state_path.with_extension("security-checks")).list();
+    let mut findings = Vec::new();
+    if state.is_none() {
+        findings.push(AuditFinding {
+            code: "local_state_unreadable".to_string(),
+            severity: AuditSeverity::Error,
+            subject: profile.id.clone(),
+            message: "Local State could not be read as a supported profile.".to_string(),
+        });
+    }
+    if let Some(state) = state.as_ref() {
+        append_state_findings(state, &mut findings);
+    }
+    if let Some(inventory) = inventory.as_ref() {
+        append_inventory_findings(inventory, &mut findings);
+    }
+    if let Err(error) = &evaluations {
+        push_artifact_diagnostic(&mut diagnostics, "evaluations", error);
+    }
+    if let Err(error) = &consistencies {
+        push_artifact_diagnostic(&mut diagnostics, "consistency_checks", error);
+    }
+    if let Err(error) = &security {
+        push_artifact_diagnostic(&mut diagnostics, "security_checks", error);
+    }
+    let evaluations = evaluations.unwrap_or_default();
+    let consistencies = consistencies.unwrap_or_default();
+    let security = security.unwrap_or_default();
+    append_evidence_findings(
+        &evaluations,
+        &consistencies,
+        &security,
+        inventory.as_ref(),
+        &mut findings,
+    );
+    sort_findings(&mut findings);
+    let mut summary = summarize_findings(&findings);
+    summary.inventory_count = inventory.as_ref().map_or(0, |inventory| inventory.total);
+    let exit_code = if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.status == "unavailable")
+    {
+        4
+    } else if summary.errors > 0 {
+        1
+    } else {
+        0
+    };
+    AuditReport {
+        command: "audit",
+        schema_version: 1,
+        generated_at_unix_ms: unix_ms(),
+        profile,
+        summary,
+        findings,
+        diagnostics,
+        exit_code,
+    }
+}
+
+fn stats_report(
+    state_path: &std::path::Path,
+    profile: TascProfile,
+    repository: &FsStateRepository,
+    service: &AgentService<CopilotAdapter, FsStateRepository>,
+) -> StatsReport {
+    let (state, inventory, mut diagnostics) = projection_inputs(repository, service);
+    let evaluations = FsRunArtifactRepository::new(state_path.with_extension("evaluations")).list();
+    let consistencies =
+        FsConsistencyArtifactRepository::new(state_path.with_extension("consistency-checks"))
+            .list();
+    let security =
+        FsSecurityArtifactRepository::new(state_path.with_extension("security-checks")).list();
+    for (component, result) in [
+        ("evaluations", evaluations.as_ref().map(|_| ())),
+        ("consistency_checks", consistencies.as_ref().map(|_| ())),
+        ("security_checks", security.as_ref().map(|_| ())),
+    ] {
+        if let Err(error) = result {
+            push_artifact_diagnostic(&mut diagnostics, component, error);
+        }
+    }
+    let evaluations = evaluations.unwrap_or_default();
+    let consistencies = consistencies.unwrap_or_default();
+    let security = security.unwrap_or_default();
+    let mut findings = Vec::new();
+    if state.is_none() {
+        findings.push(AuditFinding {
+            code: "local_state_unreadable".to_string(),
+            severity: AuditSeverity::Error,
+            subject: profile.id.clone(),
+            message: "Local State could not be read as a supported profile.".to_string(),
+        });
+    }
+    if let Some(state) = state.as_ref() {
+        append_state_findings(state, &mut findings);
+    }
+    if let Some(inventory) = inventory.as_ref() {
+        append_inventory_findings(inventory, &mut findings);
+    }
+    append_evidence_findings(
+        &evaluations,
+        &consistencies,
+        &security,
+        inventory.as_ref(),
+        &mut findings,
+    );
+    sort_findings(&mut findings);
+    let mut audit_findings = summarize_findings(&findings);
+    audit_findings.inventory_count = inventory.as_ref().map_or(0, |inventory| inventory.total);
+    let mut summary = StatsSummary {
+        identities: state.as_ref().map_or(0, |state| state.identities.len()),
+        targets: state.as_ref().map_or(0, |state| state.targets.len()),
+        installations: state.as_ref().map_or(0, |state| state.installations.len()),
+        inventory_items: inventory.as_ref().map_or(0, |inventory| inventory.total),
+        watched_interests: 0,
+        audit_findings,
+        ..StatsSummary::default()
+    };
+    if let Some(inventory) = inventory.as_ref() {
+        for item in &inventory.items {
+            increment(&mut summary.scope, &item.scope);
+            increment(&mut summary.tracking, &item.tracking_state);
+            increment(&mut summary.watchlist, &item.watch_state);
+            increment(
+                &mut summary.provenance,
+                &serde_json::to_value(item.provenance.kind)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_string))
+                    .unwrap_or_else(|| "unknown".to_string()),
+            );
+            increment(
+                &mut summary.provenance_confidence,
+                &serde_json::to_value(item.provenance.confidence)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_string))
+                    .unwrap_or_else(|| "unavailable".to_string()),
+            );
+            if let Some(status) = item.lifecycle_state {
+                increment(
+                    &mut summary.lifecycle,
+                    &serde_json::to_value(status)
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_string))
+                        .unwrap_or_else(|| "unknown".to_string()),
+                );
+            }
+            increment(
+                &mut summary.repositories,
+                &repository_key(&item.identity.source),
+            );
+            if item.kind == "watchlist" {
+                summary.watched_interests += 1;
+            }
+        }
+    }
+    let outcomes = evidence_outcomes(
+        &evaluations,
+        &consistencies,
+        &security,
+        inventory.as_ref(),
+        &mut diagnostics,
+    );
+    for outcome in &outcomes {
+        let status = serde_json::to_value(&outcome.outcome)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_else(|| "unknown".to_string());
+        let freshness = freshness_name(outcome.freshness);
+        increment(&mut summary.evidence_freshness, freshness);
+        if matches!(outcome.freshness, EvidenceFreshness::Current) {
+            increment(&mut summary.comparable_outcomes, &status);
+        }
+    }
+    let exit_code = if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.status == "unavailable")
+    {
+        4
+    } else {
+        0
+    };
+    StatsReport {
+        command: "stats",
+        schema_version: 1,
+        generated_at_unix_ms: unix_ms(),
+        profile,
+        summary,
+        outcomes,
+        diagnostics,
+        exit_code,
+    }
+}
+
+fn append_state_findings(state: &LocalState, findings: &mut Vec<AuditFinding>) {
+    for (kind, ids) in [
+        (
+            "identity",
+            state
+                .identities
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "target",
+            state
+                .targets
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "installation",
+            state
+                .installations
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "watchlist",
+            state
+                .watchlists
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+        ),
+    ] {
+        let mut seen = std::collections::BTreeSet::new();
+        for id in ids {
+            if !seen.insert(id) {
+                push_finding(
+                    findings,
+                    "conflicting_records",
+                    AuditSeverity::Error,
+                    id,
+                    format!("Local State contains duplicate {kind} records."),
+                );
+            }
+        }
+    }
+    for installation in &state.installations {
+        if !state
+            .identities
+            .iter()
+            .any(|identity| identity.id == installation.skill_id)
+        {
+            push_finding(
+                findings,
+                "broken_identity_reference",
+                AuditSeverity::Error,
+                &installation.id,
+                "Installation refers to a missing Skill Identity.".to_string(),
+            );
+        }
+        if !state
+            .targets
+            .iter()
+            .any(|target| target.id == installation.target_id)
+        {
+            push_finding(
+                findings,
+                "broken_target_reference",
+                AuditSeverity::Error,
+                &installation.id,
+                "Installation refers to a missing Adapter Target.".to_string(),
+            );
+        }
+        if !std::path::Path::new(&installation.path).exists() {
+            push_finding(
+                findings,
+                "missing_installation",
+                AuditSeverity::Error,
+                &installation.id,
+                "Recorded installation path is missing.".to_string(),
+            );
+        }
+    }
+    for target in &state.targets {
+        if !std::path::Path::new(&target.path).is_dir() {
+            push_finding(
+                findings,
+                "missing_target",
+                AuditSeverity::Error,
+                &target.id,
+                "Adapter Target directory is missing or unavailable.".to_string(),
+            );
+        }
+    }
+}
+
+fn append_inventory_findings(inventory: &Inventory, findings: &mut Vec<AuditFinding>) {
+    for item in &inventory.items {
+        if item.kind == "installation" && !item.tracked {
+            push_finding(
+                findings,
+                "untracked_installation",
+                AuditSeverity::Warning,
+                &item.action_id,
+                "Discovered installation is not recorded in Local State.".to_string(),
+            );
+        }
+        match item.lifecycle_state {
+            Some(InstallationStatus::Missing) => push_finding(
+                findings,
+                "missing_installation",
+                AuditSeverity::Error,
+                &item.action_id,
+                "Recorded installation target is missing.".to_string(),
+            ),
+            Some(InstallationStatus::Modified) => push_finding(
+                findings,
+                "modified_installation",
+                AuditSeverity::Warning,
+                &item.action_id,
+                "Installation content differs from its recorded digest.".to_string(),
+            ),
+            Some(InstallationStatus::Failed) => push_finding(
+                findings,
+                "failed_installation",
+                AuditSeverity::Error,
+                &item.action_id,
+                "Installation is recorded in a failed lifecycle state.".to_string(),
+            ),
+            Some(InstallationStatus::Outdated) => push_finding(
+                findings,
+                "outdated_installation",
+                AuditSeverity::Warning,
+                &item.action_id,
+                "Installation is recorded as outdated.".to_string(),
+            ),
+            Some(InstallationStatus::Unverified | InstallationStatus::Planned) => push_finding(
+                findings,
+                "unverified_installation",
+                AuditSeverity::Optimization,
+                &item.action_id,
+                "Installation lacks a verified current content baseline.".to_string(),
+            ),
+            _ => {}
+        }
+        if item.provenance.confidence == ProvenanceConfidence::Unavailable {
+            push_finding(
+                findings,
+                "provenance_unavailable",
+                AuditSeverity::Optimization,
+                &item.action_id,
+                "Installation provenance is not available.".to_string(),
+            );
+        }
+    }
+}
+
+fn append_evidence_findings(
+    evaluations: &[tasc_core::evaluation::RunArtifact],
+    consistencies: &[tasc_core::consistency::ConsistencyArtifact],
+    security: &[tasc_core::security::SecurityArtifact],
+    inventory: Option<&Inventory>,
+    findings: &mut Vec<AuditFinding>,
+) {
+    for artifact in evaluations {
+        if evidence_freshness_evaluation(artifact, inventory) == EvidenceFreshness::Stale {
+            push_finding(
+                findings,
+                "stale_evidence",
+                AuditSeverity::Warning,
+                &artifact.id,
+                "Evaluation recorded inputs differ from the currently available inputs."
+                    .to_string(),
+            );
+        }
+    }
+    for artifact in consistencies {
+        if evidence_freshness_consistency(artifact, inventory) == EvidenceFreshness::Stale {
+            push_finding(
+                findings,
+                "stale_evidence",
+                AuditSeverity::Warning,
+                &artifact.id,
+                "Consistency evidence recorded inputs differ from the currently available inputs."
+                    .to_string(),
+            );
+        } else if evidence_freshness_consistency(artifact, inventory) == EvidenceFreshness::Current
+        {
+            for finding in &artifact.findings {
+                if finding.status == ConsistencyStatus::Found
+                    && finding.revision_status != tasc_core::consistency::RevisionStatus::Stale
+                {
+                    push_finding(
+                        findings,
+                        "unresolved_finding",
+                        if finding.severity == tasc_core::consistency::FindingSeverity::Blocking {
+                            AuditSeverity::Error
+                        } else {
+                            AuditSeverity::Warning
+                        },
+                        &finding.id,
+                        "A current Consistency Check contains an unresolved finding.".to_string(),
+                    );
+                }
+            }
+        }
+    }
+    for artifact in security {
+        if evidence_freshness_security(artifact, inventory) == EvidenceFreshness::Stale {
+            push_finding(
+                findings,
+                "stale_evidence",
+                AuditSeverity::Warning,
+                &artifact.id,
+                "Security evidence recorded content differs from the current content.".to_string(),
+            );
+        } else if evidence_freshness_security(artifact, inventory) == EvidenceFreshness::Current {
+            for finding in &artifact.findings {
+                if !artifact
+                    .suppressed_fingerprints
+                    .contains(&finding.fingerprint)
+                {
+                    push_finding(
+                        findings,
+                        "unresolved_finding",
+                        if matches!(
+                            finding.severity,
+                            tasc_core::security::SecuritySeverity::High
+                                | tasc_core::security::SecuritySeverity::Critical
+                        ) {
+                            AuditSeverity::Error
+                        } else {
+                            AuditSeverity::Warning
+                        },
+                        &finding.id,
+                        "A current Security Check contains an unresolved finding.".to_string(),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn evidence_freshness_evaluation(
+    artifact: &tasc_core::evaluation::RunArtifact,
+    inventory: Option<&Inventory>,
+) -> EvidenceFreshness {
+    let Some(inventory) = inventory else {
+        return EvidenceFreshness::Unavailable;
+    };
+    let Some(item) = inventory_installation(
+        inventory,
+        &artifact.identity.id,
+        artifact.installation_id.as_deref(),
+        artifact.package_path.as_deref(),
+    ) else {
+        return EvidenceFreshness::Stale;
+    };
+    let mut compared = false;
+    if let Some(recorded) = artifact.source_revision.as_ref() {
+        if let Some(current) = item.source_revision.as_ref() {
+            compared = true;
+            if recorded.value != *current {
+                return EvidenceFreshness::Stale;
+            }
+        }
+    }
+    if let Some(path) = artifact.package_path.as_deref() {
+        if std::path::Path::new(path) != std::path::Path::new(&item.path) {
+            return EvidenceFreshness::Stale;
+        }
+        if let Some(recorded) = artifact.package_digest.as_ref() {
+            match tasc_agent::service::skill_content_digest(std::path::Path::new(&item.path)) {
+                Ok(current) => {
+                    compared = true;
+                    if &current != recorded {
+                        return EvidenceFreshness::Stale;
+                    }
+                }
+                Err(_) => return EvidenceFreshness::Unavailable,
+            }
+        }
+    }
+    if compared {
+        EvidenceFreshness::Current
+    } else {
+        EvidenceFreshness::Unknown
+    }
+}
+
+fn evidence_freshness_consistency(
+    artifact: &tasc_core::consistency::ConsistencyArtifact,
+    inventory: Option<&Inventory>,
+) -> EvidenceFreshness {
+    let mut compared = false;
+    for skill in &artifact.skills {
+        let Some(inventory) = inventory else {
+            return EvidenceFreshness::Unavailable;
+        };
+        let Some(current_item) =
+            inventory_installation(inventory, &skill.identity.id, None, Some(&skill.path))
+        else {
+            return EvidenceFreshness::Stale;
+        };
+        match tasc_agent::service::skill_content_digest(std::path::Path::new(&current_item.path)) {
+            Ok(current) => {
+                compared = true;
+                if current != skill.content_digest {
+                    return EvidenceFreshness::Stale;
+                }
+            }
+            Err(_) => return EvidenceFreshness::Unavailable,
+        }
+    }
+    if compared {
+        EvidenceFreshness::Current
+    } else {
+        EvidenceFreshness::Unknown
+    }
+}
+
+fn evidence_freshness_security(
+    artifact: &tasc_core::security::SecurityArtifact,
+    inventory: Option<&Inventory>,
+) -> EvidenceFreshness {
+    let mut compared = false;
+    for skill in &artifact.skills {
+        let Some(inventory) = inventory else {
+            return EvidenceFreshness::Unavailable;
+        };
+        let Some(current_item) =
+            inventory_installation(inventory, &skill.identity.id, None, Some(&skill.path))
+        else {
+            return EvidenceFreshness::Stale;
+        };
+        let Some(recorded) = skill.content_digest.as_ref() else {
+            continue;
+        };
+        match tasc_agent::service::skill_content_digest(std::path::Path::new(&current_item.path)) {
+            Ok(current) => {
+                compared = true;
+                if &current != recorded {
+                    return EvidenceFreshness::Stale;
+                }
+            }
+            Err(_) => return EvidenceFreshness::Unavailable,
+        }
+    }
+    if compared {
+        EvidenceFreshness::Current
+    } else {
+        EvidenceFreshness::Unknown
+    }
+}
+
+fn inventory_installation<'a>(
+    inventory: &'a Inventory,
+    identity_id: &str,
+    installation_id: Option<&str>,
+    path: Option<&str>,
+) -> Option<&'a tasc_core::InventoryItem> {
+    inventory.items.iter().find(|item| {
+        item.kind == "installation"
+            && item.identity.id == identity_id
+            && installation_id.is_none_or(|id| item.installation_id == id)
+            && path.is_none_or(|path| item.path == path)
+    })
+}
+
+fn evidence_outcomes(
+    evaluations: &[tasc_core::evaluation::RunArtifact],
+    consistencies: &[tasc_core::consistency::ConsistencyArtifact],
+    security: &[tasc_core::security::SecurityArtifact],
+    inventory: Option<&Inventory>,
+    diagnostics: &mut Vec<ProjectionDiagnostic>,
+) -> Vec<EvidenceOutcome> {
+    let mut outcomes = Vec::new();
+    for artifact in evaluations {
+        outcomes.push(EvidenceOutcome {
+            source: "evaluation".to_string(),
+            id: artifact.id.clone(),
+            outcome: evaluation_outcome(artifact.outcome),
+            freshness: evidence_freshness_evaluation(artifact, inventory),
+            execution_outcome: Some(artifact.execution_outcome),
+        });
+    }
+    for artifact in consistencies {
+        outcomes.push(EvidenceOutcome {
+            source: "consistency".to_string(),
+            id: artifact.id.clone(),
+            outcome: consistency_outcome(artifact),
+            freshness: evidence_freshness_consistency(artifact, inventory),
+            execution_outcome: None,
+        });
+    }
+    for artifact in security {
+        outcomes.push(EvidenceOutcome {
+            source: "security".to_string(),
+            id: artifact.id.clone(),
+            outcome: match artifact.status {
+                SecurityCheckStatus::Complete if artifact.findings.is_empty() => {
+                    OutcomeStatus::Passed
+                }
+                SecurityCheckStatus::Complete => OutcomeStatus::Failed,
+                SecurityCheckStatus::Partial => OutcomeStatus::Inconclusive,
+            },
+            freshness: evidence_freshness_security(artifact, inventory),
+            execution_outcome: None,
+        });
+    }
+    for component in [
+        "local_state",
+        "inventory",
+        "evaluations",
+        "consistency_checks",
+        "security_checks",
+    ] {
+        if diagnostics.iter().any(|diagnostic| {
+            diagnostic.component == component && diagnostic.status == "unavailable"
+        }) {
+            outcomes.push(EvidenceOutcome {
+                source: component.to_string(),
+                id: String::new(),
+                outcome: OutcomeStatus::Unavailable,
+                freshness: EvidenceFreshness::Unavailable,
+                execution_outcome: None,
+            });
+        }
+    }
+    outcomes.sort_by(|left, right| (&left.source, &left.id).cmp(&(&right.source, &right.id)));
+    outcomes
+}
+
+fn evaluation_outcome(outcome: EvaluationOutcome) -> OutcomeStatus {
+    match outcome {
+        EvaluationOutcome::Passed => OutcomeStatus::Passed,
+        EvaluationOutcome::Failed => OutcomeStatus::Failed,
+        EvaluationOutcome::Inconclusive => OutcomeStatus::Inconclusive,
+        EvaluationOutcome::NotRun => OutcomeStatus::NotRun,
+    }
+}
+
+fn consistency_outcome(artifact: &tasc_core::consistency::ConsistencyArtifact) -> OutcomeStatus {
+    if artifact
+        .categories
+        .iter()
+        .any(|category| category.status == ConsistencyStatus::Found)
+    {
+        OutcomeStatus::Failed
+    } else if artifact
+        .categories
+        .iter()
+        .any(|category| category.status == ConsistencyStatus::Inconclusive)
+    {
+        OutcomeStatus::Inconclusive
+    } else if artifact
+        .categories
+        .iter()
+        .all(|category| category.status == ConsistencyStatus::NotRun)
+    {
+        OutcomeStatus::NotRun
+    } else {
+        OutcomeStatus::Passed
+    }
+}
+
+fn push_artifact_diagnostic(
+    diagnostics: &mut Vec<ProjectionDiagnostic>,
+    component: &str,
+    error: &str,
+) {
+    diagnostics.push(ProjectionDiagnostic {
+        code: "evidence_unavailable".to_string(),
+        component: component.to_string(),
+        status: "unavailable".to_string(),
+        message: error.to_string(),
+    });
+}
+
+fn push_finding(
+    findings: &mut Vec<AuditFinding>,
+    code: &str,
+    severity: AuditSeverity,
+    subject: &str,
+    message: String,
+) {
+    findings.push(AuditFinding {
+        code: code.to_string(),
+        severity,
+        subject: subject.to_string(),
+        message,
+    });
+}
+
+fn sort_findings(findings: &mut Vec<AuditFinding>) {
+    findings.sort_by(|left, right| {
+        left.code
+            .cmp(&right.code)
+            .then_with(|| left.subject.cmp(&right.subject))
+            .then_with(|| severity_rank(&left.severity).cmp(&severity_rank(&right.severity)))
+    });
+    findings.dedup_by(|left, right| left.code == right.code && left.subject == right.subject);
+}
+
+fn severity_rank(severity: &AuditSeverity) -> u8 {
+    match severity {
+        AuditSeverity::Error => 0,
+        AuditSeverity::Warning => 1,
+        AuditSeverity::Optimization => 2,
+    }
+}
+
+fn summarize_findings(findings: &[AuditFinding]) -> AuditSummary {
+    let mut summary = AuditSummary::default();
+    for finding in findings {
+        match finding.severity {
+            AuditSeverity::Error => summary.errors += 1,
+            AuditSeverity::Warning => summary.warnings += 1,
+            AuditSeverity::Optimization => summary.optimizations += 1,
+        }
+    }
+    summary
+}
+
+fn increment(counts: &mut BTreeMap<String, usize>, key: &str) {
+    *counts.entry(key.to_string()).or_default() += 1;
+}
+
+fn freshness_name(freshness: EvidenceFreshness) -> &'static str {
+    match freshness {
+        EvidenceFreshness::Current => "current",
+        EvidenceFreshness::Stale => "stale",
+        EvidenceFreshness::Unavailable => "unavailable",
+        EvidenceFreshness::Unknown => "unknown",
+    }
+}
+
+fn repository_key(source: &str) -> String {
+    let source = source
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let source = source.strip_prefix("github.com/").unwrap_or(source);
+    if source.starts_with("file:") || source.starts_with('/') || source.starts_with("local:") {
+        "local".to_string()
+    } else {
+        source
+            .trim_end_matches(".git")
+            .trim_end_matches('/')
+            .to_string()
+    }
+}
+
+fn render_projection_report<T: serde::Serialize>(
+    report: &T,
+    json: bool,
+    command: &str,
+    exit_code: i32,
+) -> Result<(), Diagnostic> {
+    let value = serde_json::to_value(report).map_err(|error| local_error(error.to_string()))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).map_err(|error| local_error(error.to_string()))?
+        );
+    } else {
+        println!("{command} (schema version 1)");
+        render_fields(&value, 0);
+    }
+    match exit_code {
+        0 => Ok(()),
+        1 => Err(Diagnostic::new(
+            "audit_errors",
+            "finding",
+            "audit",
+            "Audit detected error findings.",
+            "Inspect the findings and repair the affected profile records or installations.",
+        )),
+        _ => Err(Diagnostic::new(
+            "projection_unavailable",
+            "filesystem",
+            command,
+            "One or more profile inputs could not be inspected.",
+            "Inspect the diagnostics and retry when the profile and evidence are readable.",
+        )),
+    }
+}
+
+fn run_audit(
+    state_path: std::path::PathBuf,
+    repository: FsStateRepository,
+    service: &AgentService<CopilotAdapter, FsStateRepository>,
+    json: bool,
+) -> Result<(), Diagnostic> {
+    let profile = repository.profile();
+    let report = audit_report(&state_path, profile, &repository, service);
+    render_projection_report(&report, json, "audit", report.exit_code)
+}
+
+fn run_stats(
+    state_path: std::path::PathBuf,
+    repository: FsStateRepository,
+    service: &AgentService<CopilotAdapter, FsStateRepository>,
+    json: bool,
+) -> Result<(), Diagnostic> {
+    let profile = repository.profile();
+    let report = stats_report(&state_path, profile, &repository, service);
+    render_projection_report(&report, json, "stats", report.exit_code)
+}
+
 fn render_fields(value: &serde_json::Value, indent: usize) {
     match value {
         serde_json::Value::Object(fields) => {
@@ -960,6 +1952,8 @@ async fn run_local(
     let repository = FsStateRepository::new(state_path.clone());
     let service = AgentService::new(CopilotAdapter::local(), repository.clone());
     match command {
+        Commands::Audit(output) => run_audit(state_path, repository, &service, output.json || json),
+        Commands::Stats(output) => run_stats(state_path, repository, &service, output.json || json),
         Commands::Insight { command } => {
             let service = InsightService::new(
                 CopilotAdapter::local(),
