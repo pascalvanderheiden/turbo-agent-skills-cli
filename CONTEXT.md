@@ -239,3 +239,11 @@ _Avoid_: Unverified binary, mutable download
 **Public Delivery**:
 The user-visible path from an activated public repository through verified Release Artifacts, the curl-style installer, and GitHub Pages Documentation Surfaces. Public Delivery is unavailable until the repository settings and release governance prerequisites are enabled.
 _Avoid_: Source checkout, private preview
+
+**Vertical Slice**:
+A dependency-ordered increment that delivers one usable TASC capability across its domain services, CLI, dedicated agent, machine-readable contract, and relevant tests before the next increment begins.
+_Avoid_: Backend-only layer, demo slice
+
+**Acceptance Gate**:
+A measurable condition that must pass before a TASC roadmap increment or release is considered ready, including deterministic behavior, versioned JSON compatibility, surface parity, and applicable interactive/non-interactive rendering checks.
+_Avoid_: Manual confidence, informal sign-off
