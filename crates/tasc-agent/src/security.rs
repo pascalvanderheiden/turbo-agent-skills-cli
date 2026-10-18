@@ -1212,54 +1212,86 @@ fn make_finding(
     }
 }
 
-fn has_secret_assignment(lower: &str) -> bool {
-    [
-        "secret_access_key",
-        "api_key",
-        "apikey",
-        "access_key",
-        "client_secret",
-        "secret_key",
-        "private_key",
-        "privatekey",
-        "private key",
-        "private-key",
-        "password",
-        "token",
-        "secret",
-    ]
-    .iter()
-    .any(|key| {
-        lower.match_indices(key).any(|(index, _)| {
-            let suffix = lower[index + key.len()..]
-                .trim_start_matches(['\'', '"', '`'])
-                .trim_start();
-            let Some(value) = suffix
-                .strip_prefix('=')
-                .or_else(|| suffix.strip_prefix(':'))
-            else {
-                return false;
-            };
-            let value = value
-                .trim_start()
-                .trim_start_matches(['\'', '"', '`'])
-                .split([' ', '\t', '\'', '"', '`', ',', ';'])
-                .next()
-                .unwrap_or_default();
-            value.chars().count() >= 8
-                && ![
-                    "example",
-                    "placeholder",
-                    "your_",
-                    "changeme",
-                    "xxxx",
-                    "${",
-                    "{{",
-                    "<",
-                ]
-                .iter()
-                .any(|placeholder| value.contains(placeholder))
+const SECRET_ASSIGNMENT_KEYS: [&str; 13] = [
+    "secret_access_key",
+    "api_key",
+    "apikey",
+    "access_key",
+    "client_secret",
+    "secret_key",
+    "private_key",
+    "privatekey",
+    "private key",
+    "private-key",
+    "password",
+    "token",
+    "secret",
+];
+
+fn secret_assignment_values(lower: &str) -> Vec<&str> {
+    SECRET_ASSIGNMENT_KEYS
+        .iter()
+        .flat_map(|key| {
+            lower.match_indices(key).filter_map(move |(index, _)| {
+                let suffix = lower[index + key.len()..]
+                    .trim_start_matches(['\'', '"', '`'])
+                    .trim_start();
+                suffix
+                    .strip_prefix('=')
+                    .or_else(|| suffix.strip_prefix(':'))
+                    .map(str::trim_start)
+            })
         })
+        .collect()
+}
+
+fn has_secret_assignment(lower: &str) -> bool {
+    secret_assignment_values(lower).into_iter().any(|suffix| {
+        let value = suffix
+            .trim_start()
+            .trim_start_matches(['\'', '"', '`'])
+            .split([' ', '\t', '\'', '"', '`', ',', ';'])
+            .next()
+            .unwrap_or_default();
+        value.chars().count() >= 8
+            && ![
+                "example",
+                "placeholder",
+                "your_",
+                "changeme",
+                "xxxx",
+                "${",
+                "{{",
+                "<",
+            ]
+            .iter()
+            .any(|placeholder| value.contains(placeholder))
+    })
+}
+
+pub(crate) fn has_multiline_secret_declaration(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    secret_assignment_values(&lower).into_iter().any(|suffix| {
+        let value = suffix
+            .trim_start()
+            .trim_start_matches(['\'', '"', '`'])
+            .trim_start();
+        if value.is_empty() || value.starts_with('#') {
+            return true;
+        }
+        let Some(marker) = value.chars().next() else {
+            return true;
+        };
+        if !matches!(marker, '|' | '>') {
+            return false;
+        }
+        let rest = value[marker.len_utf8()..].trim_start();
+        let header = rest.split_whitespace().next().unwrap_or_default();
+        header.is_empty()
+            || header.starts_with('#')
+            || header
+                .chars()
+                .all(|character| character.is_ascii_digit() || matches!(character, '-' | '+'))
     })
 }
 

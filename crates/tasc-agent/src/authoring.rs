@@ -1,6 +1,6 @@
 use crate::{
     evaluation::validate_skill_package,
-    security::redact_possible_secrets,
+    security::{has_multiline_secret_declaration, redact_possible_secrets},
     service::{SkillAdapter, StateRepository},
 };
 use serde::{Deserialize, Serialize};
@@ -631,9 +631,22 @@ fn redact_input(input: &SkillDraftInput) -> SkillDraftInput {
 fn redact_answer(value: &str) -> String {
     let mut in_private_key = false;
     let mut in_putty_key = false;
+    let mut in_multiline_secret: Option<usize> = None;
     let mut redacted_lines = Vec::new();
     for line in value.lines() {
         let lower = line.to_ascii_lowercase();
+        let indentation = line.len() - line.trim_start_matches([' ', '\t']).len();
+        if let Some(secret_indentation) = in_multiline_secret {
+            if line.trim().is_empty() {
+                redacted_lines.push(String::new());
+                continue;
+            }
+            if indentation > secret_indentation {
+                redacted_lines.push(format!("{}[REDACTED]", &line[..indentation]));
+                continue;
+            }
+            in_multiline_secret = None;
+        }
         if in_putty_key {
             if lower.starts_with("private-mac:") {
                 in_putty_key = false;
@@ -655,6 +668,13 @@ fn redact_answer(value: &str) -> String {
             redacted_lines.push("[REDACTED PRIVATE KEY MATERIAL]".to_string());
             in_private_key = !(lower.contains("-----end") && lower.contains("private key"));
             continue;
+        }
+        if has_multiline_secret_declaration(line) {
+            if let Some(separator) = line.find('=').or_else(|| line.find(':')) {
+                redacted_lines.push(format!("{} [REDACTED]", &line[..=separator]));
+                in_multiline_secret = Some(indentation);
+                continue;
+            }
         }
         redacted_lines.push(redact_possible_secrets(line));
     }
@@ -1197,21 +1217,26 @@ mod tests {
         let private_material = "unique-private-key-payload-for-regression";
         let assigned_private_material = "private-assignment-secret-regression";
         let quoted_private_material = "quoted-private-assignment-secret";
+        let yaml_secret_material = "multiline-yaml-secret-material-regression";
         input.purpose = format!(
-            "Use this key:\n-----BEGIN RSA PRIVATE KEY-----\n{private_material}\n-----END RSA PRIVATE KEY-----\nfor local testing.\nPuTTY-User-Key-File-3: ssh-ed25519\nEncryption: none\nPrivate-Lines: 1\n{private_material}\nPrivate-MAC: 0123456789\nPrivateKey = {assigned_private_material}\n{{\"private_key\": \"{quoted_private_material}\"}}"
+            "Use this key:\n-----BEGIN RSA PRIVATE KEY-----\n{private_material}\n-----END RSA PRIVATE KEY-----\nfor local testing.\nPuTTY-User-Key-File-3: ssh-ed25519\nEncryption: none\nPrivate-Lines: 1\n{private_material}\nPrivate-MAC: 0123456789\nPrivateKey = {assigned_private_material}\n{{\"private_key\": \"{quoted_private_material}\"}}\napi_key: |\n  {yaml_secret_material}\n  another secret line\nsafe: retained"
         );
 
         let draft = service.create(&input, true).unwrap();
         assert!(!draft.answers.purpose.contains(private_material));
         assert!(!draft.answers.purpose.contains(assigned_private_material));
         assert!(!draft.answers.purpose.contains(quoted_private_material));
+        assert!(!draft.answers.purpose.contains(yaml_secret_material));
         assert!(draft
             .answers
             .purpose
             .contains("[REDACTED PRIVATE KEY MATERIAL]"));
+        assert!(draft.answers.purpose.contains("safe: retained"));
         assert!(!draft.answers.purpose.contains("PuTTY-User-Key-File"));
         let skill_file = fs::read_to_string(Path::new(&draft.skill_path).join("SKILL.md")).unwrap();
         assert!(!skill_file.contains(private_material));
+        assert!(!skill_file.contains(yaml_secret_material));
+        assert!(skill_file.contains("safe: retained"));
         let saved = fs::read_to_string(
             root.join("draft-records")
                 .join(format!("{}.json", draft.id)),
@@ -1220,6 +1245,7 @@ mod tests {
         assert!(!saved.contains(private_material));
         assert!(!saved.contains(assigned_private_material));
         assert!(!saved.contains(quoted_private_material));
+        assert!(!saved.contains(yaml_secret_material));
         fs::remove_dir_all(root).unwrap();
     }
 
