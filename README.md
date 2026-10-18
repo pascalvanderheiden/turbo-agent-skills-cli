@@ -1,8 +1,8 @@
 # TASC — Turbo Agent Skills CLI
 
-TASC helps you discover, install, create, evaluate, and safely manage coding-agent skills. It keeps inventory and evidence local, makes lifecycle changes explicit, and never silently updates an installed skill.
+![TASC rainbow ASCII art banner](docs/site/assets/tasc-rainbow-banner.svg)
 
-> T A S C // Turbo Agent Skills CLI
+TASC helps you discover, install, create, evaluate, and safely manage coding-agent skills. It keeps inventory and evidence local, makes lifecycle changes explicit, and never silently updates an installed skill.
 
 <!-- pages-content:start -->
 # TASC

@@ -961,16 +961,36 @@ fn display_count(status: &Value, key: &str) -> String {
         .unwrap_or_else(|| "unavailable".to_string())
 }
 
+const TURBO_BANNER_LINES: [&str; 6] = [
+    " _____   ___    ____    ____",
+    "|_   _| / _ \\  / ___|  / ___|",
+    "  | |  / /_\\ \\ \\___ \\ | |",
+    "  | |  |  _  |  ___) || |___",
+    "  |_|  |_| |_| |____/  \\____|",
+    "      TURBO AGENT SKILLS CLI",
+];
+const RAINBOW_ANSI: [&str; 6] = ["91", "93", "92", "96", "94", "95"];
+
+fn turbo_banner(color: bool) -> String {
+    TURBO_BANNER_LINES
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            if color {
+                format!("\x1b[1;{}m{line}\x1b[0m", RAINBOW_ANSI[index])
+            } else {
+                (*line).to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn dashboard_output(status: &Value, color: bool, json_output: bool) -> String {
     if json_output {
         return json!({"schemaVersion":1,"command":"agent.dashboard","result":status}).to_string();
     }
-    let banner = "Turbo Agent Skills CLI";
-    let banner = if color {
-        format!("\x1b[1;36m{banner}\x1b[0m")
-    } else {
-        banner.to_string()
-    };
+    let banner = turbo_banner(color);
     format!(
         "{banner}\nGitHub CLI: {} · Model: {} · Tokens: {} · Skills: {} ({} tracked, {} watched)\n{}",
         if status["githubCliAuthenticated"] == true {
@@ -1657,7 +1677,7 @@ mod tests {
         dashboard_output, dashboard_status_for_items, lifecycle_summary, model_preferences_path,
         onboarding_message, output_policy, parse_shell_command, read_profile_model,
         save_profile_model, session_config, shell_event_output, validate_model_choice,
-        ShellCommand,
+        ShellCommand, RAINBOW_ANSI,
     };
     use std::{
         fs,
@@ -1800,8 +1820,14 @@ mod tests {
         let rendered = dashboard_output(&status, false, true);
         assert!(!rendered.contains("\u{1b}["));
         assert!(rendered.contains("\"command\":\"agent.dashboard\""));
-        assert!(!dashboard_output(&status, false, false).contains("\u{1b}["));
-        assert!(dashboard_output(&status, true, false).contains("\u{1b}["));
+        let plain_dashboard = dashboard_output(&status, false, false);
+        assert!(!plain_dashboard.contains("\u{1b}["));
+        assert!(plain_dashboard.contains(" _____   ___    ____    ____"));
+        assert!(plain_dashboard.contains("TURBO AGENT SKILLS CLI"));
+        let rainbow_dashboard = dashboard_output(&status, true, false);
+        for color in RAINBOW_ANSI {
+            assert!(rainbow_dashboard.contains(&format!("\x1b[1;{color}m")));
+        }
         let onboarding = serde_json::json!({"untrackedCount":2});
         assert!(onboarding_message(&onboarding).contains("2 untracked installation(s)"));
         let with_usage = dashboard_status_for_items(false, "auto", Some((11, 7)), Some(&[]));
