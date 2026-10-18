@@ -18,7 +18,7 @@ use tasc_agent::{
     discovery::DiscoveryService,
     evaluation::{EvaluationService, FsRunArtifactRepository},
     gh::{Cancellation, GhSkill},
-    lifecycle::{LifecycleResult, LifecycleService},
+    lifecycle::{LifecycleApproval, LifecycleResult, LifecycleService},
     security::{FsSecurityArtifactRepository, FsSecuritySuppressionRepository, SecurityService},
     AgentService, CopilotAdapter, FsStateRepository, FsWatchCheckRepository,
 };
@@ -93,6 +93,17 @@ fn lifecycle_summary(result: &LifecycleResult) -> Value {
             "skillId": installation.skill_id,
             "targetId": installation.target_id,
             "sourceRevision": installation.source_revision
+        })),
+        "lifecyclePlan": result.lifecycle_plan.as_ref().map(|plan| json!({
+            "id": plan.id,
+            "profile": plan.profile,
+            "scope": plan.scope,
+            "target": plan.target,
+            "sourceRevision": plan.source_revision,
+            "security": plan.security,
+            "requiredApproval": plan.required_approval,
+            "expiresAtUnixMs": plan.expires_at_unix_ms,
+            "securityOverrideReason": plan.security_override_reason
         }))
     })
 }
@@ -222,14 +233,23 @@ impl AgentContext {
                 operation,
                 selector,
                 force,
+                security_override_reason,
             } => {
                 if operation == "update" && self.offline {
                     return Err(offline_error());
                 }
                 let selector = self.resolve_selector(&selector)?;
                 let cancel = self.cancellation();
-                let result = self.plan(&operation, &selector, force, &cancel).await?;
-                let plan = self.agent_plan(&result, &selector, force)?;
+                let result = self
+                    .plan(
+                        &operation,
+                        &selector,
+                        force,
+                        security_override_reason.as_deref(),
+                        &cancel,
+                    )
+                    .await?;
+                let plan = self.agent_plan(&result, &selector, force, security_override_reason)?;
                 let approval = self
                     .session
                     .lock()
@@ -312,6 +332,7 @@ impl AgentContext {
         result: &LifecycleResult,
         selector: &str,
         force: bool,
+        security_override_reason: Option<String>,
     ) -> Result<AgentPlan, Diagnostic> {
         let installation = result.installation.as_ref();
         let mut fingerprint_material = serde_json::to_vec(result).map_err(serialization_error)?;
@@ -348,15 +369,25 @@ impl AgentContext {
                 }
             }
         }
-        let target = installation
-            .map(|installation| installation.target_id.clone())
+        let target = result
+            .lifecycle_plan
+            .as_ref()
+            .map(|plan| plan.target.id.clone())
+            .or_else(|| installation.map(|installation| installation.target_id.clone()))
             .unwrap_or_default();
         Ok(AgentPlan {
             operation: result.operation.clone(),
             scope: selector.to_string(),
             target,
-            revision: installation.and_then(|installation| installation.source_revision.clone()),
+            revision: result
+                .lifecycle_plan
+                .as_ref()
+                .map(|plan| plan.source_revision.value.clone())
+                .or_else(|| {
+                    installation.and_then(|installation| installation.source_revision.clone())
+                }),
             force,
+            security_override_reason,
             state_fingerprint: fingerprint(&[&fingerprint_material]),
         })
     }
@@ -375,10 +406,16 @@ impl AgentContext {
                 &pending.operation,
                 &pending.scope,
                 pending.force,
+                pending.security_override_reason.as_deref(),
                 &self.cancellation(),
             )
             .await?;
-        let current = self.agent_plan(&result, &pending.scope, pending.force)?;
+        let current = self.agent_plan(
+            &result,
+            &pending.scope,
+            pending.force,
+            pending.security_override_reason.clone(),
+        )?;
         self.session
             .lock()
             .map_err(|_| state_error("agent session state is unavailable".to_string()))?
@@ -386,8 +423,12 @@ impl AgentContext {
         let cancel = self.cancellation();
         let applied = match pending.operation.as_str() {
             "update" => {
+                let plan = result.lifecycle_plan.clone().ok_or_else(|| {
+                    selection_error("invalid_approval", "The secure update plan is unavailable.")
+                })?;
+                let approval = LifecycleApproval::approve(&plan)?;
                 self.lifecycle()
-                    .update(&pending.scope, false, pending.force, true, &cancel)
+                    .apply_update(plan, approval, &cancel)
                     .await?
             }
             "remove" => self
@@ -712,7 +753,7 @@ fn tools(dispatcher: Arc<Dispatcher>) -> Vec<Tool> {
         (
             "tasc_plan_lifecycle",
             "Plan an update or removal. Never executes it; the user must approve its token at the TASC prompt.",
-            json!({"type":"object","properties":{"operation":{"type":"string","enum":["update","remove"]},"selector":{"type":"string"},"force":{"type":"boolean"}},"required":["operation","selector","force"],"additionalProperties":false}),
+            json!({"type":"object","properties":{"operation":{"type":"string","enum":["update","remove"]},"selector":{"type":"string"},"force":{"type":"boolean"},"securityOverrideReason":{"type":"string"}},"required":["operation","selector","force"],"additionalProperties":false}),
         ),
         (
             "tasc_list_security_checks",
@@ -743,6 +784,7 @@ impl AgentContext {
         operation: &str,
         selector: &str,
         force: bool,
+        security_override_reason: Option<&str>,
         cancel: &Cancellation,
     ) -> Result<LifecycleResult, Diagnostic> {
         match operation {
@@ -750,9 +792,11 @@ impl AgentContext {
                 if self.offline {
                     return Err(offline_error());
                 }
-                self.lifecycle()
-                    .update(selector, true, force, false, cancel)
-                    .await
+                let plan = self
+                    .lifecycle()
+                    .plan_update(selector, force, security_override_reason, cancel)
+                    .await?;
+                Ok(LifecycleResult::preview(plan))
             }
             "remove" => self.lifecycle().remove(selector, true, force, false),
             _ => Err(selection_error(
@@ -984,6 +1028,7 @@ mod tests {
                 last_error: None,
             }),
             plan: "Update /private/local/skills/example".to_string(),
+            lifecycle_plan: None,
         };
 
         let summary = lifecycle_summary(&result).to_string();

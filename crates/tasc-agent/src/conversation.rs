@@ -32,6 +32,7 @@ pub enum AgentToolRequest {
         operation: String,
         selector: String,
         force: bool,
+        security_override_reason: Option<String>,
     },
     ListSecurity,
     ShowSecurity {
@@ -55,6 +56,7 @@ pub struct AgentPlan {
     pub target: String,
     pub revision: Option<String>,
     pub force: bool,
+    pub security_override_reason: Option<String>,
     pub state_fingerprint: String,
 }
 
@@ -253,6 +255,7 @@ pub fn translate_tool_call(
                     .get("force")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false),
+                security_override_reason: string_argument(&arguments, "securityOverrideReason"),
             })
         }
         "tasc_list_security_checks" => Ok(AgentToolRequest::ListSecurity),
@@ -382,6 +385,7 @@ mod tests {
             target: "project".to_string(),
             revision: None,
             force: false,
+            security_override_reason: None,
             state_fingerprint: "current".to_string(),
         };
         let mut session = AgentSession::default();
@@ -390,6 +394,43 @@ mod tests {
         assert_eq!(
             session
                 .consume_approval_at(&approval.token, &plan, Instant::now() + APPROVAL_TTL)
+                .unwrap_err()
+                .code,
+            "stale_approval"
+        );
+    }
+
+    #[test]
+    fn approval_tokens_are_exact_plan_bound_and_single_use() {
+        let plan = AgentPlan {
+            operation: "update".to_string(),
+            scope: "installation:example".to_string(),
+            target: "project".to_string(),
+            revision: Some("commit-a".to_string()),
+            force: false,
+            security_override_reason: None,
+            state_fingerprint: "state-a".to_string(),
+        };
+        let mut changed = plan.clone();
+        changed.revision = Some("commit-b".to_string());
+        let mut session = AgentSession::default();
+        let mismatch = session.prepare_approval(plan.clone());
+        assert_eq!(
+            session
+                .consume_approval(&mismatch.token, &changed)
+                .unwrap_err()
+                .code,
+            "stale_approval"
+        );
+
+        let approval = session.prepare_approval(plan.clone());
+        assert_eq!(
+            session.consume_approval(&approval.token, &plan).unwrap(),
+            plan
+        );
+        assert_eq!(
+            session
+                .consume_approval(&approval.token, &plan)
                 .unwrap_err()
                 .code,
             "stale_approval"

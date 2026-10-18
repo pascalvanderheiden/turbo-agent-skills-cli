@@ -10,7 +10,7 @@ use tasc_agent::{
     evaluation::{EvaluationService, FsRunArtifactRepository, RunArtifactRepository},
     gh::{Cancellation, GhSkill},
     insights::{FsInsightArtifactRepository, FsInsightLifecycleRepository, InsightService},
-    lifecycle::{LifecycleResult, LifecycleService},
+    lifecycle::{LifecycleApproval, LifecycleResult, LifecycleService},
     security::{
         FsSecurityArtifactRepository, FsSecuritySuppressionRepository, SecurityArtifactRepository,
         SecurityService,
@@ -388,6 +388,8 @@ enum SkillCommands {
         yes: bool,
         #[arg(long)]
         force: bool,
+        #[arg(long, value_name = "REASON")]
+        security_override: Option<String>,
         #[command(flatten)]
         output: JsonOutput,
     },
@@ -400,6 +402,8 @@ enum SkillCommands {
         yes: bool,
         #[arg(long)]
         force: bool,
+        #[arg(long, value_name = "REASON")]
+        security_override: Option<String>,
         #[command(flatten)]
         output: JsonOutput,
     },
@@ -2581,6 +2585,7 @@ async fn run_local(
                     dry_run,
                     yes,
                     force,
+                    security_override,
                     output,
                 },
         } => {
@@ -2621,61 +2626,23 @@ async fn run_local(
             .map_err(local_error)?;
             let lifecycle =
                 LifecycleService::new(CopilotAdapter::local(), GhSkill::default(), repository);
-            if dry_run {
-                let result = lifecycle
-                    .install(
-                        identity,
-                        target,
-                        revision.as_deref(),
-                        true,
-                        force,
-                        false,
-                        cancel,
-                    )
-                    .await?;
-                return render_lifecycle(&result, "skill install", output.json || json);
-            }
             let plan = lifecycle
-                .install(
-                    identity.clone(),
-                    target.clone(),
-                    revision.as_deref(),
-                    true,
-                    force,
-                    false,
-                    cancel,
-                )
-                .await?;
-            if plan.existing && !force {
-                let result = lifecycle
-                    .install(
-                        identity,
-                        target,
-                        revision.as_deref(),
-                        false,
-                        false,
-                        false,
-                        cancel,
-                    )
-                    .await?;
-                return render_lifecycle(&result, "skill install", output.json || json);
-            }
-            let approved = if yes {
-                true
-            } else {
-                confirm_plan(&plan, "Install this skill?")?
-            };
-            let result = lifecycle
-                .install(
+                .plan_install(
                     identity,
                     target,
                     revision.as_deref(),
-                    false,
                     force,
-                    approved,
+                    security_override.as_deref(),
                     cancel,
                 )
                 .await?;
+            let preview = LifecycleResult::preview(plan.clone());
+            if dry_run {
+                let result = preview;
+                return render_lifecycle(&result, "skill install", output.json || json);
+            }
+            let approved = approve_lifecycle_plan(&preview, yes, "Install this skill?")?;
+            let result = lifecycle.apply_install(plan, approved, cancel).await?;
             render_lifecycle(&result, "skill install", output.json || json)
         }
         Commands::Skill {
@@ -2685,38 +2652,26 @@ async fn run_local(
                     dry_run,
                     yes,
                     force,
+                    security_override,
                     output,
                 },
         } => {
             let lifecycle =
                 LifecycleService::new(CopilotAdapter::local(), GhSkill::default(), repository);
             let plan = lifecycle
-                .update(&selector, true, force, false, cancel)
+                .plan_update(&selector, force, security_override.as_deref(), cancel)
                 .await?;
-            if dry_run || plan.status == tasc_core::InstallationStatus::Missing {
-                let mut result = plan;
-                result.dry_run = dry_run;
+            let preview = LifecycleResult::preview(plan.clone());
+            if dry_run {
+                return render_lifecycle(&preview, "skill update", output.json || json);
+            }
+            if !plan.outdated && !plan.modified {
+                let mut result = preview;
+                result.dry_run = false;
                 return render_lifecycle(&result, "skill update", output.json || json);
             }
-            if plan.modified && !force {
-                return lifecycle
-                    .update(&selector, false, false, false, cancel)
-                    .await
-                    .and_then(|result| {
-                        render_lifecycle(&result, "skill update", output.json || json)
-                    });
-            }
-            if plan.status == tasc_core::InstallationStatus::Installed && !plan.outdated {
-                return render_lifecycle(&plan, "skill update", output.json || json);
-            }
-            let approved = if yes {
-                true
-            } else {
-                confirm_plan(&plan, "Apply this update?")?
-            };
-            let result = lifecycle
-                .update(&selector, false, force, approved, cancel)
-                .await?;
+            let approved = approve_lifecycle_plan(&preview, yes, "Apply this update?")?;
+            let result = lifecycle.apply_update(plan, approved, cancel).await?;
             render_lifecycle(&result, "skill update", output.json || json)
         }
         Commands::Skill {
@@ -2936,6 +2891,26 @@ fn confirm_plan(plan: &LifecycleResult, prompt: &str) -> Result<bool, Diagnostic
             "Retry when ready.",
         ))
     }
+}
+
+fn approve_lifecycle_plan(
+    preview: &LifecycleResult,
+    yes: bool,
+    prompt: &str,
+) -> Result<LifecycleApproval, Diagnostic> {
+    let plan = preview.lifecycle_plan.as_ref().ok_or_else(|| {
+        local_error("secure lifecycle approval requires a structured plan".to_string())
+    })?;
+    if !yes && !confirm_plan(preview, prompt)? {
+        return Err(Diagnostic::new(
+            "confirmation_required",
+            "usage",
+            "tasc",
+            "This exact lifecycle plan requires explicit approval.",
+            "Inspect with --dry-run, approve interactively, or pass --yes.",
+        ));
+    }
+    LifecycleApproval::approve(plan)
 }
 
 fn authoring_question(field: &str) -> &'static str {

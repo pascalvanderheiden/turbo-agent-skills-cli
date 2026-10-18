@@ -1,4 +1,7 @@
-use crate::service::{DiscoveredSkill, SkillAdapter, StateRepository};
+use crate::{
+    gh::CandidateFile,
+    service::{DiscoveredSkill, SkillAdapter, StateRepository},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
@@ -13,8 +16,9 @@ use std::{
 use tasc_core::{
     discovery::Diagnostic,
     security::{
-        SecurityArtifact, SecurityCategory, SecurityCheckStatus, SecurityEvidence, SecurityFinding,
-        SecurityPolicy, SecuritySeverity, SecuritySkillSnapshot, SecuritySuppression,
+        LifecycleSecurityEvidence, SecurityArtifact, SecurityCategory, SecurityCheckStatus,
+        SecurityEvidence, SecurityFinding, SecurityPolicy, SecurityRequirementEvidence,
+        SecurityRequirementStatus, SecuritySeverity, SecuritySkillSnapshot, SecuritySuppression,
         SecurityUnavailableCheck, SecurityUnsuppression,
     },
     Installation, LocalState, SkillIdentity, SourceRevision, LOCAL_STATE_VERSION,
@@ -698,6 +702,174 @@ struct ContentFile {
     relative_path: String,
     bytes: Vec<u8>,
     executable: bool,
+}
+
+pub fn inspect_source_candidate(
+    identity: &SkillIdentity,
+    revision: SourceRevision,
+    files: Vec<CandidateFile>,
+    unavailable_reason: Option<String>,
+) -> LifecycleSecurityEvidence {
+    let mut diagnostics = Vec::new();
+    let mut complete = unavailable_reason.is_none();
+    if let Some(reason) = &unavailable_reason {
+        diagnostics.push(reason.clone());
+    }
+    let mut total = 0_u64;
+    let mut content_files = Vec::new();
+    if files.len() > MAX_SKILL_FILES {
+        diagnostics.push(format!(
+            "candidate contains more than the {MAX_SKILL_FILES}-file inspection limit"
+        ));
+        complete = false;
+    }
+    for file in files.into_iter().take(MAX_SKILL_FILES) {
+        if file.path.is_empty()
+            || Path::new(&file.path)
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            diagnostics.push("candidate contains an unsafe file path".to_string());
+            complete = false;
+            continue;
+        }
+        if total.saturating_add(file.bytes.len() as u64) > MAX_SKILL_BYTES {
+            diagnostics.push(format!(
+                "candidate exceeds the {} MiB inspection limit",
+                MAX_SKILL_BYTES / (1024 * 1024)
+            ));
+            complete = false;
+            break;
+        }
+        total += file.bytes.len() as u64;
+        content_files.push(ContentFile {
+            relative_path: file.path,
+            bytes: file.bytes,
+            executable: file.executable,
+        });
+    }
+    content_files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    if !content_files
+        .iter()
+        .any(|file| file.relative_path == "SKILL.md")
+    {
+        diagnostics.push("candidate does not contain its selected SKILL.md".to_string());
+        complete = false;
+    }
+    let digest = content_digest(&content_files);
+    let mut findings = analyze_content_files(
+        identity,
+        &revision,
+        &digest,
+        content_files,
+        &mut diagnostics,
+        &mut complete,
+    );
+    findings.sort_by(|left, right| left.id.cmp(&right.id));
+    LifecycleSecurityEvidence {
+        policy: SecurityPolicy {
+            fail_on: Some(SecuritySeverity::High),
+            minimum_confidence: 90,
+        },
+        source_revision: revision,
+        content_digest: Some(digest),
+        required_checks: vec![SecurityRequirementEvidence {
+            name: "static_candidate_content".to_string(),
+            status: if complete {
+                SecurityRequirementStatus::Complete
+            } else if unavailable_reason.is_some() {
+                SecurityRequirementStatus::Unavailable
+            } else {
+                SecurityRequirementStatus::Inconclusive
+            },
+            reason: (!complete).then(|| {
+                unavailable_reason.clone().unwrap_or_else(|| {
+                    "Candidate content could not be inspected completely within policy bounds."
+                        .to_string()
+                })
+            }),
+        }],
+        findings,
+        diagnostics,
+    }
+}
+
+fn analyze_content_files(
+    identity: &SkillIdentity,
+    source_revision: &SourceRevision,
+    digest: &str,
+    content_files: Vec<ContentFile>,
+    diagnostics: &mut Vec<String>,
+    complete: &mut bool,
+) -> Vec<SecurityFinding> {
+    let source_revision = Some(source_revision.clone());
+    let mut findings = Vec::new();
+    for file in content_files {
+        if file.bytes.contains(&0) {
+            diagnostics.push(format!(
+                "skipped binary file '{}' during text analysis",
+                file.relative_path
+            ));
+            *complete = false;
+            continue;
+        }
+        let text = String::from_utf8_lossy(&file.bytes);
+        let mut private_key_block = false;
+        for (index, line) in text.lines().enumerate() {
+            let line_number = index + 1;
+            let lower = line.to_ascii_lowercase();
+            if lower.contains("-----begin") && lower.contains("private key-----") {
+                private_key_block = true;
+            }
+            let sanitized = redact_possible_secrets(line);
+            for detection in detect_line(&lower, line) {
+                let mut finding = make_finding(
+                    &identity.id,
+                    &file.relative_path,
+                    line_number,
+                    &detection,
+                    &sanitized,
+                    &source_revision,
+                    digest,
+                );
+                if private_key_block {
+                    finding.evidence[0].excerpt = "[REDACTED PRIVATE KEY MATERIAL]".to_string();
+                    finding.category = SecurityCategory::ExposedSecret;
+                    finding.detector = "private_key_material".to_string();
+                    finding.rationale = "A private key material block is present.".to_string();
+                }
+                findings.push(finding);
+            }
+            if private_key_block && lower.contains("-----end") && lower.contains("private key-----")
+            {
+                private_key_block = false;
+            }
+        }
+        if file.executable {
+            let detection = Detection {
+                category: SecurityCategory::RiskyExecutableContent,
+                detector: "executable_file".to_string(),
+                severity: SecuritySeverity::Medium,
+                confidence: 92,
+                rationale:
+                    "This skill resource is marked executable and may run when invoked externally."
+                        .to_string(),
+                recommendation:
+                    "Review the script in the selected Skill Workspace; TASC never executes it."
+                        .to_string(),
+            };
+            findings.push(make_finding(
+                &identity.id,
+                &file.relative_path,
+                1,
+                &detection,
+                "[executable file]",
+                &source_revision,
+                digest,
+            ));
+        }
+    }
+    findings
 }
 
 fn inspect_skill(skill: &SelectedSkill) -> Inspection {

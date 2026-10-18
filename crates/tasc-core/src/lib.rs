@@ -82,6 +82,8 @@ pub struct LocalState {
     pub watchlists: Vec<Watchlist>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tracking_cohorts: Vec<TrackingCohort>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub security_overrides: Vec<security::SecurityOverrideAudit>,
 }
 
 impl Default for LocalState {
@@ -94,6 +96,7 @@ impl Default for LocalState {
             sources: Vec::new(),
             watchlists: Vec::new(),
             tracking_cohorts: Vec::new(),
+            security_overrides: Vec::new(),
         }
     }
 }

@@ -91,6 +91,7 @@ fn approval_tokens_bind_to_the_current_plan_and_are_single_use() {
         target: "project".to_string(),
         revision: Some("abc123".to_string()),
         force: false,
+        security_override_reason: None,
         state_fingerprint: "before".to_string(),
     };
     let mut session = AgentSession::default();

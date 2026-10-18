@@ -1607,7 +1607,7 @@ fn lifecycle_plans_protect_modified_content_and_record_recoverable_state() {
         .to_string();
     assert_eq!(
         installed["result"]["installation"]["source_revision"],
-        "tree-install"
+        "0123456789abcdef0123456789abcdef01234567"
     );
     assert_eq!(
         installed["result"]["installation"]["target_id"],
@@ -1632,7 +1632,7 @@ fn lifecycle_plans_protect_modified_content_and_record_recoverable_state() {
     let updated: serde_json::Value = serde_json::from_slice(&updated.stdout).unwrap();
     assert_eq!(
         updated["result"]["installation"]["source_revision"],
-        "tree-updated"
+        "1123456789abcdef0123456789abcdef01234568"
     );
 
     let skill_file = directory.join(".github/skills/review/SKILL.md");
@@ -1663,7 +1663,7 @@ fn lifecycle_plans_protect_modified_content_and_record_recoverable_state() {
     assert!(update_plan.status.success());
     let update_plan: serde_json::Value = serde_json::from_slice(&update_plan.stdout).unwrap();
     assert_eq!(update_plan["result"]["modified"], true);
-    assert_eq!(update_plan["result"]["outdated"], true);
+    assert_eq!(update_plan["result"]["outdated"], false);
     assert_eq!(update_plan["result"]["dryRun"], true);
     assert!(fs::read_to_string(&skill_file)
         .unwrap()
@@ -1693,7 +1693,7 @@ fn lifecycle_plans_protect_modified_content_and_record_recoverable_state() {
     let recovered: serde_json::Value = serde_json::from_slice(&recovered.stdout).unwrap();
     assert_eq!(
         recovered["result"]["installation"]["source_revision"],
-        "tree-updated"
+        "1123456789abcdef0123456789abcdef01234568"
     );
     assert!(fs::read_to_string(&skill_file)
         .unwrap()
@@ -1728,7 +1728,7 @@ fn lifecycle_plans_protect_modified_content_and_record_recoverable_state() {
     assert!(!failed.status.success());
     let inventory = invoke(&["skill", "list", "--json"]);
     let inventory: serde_json::Value = serde_json::from_slice(&inventory.stdout).unwrap();
-    assert_eq!(inventory["items"][0]["status"], "failed");
+    assert_eq!(inventory["items"][0]["tracked"], false);
 
     let force_without_confirmation = invoke(&[
         "skill",
@@ -1768,6 +1768,185 @@ fn lifecycle_plans_protect_modified_content_and_record_recoverable_state() {
     let missing = invoke(&["skill", "list", "--json"]);
     let missing: serde_json::Value = serde_json::from_slice(&missing.stdout).unwrap();
     assert_eq!(missing["items"][0]["status"], "missing");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn secure_lifecycle_plans_exact_revision_and_requires_finding_approval() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = test_dir();
+    fs::create_dir_all(directory.join(".git")).unwrap();
+    let gh = directory.join("gh");
+    fs::write(&gh, include_str!("../../tasc-agent/tests/fixtures/gh.sh")).unwrap();
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(directory.join("gh.mode"), "security-warning\n").unwrap();
+    fs::write(
+        directory.join("gh.search.json"),
+        include_str!("../../tasc-agent/tests/fixtures/search.json"),
+    )
+    .unwrap();
+    let state_path = directory.join("state/state.json");
+    let invoke = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_tasc"))
+            .args(args)
+            .current_dir(&directory)
+            .env("PATH", &directory)
+            .env("HOME", directory.join("home"))
+            .env("TASC_STATE_PATH", &state_path)
+            .output()
+            .unwrap()
+    };
+    let args = [
+        "skill",
+        "install",
+        "review",
+        "--source",
+        "alpha/skills",
+        "--dry-run",
+        "--json",
+    ];
+    let dry_run = invoke(&args);
+    assert!(
+        dry_run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dry_run.stderr)
+    );
+    let dry_run: serde_json::Value = serde_json::from_slice(&dry_run.stdout).unwrap();
+    let plan = &dry_run["result"]["lifecyclePlan"];
+    assert_eq!(plan["profile"]["scope"], "user");
+    assert_eq!(plan["scope"], "project");
+    assert!(plan["target"]["path"]
+        .as_str()
+        .unwrap()
+        .ends_with(".github/skills"));
+    assert_eq!(
+        plan["sourceRevision"]["value"],
+        "0123456789abcdef0123456789abcdef01234567"
+    );
+    assert_eq!(plan["security"]["requiredChecks"][0]["status"], "complete");
+    assert_eq!(plan["requiredApproval"], "security_findings");
+    assert!(plan["security"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| finding["detector"] == "download_pipe_to_shell"));
+    assert!(!state_path.exists());
+    assert!(!directory.join(".github/skills/review").exists());
+
+    let denied = invoke(&["skill", "install", "review", "--source", "alpha/skills"]);
+    assert_eq!(denied.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("confirmation_required"));
+    assert!(!state_path.exists());
+    assert!(!directory.join(".github/skills/review").exists());
+
+    let approved = invoke(&[
+        "skill",
+        "install",
+        "review",
+        "--source",
+        "alpha/skills",
+        "--yes",
+        "--json",
+    ]);
+    assert!(
+        approved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&approved.stderr)
+    );
+    let inventory = invoke(&["skill", "list", "--json"]);
+    let inventory: serde_json::Value = serde_json::from_slice(&inventory.stdout).unwrap();
+    assert_eq!(inventory["items"][0]["tracked"], true);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn secure_lifecycle_fails_closed_and_audits_one_operation_override() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = test_dir();
+    fs::create_dir_all(directory.join(".git")).unwrap();
+    let gh = directory.join("gh");
+    fs::write(&gh, include_str!("../../tasc-agent/tests/fixtures/gh.sh")).unwrap();
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(directory.join("gh.mode"), "security-inconclusive\n").unwrap();
+    fs::write(
+        directory.join("gh.search.json"),
+        include_str!("../../tasc-agent/tests/fixtures/search.json"),
+    )
+    .unwrap();
+    let state_path = directory.join("state/state.json");
+    let invoke = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_tasc"))
+            .args(args)
+            .current_dir(&directory)
+            .env("PATH", &directory)
+            .env("HOME", directory.join("home"))
+            .env("TASC_STATE_PATH", &state_path)
+            .output()
+            .unwrap()
+    };
+
+    let dry_run = invoke(&[
+        "skill",
+        "install",
+        "review",
+        "--source",
+        "alpha/skills",
+        "--dry-run",
+        "--json",
+    ]);
+    assert!(dry_run.status.success());
+    let dry_run: serde_json::Value = serde_json::from_slice(&dry_run.stdout).unwrap();
+    let plan = &dry_run["result"]["lifecyclePlan"];
+    assert_eq!(
+        plan["security"]["requiredChecks"][0]["status"],
+        "unavailable"
+    );
+    assert_eq!(plan["requiredApproval"], "security_override");
+
+    let blocked = invoke(&[
+        "skill",
+        "install",
+        "review",
+        "--source",
+        "alpha/skills",
+        "--yes",
+    ]);
+    assert_eq!(blocked.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("security_override_required"));
+    assert!(!state_path.exists());
+    assert!(!directory.join(".github/skills/review").exists());
+
+    let approved = invoke(&[
+        "skill",
+        "install",
+        "review",
+        "--source",
+        "alpha/skills",
+        "--security-override",
+        "Tree API truncated; reviewed exact commit out of band.",
+        "--yes",
+        "--json",
+    ]);
+    assert!(
+        approved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&approved.stderr)
+    );
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(state["installations"].as_array().unwrap().len(), 1);
+    assert_eq!(state["security_overrides"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        state["security_overrides"][0]["reason"],
+        "Tree API truncated; reviewed exact commit out of band."
+    );
+    assert_eq!(
+        state["security_overrides"][0]["sourceRevision"]["value"],
+        "0123456789abcdef0123456789abcdef01234567"
+    );
     fs::remove_dir_all(directory).unwrap();
 }
 

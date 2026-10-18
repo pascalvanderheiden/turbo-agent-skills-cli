@@ -1,3 +1,5 @@
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use serde::Deserialize;
 use std::{
     collections::BTreeMap,
     path::PathBuf,
@@ -66,8 +68,29 @@ pub struct UpdatePlan {
     pub rendered_text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateFile {
+    pub path: String,
+    pub bytes: Vec<u8>,
+    pub executable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceCandidate {
+    pub revision: SourceRevision,
+    pub files: Vec<CandidateFile>,
+    pub unavailable_reason: Option<String>,
+}
+
 #[allow(async_fn_in_trait)]
 pub trait GhSkillLifecycleGateway {
+    async fn candidate(
+        &self,
+        repository: &str,
+        path: &str,
+        revision: Option<&str>,
+        cancel: &Cancellation,
+    ) -> Result<SourceCandidate, Diagnostic>;
     async fn install(
         &self,
         repository: &str,
@@ -158,9 +181,11 @@ impl GhSkill {
                 return Err(
                     if status.code() == Some(4)
                         || text.contains("gh auth login")
-                        || text.contains("authentication")
+                        || text.contains("auth required")
+                        || text.contains("login required")
                         || text.contains("http 401")
                         || text.contains("gh_token")
+                        || text.contains("gh token")
                     {
                         Diagnostic::new(
                             "gh_authentication",
@@ -396,6 +421,169 @@ impl GhSkillGateway for GhSkill {
 }
 
 impl GhSkillLifecycleGateway for GhSkill {
+    async fn candidate(
+        &self,
+        repository: &str,
+        path: &str,
+        revision: Option<&str>,
+        cancel: &Cancellation,
+    ) -> Result<SourceCandidate, Diagnostic> {
+        #[derive(Deserialize)]
+        struct Tree {
+            truncated: bool,
+            tree: Vec<TreeEntry>,
+        }
+
+        #[derive(Deserialize)]
+        struct TreeEntry {
+            path: String,
+            mode: String,
+            #[serde(rename = "type")]
+            kind: String,
+            sha: String,
+            size: Option<u64>,
+        }
+
+        let endpoint = format!("repos/{repository}/commits");
+        let mut args = vec![
+            "api",
+            endpoint.as_str(),
+            "--method",
+            "GET",
+            "--field",
+            "per_page=1",
+        ];
+        let revision_field = revision.map(|revision| format!("sha={revision}"));
+        if let Some(revision_field) = &revision_field {
+            args.extend(["--field", revision_field.as_str()]);
+        }
+        args.extend(["--jq", ".[0].sha // empty"]);
+        let revision_output = self.execute(&args, cancel).await?;
+        let revision = revision_output.trim();
+        if !matches!(revision.len(), 40 | 64)
+            || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(operational(
+                "security_revision_unavailable",
+                "The exact candidate Source Revision could not be resolved.",
+            ));
+        }
+        let revision = revision.to_ascii_lowercase();
+        let tree_endpoint = format!("repos/{repository}/git/trees/{revision}?recursive=1");
+        let tree_output = match self.execute(&["api", tree_endpoint.as_str()], cancel).await {
+            Ok(output) => output,
+            Err(error) => {
+                return Ok(SourceCandidate {
+                    revision: SourceRevision::commit(revision),
+                    files: Vec::new(),
+                    unavailable_reason: Some(format!("{}: {}", error.code, error.message)),
+                })
+            }
+        };
+        let tree: Tree = match serde_json::from_str(&tree_output) {
+            Ok(tree) => tree,
+            Err(_) => {
+                return Ok(SourceCandidate {
+                    revision: SourceRevision::commit(revision),
+                    files: Vec::new(),
+                    unavailable_reason: Some(
+                        "GitHub CLI returned invalid candidate tree JSON.".to_string(),
+                    ),
+                })
+            }
+        };
+        if tree.truncated {
+            return Ok(SourceCandidate {
+                revision: SourceRevision::commit(revision),
+                files: Vec::new(),
+                unavailable_reason: Some(
+                    "The candidate source tree was truncated and cannot be checked completely."
+                        .to_string(),
+                ),
+            });
+        }
+        let root = path.strip_suffix("/SKILL.md").ok_or_else(|| {
+            operational(
+                "security_check_failed",
+                "The candidate skill path must end in SKILL.md.",
+            )
+        })?;
+        let prefix = format!("{root}/");
+        let mut entries = tree
+            .tree
+            .into_iter()
+            .filter(|entry| entry.kind == "blob" && entry.path.starts_with(&prefix))
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.path.cmp(&right.path));
+        if !entries.iter().any(|entry| entry.path == path) {
+            return Ok(SourceCandidate {
+                revision: SourceRevision::commit(revision),
+                files: Vec::new(),
+                unavailable_reason: Some(
+                    "The exact candidate revision does not contain the selected SKILL.md."
+                        .to_string(),
+                ),
+            });
+        }
+        if entries.len() > 5_000
+            || entries
+                .iter()
+                .try_fold(0_u64, |total, entry| {
+                    total.checked_add(entry.size.unwrap_or_default())
+                })
+                .is_none_or(|total| total > 50 * 1024 * 1024)
+        {
+            return Ok(SourceCandidate {
+                revision: SourceRevision::commit(revision),
+                files: Vec::new(),
+                unavailable_reason: Some(
+                    "The candidate exceeds the bounded Security Check limits.".to_string(),
+                ),
+            });
+        }
+        let mut files = Vec::with_capacity(entries.len());
+        let mut unavailable_reason = None;
+        for entry in entries {
+            let blob_endpoint = format!("repos/{repository}/git/blobs/{}", entry.sha);
+            let encoded = match self
+                .execute(&["api", blob_endpoint.as_str(), "--jq", ".content"], cancel)
+                .await
+            {
+                Ok(encoded) => encoded,
+                Err(error) => {
+                    unavailable_reason = Some(format!("{}: {}", error.code, error.message));
+                    continue;
+                }
+            };
+            let compact = encoded
+                .bytes()
+                .filter(|byte| !byte.is_ascii_whitespace())
+                .collect::<Vec<_>>();
+            let bytes = match BASE64.decode(compact) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    unavailable_reason =
+                        Some("GitHub CLI returned invalid candidate blob content.".to_string());
+                    continue;
+                }
+            };
+            files.push(CandidateFile {
+                path: entry
+                    .path
+                    .strip_prefix(&prefix)
+                    .unwrap_or(&entry.path)
+                    .to_string(),
+                bytes,
+                executable: entry.mode == "100755",
+            });
+        }
+        Ok(SourceCandidate {
+            revision: SourceRevision::commit(revision),
+            files,
+            unavailable_reason,
+        })
+    }
+
     async fn install(
         &self,
         repository: &str,
