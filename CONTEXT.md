@@ -52,6 +52,14 @@ _Avoid_: Version, timestamp
 A record connecting a Skill Identity to an assistant adapter and local target, including lifecycle state and observed local changes.
 _Avoid_: Skill, deployment
 
+**Inventory Projection**:
+A human- and machine-readable view of one or more Skill Identity installations, watched interests, and their evidence. It exposes stable action identifiers separately from display row numbers, and keeps lifecycle, tracking, and watch state distinct.
+_Avoid_: Skill list, registry
+
+**Provenance Evidence**:
+The source evidence associated with an Installation or watched interest, normalized to GitHub repository, marketplace/plugin, local workspace, bundled/first-party, or unknown, with confidence recorded as verified, probable, inferred, or unavailable.
+_Avoid_: Marketplace flag, origin guess
+
 **Untracked Installation**:
 An Agent Skill installation discovered through an adapter but not yet represented by an Installation in Local State.
 _Avoid_: Unknown skill, unmanaged file
