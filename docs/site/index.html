@@ -68,9 +68,11 @@
       <pre><code>curl -fsSL https://raw.githubusercontent.com/pascalvanderheiden/turbo-agent-skills-cli/v0.1.0/install.sh | bash</code></pre>
       <pre><code>iex (irm https://raw.githubusercontent.com/pascalvanderheiden/turbo-agent-skills-cli/v0.1.0/install.ps1)</code></pre>
       <p>First run:</p>
-      <pre><code>tasc setup
+      <pre><code>tasc --banner
+tasc setup
 tasc skill list
 tasc state status</code></pre>
+      <p><code>tasc --banner</code> plays the opt-in animated Turbo banner. It uses ANSI cursor redraws only in an interactive terminal and prints a safe static frame when piped.</p>
       <p><code>tasc setup</code> offers the optional first-party Command Skill. It never installs it without your choice.</p>
       <h2 id="common-tasks">Common tasks</h2>
       <ul>
