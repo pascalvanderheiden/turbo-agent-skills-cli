@@ -165,6 +165,13 @@ impl<A: SkillAdapter, G: GhSkillLifecycleGateway, R: StateRepository> LifecycleS
                             None,
                         );
                         replace_installation(&mut state, installation.clone());
+                        state.watchlists.retain(|watchlist| {
+                            watchlist.source.locator != identity.source
+                                || watchlist.path.as_deref().map_or(true, |path| {
+                                    path.trim_end_matches("/SKILL.md")
+                                        != identity.relative_path.trim_end_matches("/SKILL.md")
+                                })
+                        });
                         if let Err(error) = self.repository.save(&state) {
                             return Err(state_error(error));
                         }

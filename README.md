@@ -117,9 +117,19 @@ tasc skill remove <installation-id> --yes
 ```
 
 `skill list` discovers skills with a `SKILL.md` from `.github/skills` in the
-current directory and `~/.copilot/skills`. Local State is stored at
-`$XDG_STATE_HOME/tasc/state.json` or `~/.local/state/tasc/state.json`; set
-`TASC_STATE_PATH` to use another file.
+current directory and `~/.copilot/skills`. It projects a stable action ID,
+lifecycle, Tracking, Watchlist, scope, source, provenance evidence, and a
+description excerpt for each Installation or watched-only interest. Use
+`--sort`, `--offset`, `--limit`, `--status`, `--scope`, `--assistant`,
+`--provenance`, `--tracking`, `--watch`, or `--detail <stable-id>` to select
+rows; display row numbers are local to the current view.
+
+Project operations select `.tasc/state.json` when that project Profile exists;
+otherwise they use the user Profile at `$XDG_STATE_HOME/tasc/state.json` or
+`~/.local/state/tasc/state.json`. Profiles are not merged. Set
+`TASC_STATE_PATH` to select a custom state file. Existing version-1 Local State
+is migrated atomically to version 2 when loaded; malformed or unsupported
+versions are left untouched.
 
 ### Conversational agent
 
@@ -161,7 +171,7 @@ Source commands manage TASC metadata, not a second GitHub catalog. `source show`
 inspects that metadata; search discovers available skills and preview inspects
 their contents. Adding a source does not scope subsequent global searches.
 Source add requires `--yes` to write; `--dry-run` returns the normalized record
-without writing. Existing version-1 Local State files remain readable.
+without writing.
 
 Discovery results use a versioned envelope with `schemaVersion`, `command`,
 `result`, and `warnings`. Both `--json` and `--format json` select JSON. Preview

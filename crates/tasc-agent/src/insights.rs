@@ -1462,6 +1462,7 @@ mod tests {
                 path: "/skills/a".to_string(),
             },
             path: "/skills/a".to_string(),
+            description: "An example skill.".to_string(),
             source_revision: None,
             content_digest: "same-digest".to_string(),
         }];
@@ -1572,6 +1573,7 @@ mod tests {
                 path: "/skills/a-one".to_string(),
             },
             path: "/skills/a-one".to_string(),
+            description: "An example skill.".to_string(),
             source_revision: None,
             content_digest: "new-digest".to_string(),
         }];

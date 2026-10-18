@@ -16,7 +16,7 @@ use tasc_core::{
     discovery::{Diagnostic, Envelope},
     insights::InsightStatus,
     security::SecuritySeverity,
-    Inventory, SkillIdentity, StateStatus,
+    Inventory, InventoryQuery, SkillIdentity, StateStatus,
 };
 
 mod agent;
@@ -368,7 +368,7 @@ enum SkillCommands {
         output: JsonOutput,
     },
     /// List discovered skills and whether they are tracked in Local State.
-    List(JsonOutput),
+    List(InventoryArgs),
     /// Explicitly record a discovered installation without changing its files.
     Adopt { id: String },
 }
@@ -454,6 +454,32 @@ struct JsonOutput {
     json: bool,
 }
 
+#[derive(Args)]
+struct InventoryArgs {
+    #[arg(long)]
+    status: Option<String>,
+    #[arg(long)]
+    scope: Option<String>,
+    #[arg(long)]
+    assistant: Option<String>,
+    #[arg(long)]
+    provenance: Option<String>,
+    #[arg(long)]
+    tracking: Option<String>,
+    #[arg(long)]
+    watch: Option<String>,
+    #[arg(long, value_name = "FIELD")]
+    sort: Option<String>,
+    #[arg(long, default_value_t = 0)]
+    offset: usize,
+    #[arg(long)]
+    limit: Option<usize>,
+    #[arg(long)]
+    detail: Option<String>,
+    #[command(flatten)]
+    output: JsonOutput,
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let cli = Cli::parse();
@@ -472,6 +498,9 @@ async fn main() {
             Commands::Skill {
                 command: SkillCommands::Preview { output, .. },
             } => output.json,
+            Commands::Skill {
+                command: SkillCommands::List(args),
+            } => args.output.json,
             Commands::Skill {
                 command:
                     SkillCommands::Create { output, .. }
@@ -655,7 +684,7 @@ async fn run(
     command_name: &str,
     cancel: &Cancellation,
 ) -> Result<(), Diagnostic> {
-    let state_path = FsStateRepository::default_path().map_err(local_error)?;
+    let (state_path, _) = FsStateRepository::selected_profile_path().map_err(local_error)?;
     let discovery = DiscoveryService::new(
         GhSkill::default(),
         FsStateRepository::new(state_path.clone()),
@@ -1319,12 +1348,26 @@ async fn run_local(
             )
         }
         Commands::Skill {
-            command: SkillCommands::List(output),
-        } => render_inventory(
-            &service.inventory().map_err(local_error)?,
-            output.json || json,
-        )
-        .map_err(local_error),
+            command: SkillCommands::List(args),
+        } => {
+            let mut inventory = service.inventory().map_err(local_error)?;
+            inventory.profile = Some(repository.profile());
+            let inventory = inventory
+                .select(&InventoryQuery {
+                    status: args.status,
+                    scope: args.scope,
+                    assistant: args.assistant,
+                    provenance: args.provenance,
+                    tracking: args.tracking,
+                    watch: args.watch,
+                    sort: args.sort,
+                    offset: args.offset,
+                    limit: args.limit,
+                    detail: args.detail,
+                })
+                .map_err(local_error)?;
+            render_inventory(&inventory, args.output.json || json).map_err(local_error)
+        }
         Commands::Skill {
             command: SkillCommands::Adopt { id },
         } => {
@@ -1692,27 +1735,99 @@ fn render_inventory(inventory: &Inventory, json: bool) -> Result<(), String> {
         );
     } else {
         println!("Inventory schema version: {}", inventory.schema_version);
-        println!("Discovered skills: {}", inventory.items.len());
-        for item in &inventory.items {
+        if let Some(profile) = &inventory.profile {
+            println!("Profile: {} ({:?})", profile.id, profile.scope);
+        }
+        println!(
+            "Inventory rows: {} of {} (offset {}, limit {})",
+            inventory.items.len(),
+            inventory.total,
+            inventory.offset,
+            inventory
+                .limit
+                .map_or_else(|| "all".to_string(), |limit| limit.to_string())
+        );
+        for (index, item) in inventory.items.iter().enumerate() {
             println!(
                 "- {} [{}] {}",
                 item.identity.name,
-                if item.tracked { "tracked" } else { "untracked" },
+                if item.kind == "watchlist" {
+                    "watched"
+                } else if item.tracked {
+                    "tracked"
+                } else {
+                    "untracked"
+                },
                 item.identity.id
             );
+            println!("  row: {}", index + 1);
+            println!("  action ID: {}", item.action_id);
+            println!("  kind: {}", item.kind);
+            println!("  tracked: {}", item.tracked);
+            println!(
+                "  lifecycle state: {}",
+                item.lifecycle_state.map_or_else(
+                    || "none".to_string(),
+                    |state| format!("{state:?}").to_lowercase()
+                )
+            );
+            println!("  tracking state: {}", item.tracking_state);
+            println!("  watch state: {}", item.watch_state);
+            println!("  scope: {}", item.scope);
             println!("  source: {}", item.identity.source);
             println!("  relative path: {}", item.identity.relative_path);
-            println!("  installation: {}", item.installation_id);
-            println!("  assistant: {}", item.target.assistant);
-            println!("  target: {}", item.target.id);
-            println!("  target path: {}", item.target.path);
+            if item.installation_id.is_empty() {
+                println!("  installation: none");
+            } else {
+                println!("  installation: {}", item.installation_id);
+            }
+            if let Some(target) = &item.target {
+                println!("  assistant: {}", target.assistant);
+                println!("  target: {}", target.id);
+                println!("  target path: {}", target.path);
+            } else {
+                println!("  assistant: none");
+                println!("  target: none");
+                println!("  target path: none");
+            }
             println!("  path: {}", item.path);
             if let Some(status) = item.status {
-                println!("  status: {status:?}");
+                println!("  status: {}", format!("{status:?}").to_lowercase());
+            } else {
+                println!("  status: none");
             }
             if let Some(revision) = &item.source_revision {
                 println!("  source revision: {revision}");
+            } else {
+                println!("  source revision: none");
             }
+            println!(
+                "  provenance: {}",
+                match item.provenance.kind {
+                    tasc_core::ProvenanceKind::GithubRepository => "github_repository",
+                    tasc_core::ProvenanceKind::MarketplacePlugin => "marketplace_plugin",
+                    tasc_core::ProvenanceKind::LocalWorkspace => "local_workspace",
+                    tasc_core::ProvenanceKind::BundledFirstParty => "bundled_first_party",
+                    tasc_core::ProvenanceKind::Unknown => "unknown",
+                }
+            );
+            println!(
+                "  provenance confidence: {}",
+                match item.provenance.confidence {
+                    tasc_core::ProvenanceConfidence::Verified => "verified",
+                    tasc_core::ProvenanceConfidence::Probable => "probable",
+                    tasc_core::ProvenanceConfidence::Inferred => "inferred",
+                    tasc_core::ProvenanceConfidence::Unavailable => "unavailable",
+                }
+            );
+            if let Some(evidence) = &item.provenance.raw_evidence {
+                println!("  provenance evidence: {evidence}");
+            } else {
+                println!("  provenance evidence: none");
+            }
+            println!("  provenance explanation: {}", item.provenance.explanation);
+            println!("  description excerpt: {}", item.description_excerpt);
+            println!("  description: {}", item.description);
         }
     }
     Ok(())
@@ -1728,6 +1843,11 @@ fn render_status(status: &StateStatus, json: bool) -> Result<(), String> {
     } else {
         println!("Status schema version: {}", status.schema_version);
         println!("Local State version: {}", status.state_version);
+        println!(
+            "Profile: {} ({})",
+            status.profile.id,
+            format!("{:?}", status.profile.scope).to_lowercase()
+        );
         println!("Identities: {}", status.identity_count);
         println!("Adapter targets: {}", status.target_count);
         println!("Installations: {}", status.installation_count);
