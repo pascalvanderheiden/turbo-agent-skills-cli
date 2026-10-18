@@ -40,6 +40,16 @@ class ReleaseTests(unittest.TestCase):
         self.assertLess(guard, publish)
         self.assertLess(publish, verify)
 
+    def test_draft_release_is_resolved_by_id_before_publication(self):
+        workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "release.yml"
+        content = workflow.read_text()
+
+        self.assertIn('releases?per_page=100', content)
+        self.assertIn('TASC_RELEASE_ID', content)
+        self.assertIn('releases/$TASC_RELEASE_ID', content)
+        self.assertNotIn('releases/tags/$GITHUB_REF_NAME" --jq .draft', content)
+        self.assertNotIn('gh release edit "$GITHUB_REF_NAME"', content)
+
     def test_tag_must_be_protected_stable_semver_matching_package(self):
         validate_tag("v0.1.0", "0.1.0", True)
         for tag, version, protected in (
