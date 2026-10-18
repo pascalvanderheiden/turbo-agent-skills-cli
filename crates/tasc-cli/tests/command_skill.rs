@@ -1,22 +1,45 @@
 use std::{
     fs,
-    path::PathBuf,
+    ops::Deref,
+    path::{Path, PathBuf},
     process::{Command, Output},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
-fn test_dir() -> PathBuf {
-    let time = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!(
-        "tasc-command-skill-test-{}-{time}",
-        std::process::id()
-    ))
+static NEXT_TEST_DIR: AtomicUsize = AtomicUsize::new(0);
+
+struct TestDirectory(PathBuf);
+
+impl Deref for TestDirectory {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
-fn run(directory: &PathBuf, state_path: &PathBuf, args: &[&str]) -> Output {
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn test_dir() -> TestDirectory {
+    loop {
+        let directory = std::env::temp_dir().join(format!(
+            "tasc-command-skill-test-{}-{}",
+            std::process::id(),
+            NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::create_dir(&directory) {
+            Ok(()) => return TestDirectory(directory),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("failed to create test directory: {error}"),
+        }
+    }
+}
+
+fn run(directory: &Path, state_path: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_tasc"))
         .args(args)
         .current_dir(directory)
@@ -26,11 +49,27 @@ fn run(directory: &PathBuf, state_path: &PathBuf, args: &[&str]) -> Output {
         .unwrap()
 }
 
+fn assert_success(output: &Output) {
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn assert_exit_code(output: &Output, expected: i32, context: &str) {
+    assert_eq!(
+        output.status.code(),
+        Some(expected),
+        "{context}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn setup_capabilities_and_install_are_explicit_and_first_party_install_is_tracked() {
     let directory = test_dir();
     let state_path = directory.join("state/state.json");
-    fs::create_dir_all(&directory).unwrap();
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/command-skill-parity.json")).unwrap();
     assert_eq!(fixture["surfaces"].as_array().unwrap().len(), 3);
@@ -49,15 +88,14 @@ fn setup_capabilities_and_install_are_explicit_and_first_party_install_is_tracke
         .contains("Use the installed `tasc` executable for every TASC operation."));
 
     let setup = run(&directory, &state_path, &["setup", "--json"]);
-    assert!(setup.status.success());
+    assert_success(&setup);
     let setup: serde_json::Value = serde_json::from_slice(&setup.stdout).unwrap();
     assert_eq!(setup["result"]["commandSkill"]["offered"], true);
     assert_eq!(setup["result"]["commandSkill"]["installed"], false);
     assert!(!directory.join(".github/skills/tasc-command").exists());
     assert!(!state_path.exists());
-
     let capabilities = run(&directory, &state_path, &handshake_args);
-    assert!(capabilities.status.success());
+    assert_success(&capabilities);
     let capabilities: serde_json::Value = serde_json::from_slice(&capabilities.stdout).unwrap();
     assert_eq!(capabilities["schemaVersion"], 1);
     assert_eq!(capabilities["command"], "skill command capabilities");
@@ -78,7 +116,7 @@ fn setup_capabilities_and_install_are_explicit_and_first_party_install_is_tracke
         .map(|value| value.as_str().unwrap())
         .collect::<Vec<_>>();
     let unselected = run(&directory, &state_path, &unselected_args);
-    assert_eq!(unselected.status.code(), Some(2));
+    assert_exit_code(&unselected, 2, "unselected install");
     let diagnostic: serde_json::Value = serde_json::from_slice(&unselected.stderr).unwrap();
     assert_eq!(
         diagnostic["diagnostic"]["code"],
@@ -98,7 +136,7 @@ fn setup_capabilities_and_install_are_explicit_and_first_party_install_is_tracke
         format!("tasc {}", plan_args.join(" "))
     );
     let preview = run(&directory, &state_path, &plan_args);
-    assert!(preview.status.success());
+    assert_success(&preview);
     let preview: serde_json::Value = serde_json::from_slice(&preview.stdout).unwrap();
     assert_eq!(
         preview["result"]["dryRun"],
@@ -125,7 +163,7 @@ fn setup_capabilities_and_install_are_explicit_and_first_party_install_is_tracke
         .map(|value| value.as_str().unwrap())
         .collect::<Vec<_>>();
     let unapproved = run(&directory, &state_path, &approval_args);
-    assert_eq!(unapproved.status.code(), Some(2));
+    assert_exit_code(&unapproved, 2, "unapproved install");
     let diagnostic: serde_json::Value = serde_json::from_slice(&unapproved.stderr).unwrap();
     assert_eq!(
         diagnostic["diagnostic"]["code"],
@@ -151,11 +189,7 @@ fn setup_capabilities_and_install_are_explicit_and_first_party_install_is_tracke
             "--json",
         ],
     );
-    assert!(
-        installed.status.success(),
-        "{}",
-        String::from_utf8_lossy(&installed.stderr)
-    );
+    assert_success(&installed);
     let installed: serde_json::Value = serde_json::from_slice(&installed.stdout).unwrap();
     assert_eq!(installed["result"]["status"], "installed");
     assert_eq!(
@@ -175,7 +209,7 @@ fn setup_capabilities_and_install_are_explicit_and_first_party_install_is_tracke
     );
 
     let inventory = run(&directory, &state_path, &["skill", "list", "--json"]);
-    assert!(inventory.status.success());
+    assert_success(&inventory);
     let inventory: serde_json::Value = serde_json::from_slice(&inventory.stdout).unwrap();
     let command_skill = &inventory["items"][0];
     assert_eq!(command_skill["tracked"], true);
@@ -191,13 +225,12 @@ fn setup_capabilities_and_install_are_explicit_and_first_party_install_is_tracke
         &state_path,
         &["skill", "command", "list", "--json"],
     );
-    assert!(listed.status.success());
+    assert_success(&listed);
     let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
     assert_eq!(
         listed["result"]["installations"].as_array().unwrap().len(),
         1
     );
-    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -205,7 +238,6 @@ fn repair_and_uninstall_refuse_to_overwrite_user_modifications() {
     let directory = test_dir();
     let state_path = directory.join("state/state.json");
     let skill_path = directory.join(".github/skills/tasc-command");
-    fs::create_dir_all(&directory).unwrap();
     let install = run(
         &directory,
         &state_path,
@@ -221,11 +253,7 @@ fn repair_and_uninstall_refuse_to_overwrite_user_modifications() {
             "--json",
         ],
     );
-    assert!(
-        install.status.success(),
-        "{}",
-        String::from_utf8_lossy(&install.stderr)
-    );
+    assert_success(&install);
 
     fs::write(
         skill_path.join("SKILL.md"),
@@ -253,7 +281,7 @@ fn repair_and_uninstall_refuse_to_overwrite_user_modifications() {
                 "--json",
             ],
         );
-        assert_eq!(refused.status.code(), Some(2), "{operation}");
+        assert_exit_code(&refused, 2, operation);
         let diagnostic: serde_json::Value = serde_json::from_slice(&refused.stderr).unwrap();
         assert_eq!(
             diagnostic["diagnostic"]["code"], "modified_command_skill",
@@ -278,11 +306,7 @@ fn repair_and_uninstall_refuse_to_overwrite_user_modifications() {
             "--json",
         ],
     );
-    assert!(
-        repaired.status.success(),
-        "{}",
-        String::from_utf8_lossy(&repaired.stderr)
-    );
+    assert_success(&repaired);
     assert!(skill_path.join("SKILL.md").is_file());
 
     let uninstalled = run(
@@ -300,20 +324,14 @@ fn repair_and_uninstall_refuse_to_overwrite_user_modifications() {
             "--json",
         ],
     );
-    assert!(
-        uninstalled.status.success(),
-        "{}",
-        String::from_utf8_lossy(&uninstalled.stderr)
-    );
+    assert_success(&uninstalled);
     assert!(!skill_path.exists());
-    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
 fn all_supported_requires_an_explicit_opt_in_and_a_detected_adapter() {
     let directory = test_dir();
     let state_path = directory.join("state/state.json");
-    fs::create_dir_all(&directory).unwrap();
 
     let no_detection = run(
         &directory,
@@ -329,7 +347,7 @@ fn all_supported_requires_an_explicit_opt_in_and_a_detected_adapter() {
             "--json",
         ],
     );
-    assert_eq!(no_detection.status.code(), Some(2));
+    assert_exit_code(&no_detection, 2, "install without detected adapters");
     let diagnostic: serde_json::Value = serde_json::from_slice(&no_detection.stderr).unwrap();
     assert_eq!(
         diagnostic["diagnostic"]["code"],
@@ -344,7 +362,7 @@ fn all_supported_requires_an_explicit_opt_in_and_a_detected_adapter() {
             "skill", "command", "adapters", "--scope", "project", "--json",
         ],
     );
-    assert!(detected.status.success());
+    assert_success(&detected);
     let detected: serde_json::Value = serde_json::from_slice(&detected.stdout).unwrap();
     assert_eq!(detected["result"]["adapters"][0]["id"], "copilot");
     assert_eq!(detected["result"]["adapters"][0]["detected"], true);
@@ -363,6 +381,5 @@ fn all_supported_requires_an_explicit_opt_in_and_a_detected_adapter() {
             "--json",
         ],
     );
-    assert!(all_supported.status.success());
-    fs::remove_dir_all(directory).unwrap();
+    assert_success(&all_supported);
 }
