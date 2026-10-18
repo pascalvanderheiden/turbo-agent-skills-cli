@@ -139,6 +139,12 @@ jobs:
             --spec-version 1.5 \
             --override-filename tasc
           mv crates/tasc-cli/tasc.json dist/tasc.cdx.json
+      - name: Package inspectable TASC Command Skill
+        run: |
+          python3 .github/scripts/release.py command-skill \
+            --source-dir skills/tasc-command \
+            --version "$GITHUB_REF_NAME" \
+            --output-dir dist
       - name: Validate release assets and generate checksums
         run: |
           python3 .github/scripts/release.py checksums --directory dist

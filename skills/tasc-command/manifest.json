@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "tasc-command",
+  "version": "0.1.0",
+  "minCliVersion": "0.1.0",
+  "policySemanticsVersion": 1,
+  "capabilities": [
+    "inventory.read",
+    "profile.read",
+    "search",
+    "discover",
+    "lifecycle.plan",
+    "lifecycle.approve",
+    "tracking",
+    "watchlists",
+    "authoring",
+    "evaluation",
+    "consistency",
+    "security.policy",
+    "audit",
+    "statistics",
+    "bundles",
+    "command-skill.lifecycle"
+  ]
+}

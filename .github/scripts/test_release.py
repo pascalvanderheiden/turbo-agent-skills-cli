@@ -6,7 +6,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from release import TARGETS, make_archive, validate_assets, validate_tag, write_checksums
+from release import (
+    TARGETS,
+    make_archive,
+    make_command_skill_archive,
+    validate_assets,
+    validate_tag,
+    write_checksums,
+)
 
 
 class ReleaseTests(unittest.TestCase):
@@ -68,6 +75,26 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(member.uid, 0)
                 self.assertEqual(archive.extractfile(member).read(), b"binary")
 
+    def test_command_skill_archive_is_reproducible_and_matches_release_version(self):
+        skill_directory = Path(__file__).resolve().parents[2] / "skills" / "tasc-command"
+        with tempfile.TemporaryDirectory() as directory:
+            first = make_command_skill_archive(skill_directory, "v0.1.0", directory)
+            first_bytes = first.read_bytes()
+            second = make_command_skill_archive(skill_directory, "v0.1.0", directory)
+
+            self.assertEqual(first_bytes, second.read_bytes())
+            with __import__("tarfile").open(first, "r:gz") as archive:
+                self.assertEqual(
+                   set(archive.getnames()),
+                   {
+                       "tasc-command/SKILL.md",
+                       "tasc-command/manifest.json",
+                       "tasc-command/adapters/copilot.json",
+                   },
+                )
+            with self.assertRaises(ValueError):
+                make_command_skill_archive(skill_directory, "v0.2.0", directory)
+
     def test_asset_validation_requires_all_targets_sbom_and_matching_checksums(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -83,6 +110,11 @@ class ReleaseTests(unittest.TestCase):
             (root / "tasc.cdx.json").write_text(
                 json.dumps({"bomFormat": "CycloneDX", "components": [{"name": "tasc"}]}),
                 encoding="utf-8",
+            )
+            make_command_skill_archive(
+                Path(__file__).resolve().parents[2] / "skills" / "tasc-command",
+                "v0.1.0",
+                root,
             )
             write_checksums(root)
             validate_assets(root, "v0.1.0")
@@ -104,6 +136,11 @@ class ReleaseTests(unittest.TestCase):
             (root / "tasc.cdx.json").write_text(
                 json.dumps({"bomFormat": "CycloneDX", "components": [{"name": "tasc"}]}),
                 encoding="utf-8",
+            )
+            make_command_skill_archive(
+                Path(__file__).resolve().parents[2] / "skills" / "tasc-command",
+                "v0.1.0",
+                root,
             )
             write_checksums(root)
             (root / "tasc-v0.1.0-x86_64-pc-windows-msvc.tar.gz").unlink()

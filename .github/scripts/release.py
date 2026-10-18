@@ -69,6 +69,50 @@ def make_archive(binary, target, version, output_dir):
     return archive
 
 
+def make_command_skill_archive(skill_directory, version, output_dir):
+    if not SEMVER.fullmatch(version):
+        raise ValueError("Command Skill version must be a stable vMAJOR.MINOR.PATCH SemVer")
+    skill_directory = Path(skill_directory)
+    manifest_path = skill_directory / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"missing or invalid Command Skill manifest: {error}") from error
+    if manifest.get("schemaVersion") != 1 or manifest.get("id") != "tasc-command":
+        raise ValueError("Command Skill manifest has an unsupported schema or ID")
+    if manifest.get("version") != version[1:]:
+        raise ValueError(
+            f"Command Skill version {manifest.get('version')} does not match release {version}"
+        )
+    skill_path = skill_directory / "SKILL.md"
+    adapter_path = skill_directory / "adapters" / "copilot.json"
+    if not skill_path.is_file() or not adapter_path.is_file():
+        raise ValueError("Command Skill package is missing SKILL.md or Copilot metadata")
+
+    archive = Path(output_dir) / f"tasc-command-skill-{version}.tar.gz"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    with archive.open("wb") as output:
+        with gzip.GzipFile(filename="", fileobj=output, mode="wb", mtime=0) as compressed:
+            with tarfile.open(fileobj=compressed, mode="w", format=tarfile.GNU_FORMAT) as bundle:
+                for path in sorted(skill_directory.rglob("*")):
+                    if path.is_symlink():
+                        raise ValueError(f"Command Skill package cannot contain symlinks: {path}")
+                    if not path.is_file():
+                        continue
+                    relative = path.relative_to(skill_directory)
+                    info = tarfile.TarInfo(f"tasc-command/{relative.as_posix()}")
+                    info.size = path.stat().st_size
+                    info.mode = 0o644
+                    info.uid = 0
+                    info.gid = 0
+                    info.uname = ""
+                    info.gname = ""
+                    info.mtime = 0
+                    with path.open("rb") as contents:
+                        bundle.addfile(info, contents)
+    return archive
+
+
 def write_checksums(directory):
     directory = Path(directory)
     assets = sorted(
@@ -104,6 +148,21 @@ def validate_assets(directory, version):
         missing = sorted(TARGETS - targets)
         extra = sorted(targets - TARGETS)
         raise ValueError(f"release archive targets mismatch; missing={missing}, extra={extra}")
+
+    command_skill_path = directory / f"tasc-command-skill-{version}.tar.gz"
+    try:
+        with tarfile.open(command_skill_path, "r:gz") as command_skill:
+            names = set(command_skill.getnames())
+            manifest_member = command_skill.extractfile("tasc-command/manifest.json")
+            skill_member = command_skill.extractfile("tasc-command/SKILL.md")
+            adapter_member = command_skill.extractfile("tasc-command/adapters/copilot.json")
+            if not manifest_member or not skill_member or not adapter_member:
+                raise ValueError("Command Skill archive is missing a required package file")
+            manifest = json.load(manifest_member)
+    except (OSError, tarfile.TarError, KeyError, json.JSONDecodeError) as error:
+        raise ValueError(f"missing or invalid Command Skill package: {error}") from error
+    if len(names) != 3 or manifest.get("version") != version.removeprefix("v"):
+        raise ValueError("Command Skill archive contents or version do not match the release")
 
     sbom_path = directory / "tasc.cdx.json"
     try:
@@ -141,6 +200,11 @@ def main():
     package.add_argument("--version", required=True)
     package.add_argument("--output-dir", default="dist")
 
+    command_skill = commands.add_parser("command-skill")
+    command_skill.add_argument("--source-dir", default="skills/tasc-command")
+    command_skill.add_argument("--version", required=True)
+    command_skill.add_argument("--output-dir", default="dist")
+
     checksums = commands.add_parser("checksums")
     checksums.add_argument("--directory", default="dist")
 
@@ -154,6 +218,8 @@ def main():
             validate_tag(args.tag, args.version, args.protected)
         elif args.command == "package":
             print(make_archive(args.binary, args.target, args.version, args.output_dir))
+        elif args.command == "command-skill":
+            print(make_command_skill_archive(args.source_dir, args.version, args.output_dir))
         elif args.command == "checksums":
             print(write_checksums(args.directory))
         else:
