@@ -219,3 +219,15 @@ _Avoid_: Sync, watcher
 **Adapter Target**:
 The coding assistant and local destination associated with an Installation.
 _Avoid_: Platform, deployment target
+
+**Documentation Surface**:
+One of TASC's user-facing documentation entry points: the concise README, the lean landing page, or a versioned detailed guide. The README is the canonical source for the landing page's selected common-use-case content.
+_Avoid_: Duplicate manual copy, API reference only
+
+**Release Artifact**:
+An immutable, versioned distribution output for a supported operating-system and architecture target, accompanied by checksums, software-bill-of-materials data, and build provenance evidence.
+_Avoid_: Unverified binary, mutable download
+
+**Public Delivery**:
+The user-visible path from an activated public repository through verified Release Artifacts, the curl-style installer, and GitHub Pages Documentation Surfaces. Public Delivery is unavailable until the repository settings and release governance prerequisites are enabled.
+_Avoid_: Source checkout, private preview
