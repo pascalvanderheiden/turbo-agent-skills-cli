@@ -7,7 +7,8 @@ use std::{
 };
 use tasc_core::{
     AdapterTarget, Installation, InstallationStatus, Inventory, InventoryItem, LocalState,
-    SkillIdentity, StateStatus, LOCAL_STATE_VERSION,
+    ProfileScope, ProvenanceConfidence, ProvenanceEvidence, ProvenanceKind, SkillIdentity,
+    StateStatus, TascProfile, INVENTORY_SCHEMA_VERSION, LOCAL_STATE_VERSION,
 };
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -19,6 +20,12 @@ pub trait SkillAdapter {
 pub trait StateRepository {
     fn load(&self) -> Result<LocalState, String>;
     fn save(&self, state: &LocalState) -> Result<(), String>;
+    fn profile(&self) -> TascProfile {
+        TascProfile {
+            id: "user".to_string(),
+            scope: ProfileScope::User,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +33,7 @@ pub struct DiscoveredSkill {
     pub identity: SkillIdentity,
     pub target: AdapterTarget,
     pub path: String,
+    pub description: String,
     pub source_revision: Option<String>,
     pub content_digest: String,
 }
@@ -50,7 +58,24 @@ impl<A: SkillAdapter, R: StateRepository> AgentService<A, R> {
     }
 
     fn inventory_for(&self, state: &LocalState) -> Result<Inventory, String> {
-        let discovered = self.adapter.discover()?;
+        let mut discovered = self.adapter.discover()?;
+        discovered.sort_by(|left, right| {
+            (
+                &left.identity.id,
+                &left.target.id,
+                &left.path,
+                &left.content_digest,
+            )
+                .cmp(&(
+                    &right.identity.id,
+                    &right.target.id,
+                    &right.path,
+                    &right.content_digest,
+                ))
+        });
+        discovered.dedup_by(|left, right| {
+            left.identity.id == right.identity.id && left.target.id == right.target.id
+        });
         let mut seen = std::collections::HashSet::new();
         let mut items = Vec::new();
         for skill in discovered {
@@ -71,6 +96,11 @@ impl<A: SkillAdapter, R: StateRepository> AgentService<A, R> {
                     .is_some_and(|digest| digest != &skill.content_digest)
                 {
                     InstallationStatus::Modified
+                } else if matches!(
+                    record.status,
+                    InstallationStatus::Missing | InstallationStatus::Planned
+                ) {
+                    InstallationStatus::Installed
                 } else {
                     record.status
                 }
@@ -79,15 +109,38 @@ impl<A: SkillAdapter, R: StateRepository> AgentService<A, R> {
                 seen.insert(record.id.as_str());
             }
             items.push(InventoryItem {
-                identity: skill.identity,
-                target: skill.target,
+                action_id: installation_id.clone(),
+                kind: "installation".to_string(),
+                identity: skill.identity.clone(),
+                target: Some(skill.target.clone()),
                 installation_id,
                 path: skill.path,
+                scope: installation_scope(&skill.target.path),
                 tracked: installation.is_some(),
+                tracking_state: if installation.is_some() {
+                    "tracked"
+                } else {
+                    "untracked"
+                }
+                .to_string(),
+                watch_state: if watched_exactly(
+                    &state.watchlists,
+                    &skill.identity.source,
+                    &skill.identity.relative_path,
+                ) {
+                    "watched"
+                } else {
+                    "not_watched"
+                }
+                .to_string(),
+                lifecycle_state: Some(status.unwrap_or(InstallationStatus::Installed)),
                 status,
                 source_revision: installation
                     .and_then(|record| record.source_revision.clone())
                     .or(skill.source_revision),
+                provenance: provenance(&skill.identity.source),
+                description_excerpt: InventoryItem::description_excerpt(&skill.description),
+                description: skill.description.clone(),
             });
         }
         for installation in &state.installations {
@@ -108,22 +161,107 @@ impl<A: SkillAdapter, R: StateRepository> AgentService<A, R> {
             else {
                 continue;
             };
+            let description = fs::read_to_string(Path::new(&installation.path).join("SKILL.md"))
+                .ok()
+                .and_then(|contents| frontmatter_value(&contents, "description"))
+                .unwrap_or_default();
             items.push(InventoryItem {
+                action_id: installation.id.clone(),
+                kind: "installation".to_string(),
                 identity: identity.clone(),
-                target: target.clone(),
+                target: Some(target.clone()),
                 installation_id: installation.id.clone(),
                 path: installation.path.clone(),
+                scope: installation_scope(&target.path),
                 tracked: true,
+                tracking_state: "tracked".to_string(),
+                watch_state: if watched_exactly(
+                    &state.watchlists,
+                    &identity.source,
+                    &identity.relative_path,
+                ) {
+                    "watched"
+                } else {
+                    "not_watched"
+                }
+                .to_string(),
+                lifecycle_state: Some(if installation.status == InstallationStatus::Failed {
+                    InstallationStatus::Failed
+                } else {
+                    InstallationStatus::Missing
+                }),
                 status: Some(if installation.status == InstallationStatus::Failed {
                     InstallationStatus::Failed
                 } else {
                     InstallationStatus::Missing
                 }),
                 source_revision: installation.source_revision.clone(),
+                provenance: provenance(&identity.source),
+                description_excerpt: InventoryItem::description_excerpt(&description),
+                description,
             });
         }
+        for watchlist in &state.watchlists {
+            let watched_path = watchlist.path.as_deref();
+            if watched_path.is_some_and(|path| {
+                items.iter().any(|item| {
+                    item.identity.source == watchlist.source.locator
+                        && normalized_skill_path(&item.identity.relative_path)
+                            == normalized_skill_path(path)
+                        && item.lifecycle_state == Some(InstallationStatus::Installed)
+                })
+            }) {
+                continue;
+            }
+            let path = watched_path.unwrap_or_default().to_string();
+            let description = String::new();
+            items.push(InventoryItem {
+                action_id: watchlist.id.clone(),
+                kind: "watchlist".to_string(),
+                identity: SkillIdentity {
+                    id: format!("watchlist:{}", watchlist.id),
+                    name: watched_path
+                        .and_then(|path| Path::new(path).file_name())
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| watchlist.source.locator.clone()),
+                    source: watchlist.source.locator.clone(),
+                    relative_path: path.clone(),
+                },
+                target: None,
+                installation_id: String::new(),
+                path,
+                scope: "profile".to_string(),
+                tracked: false,
+                tracking_state: "not_applicable".to_string(),
+                watch_state: "watched".to_string(),
+                lifecycle_state: None,
+                status: None,
+                source_revision: watchlist
+                    .last_observed_revision
+                    .as_ref()
+                    .map(|revision| revision.value.clone()),
+                provenance: provenance(&watchlist.source.locator),
+                description_excerpt: InventoryItem::description_excerpt(&description),
+                description,
+            });
+        }
+        items.sort_by(|left, right| {
+            inventory_priority(left)
+                .cmp(&inventory_priority(right))
+                .then_with(|| {
+                    left.identity
+                        .name
+                        .to_lowercase()
+                        .cmp(&right.identity.name.to_lowercase())
+                })
+                .then_with(|| left.action_id.cmp(&right.action_id))
+        });
         Ok(Inventory {
-            schema_version: LOCAL_STATE_VERSION,
+            schema_version: INVENTORY_SCHEMA_VERSION,
+            profile: None,
+            total: items.len(),
+            offset: 0,
+            limit: None,
             items,
         })
     }
@@ -184,11 +322,20 @@ impl<A: SkillAdapter, R: StateRepository> AgentService<A, R> {
         Ok(StateStatus {
             schema_version: LOCAL_STATE_VERSION,
             state_version: state.version,
+            profile: self.repository.profile(),
             identity_count: state.identities.len(),
             target_count: state.targets.len(),
             installation_count: state.installations.len(),
-            discovered_count: inventory.items.len(),
-            untracked_count: inventory.items.iter().filter(|item| !item.tracked).count(),
+            discovered_count: inventory
+                .items
+                .iter()
+                .filter(|item| item.kind == "installation")
+                .count(),
+            untracked_count: inventory
+                .items
+                .iter()
+                .filter(|item| item.kind == "installation" && !item.tracked)
+                .count(),
         })
     }
 }
@@ -201,6 +348,73 @@ fn validate_state_version(state: &LocalState) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn installation_scope(target_path: &str) -> String {
+    let path = Path::new(target_path);
+    if std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .is_some_and(|home| path.starts_with(PathBuf::from(home).join(".copilot").join("skills")))
+    {
+        "user".to_string()
+    } else if std::env::current_dir()
+        .ok()
+        .is_some_and(|current| path.starts_with(current.join(".github").join("skills")))
+    {
+        "project".to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
+fn watched_exactly(watchlists: &[tasc_core::Watchlist], source: &str, relative_path: &str) -> bool {
+    watchlists.iter().any(|watchlist| {
+        watchlist.source.locator == source
+            && watchlist.path.as_deref().is_some_and(|path| {
+                normalized_skill_path(path) == normalized_skill_path(relative_path)
+            })
+    })
+}
+
+fn normalized_skill_path(path: &str) -> &str {
+    path.trim_end_matches("/SKILL.md")
+}
+
+fn provenance(source: &str) -> ProvenanceEvidence {
+    if source.starts_with("https://github.com/") {
+        ProvenanceEvidence {
+            kind: ProvenanceKind::GithubRepository,
+            confidence: ProvenanceConfidence::Probable,
+            raw_evidence: Some(source.to_string()),
+            explanation: "GitHub repository declared by the skill source metadata.".to_string(),
+        }
+    } else if source.starts_with("file:") {
+        ProvenanceEvidence {
+            kind: ProvenanceKind::LocalWorkspace,
+            confidence: ProvenanceConfidence::Inferred,
+            raw_evidence: Some(source.to_string()),
+            explanation: "Local file source indicates a workspace installation.".to_string(),
+        }
+    } else {
+        ProvenanceEvidence {
+            kind: ProvenanceKind::Unknown,
+            confidence: ProvenanceConfidence::Unavailable,
+            raw_evidence: Some(source.to_string()),
+            explanation: "No supported provenance evidence was available.".to_string(),
+        }
+    }
+}
+
+fn inventory_priority(item: &InventoryItem) -> u8 {
+    match item.lifecycle_state {
+        Some(InstallationStatus::Failed | InstallationStatus::Missing) => 0,
+        Some(InstallationStatus::Modified | InstallationStatus::Outdated) => 1,
+        Some(InstallationStatus::Unverified | InstallationStatus::Planned) => 2,
+        Some(InstallationStatus::Installed) if !item.tracked => 3,
+        Some(InstallationStatus::Installed) => 4,
+        None if item.watch_state == "watched" => 5,
+        None => 6,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -341,6 +555,7 @@ impl SkillAdapter for CopilotAdapter {
                     identity,
                     target: target.clone(),
                     path: directory.to_string_lossy().into_owned(),
+                    description: frontmatter_value(&contents, "description").unwrap_or_default(),
                     source_revision,
                     content_digest,
                 });
@@ -538,9 +753,68 @@ impl FsStateRepository {
             .join("tasc")
             .join("state.json"))
     }
+
+    pub fn selected_profile_path() -> Result<(PathBuf, TascProfile), String> {
+        if let Some(path) = std::env::var_os("TASC_STATE_PATH") {
+            return Ok((
+                PathBuf::from(path),
+                TascProfile {
+                    id: "custom".to_string(),
+                    scope: ProfileScope::User,
+                },
+            ));
+        }
+        if let Ok(current_dir) = std::env::current_dir() {
+            for directory in current_dir.ancestors() {
+                let path = directory.join(".tasc").join("state.json");
+                if path.is_file() {
+                    return Ok((
+                        path,
+                        TascProfile {
+                            id: "project".to_string(),
+                            scope: ProfileScope::Project,
+                        },
+                    ));
+                }
+            }
+        }
+        Ok((
+            Self::default_path()?,
+            TascProfile {
+                id: "user".to_string(),
+                scope: ProfileScope::User,
+            },
+        ))
+    }
+
+    pub fn profile(&self) -> TascProfile {
+        if std::env::var_os("TASC_STATE_PATH").is_some_and(|path| PathBuf::from(path) == self.path)
+        {
+            TascProfile {
+                id: "custom".to_string(),
+                scope: ProfileScope::User,
+            }
+        } else if self.path.parent().and_then(Path::file_name)
+            == Some(std::ffi::OsStr::new(".tasc"))
+        {
+            TascProfile {
+                id: "project".to_string(),
+                scope: ProfileScope::Project,
+            }
+        } else {
+            TascProfile {
+                id: "user".to_string(),
+                scope: ProfileScope::User,
+            }
+        }
+    }
 }
 
 impl StateRepository for FsStateRepository {
+    fn profile(&self) -> TascProfile {
+        FsStateRepository::profile(self)
+    }
+
     fn load(&self) -> Result<LocalState, String> {
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => bytes,
@@ -554,13 +828,34 @@ impl StateRepository for FsStateRepository {
                 ))
             }
         };
-        let state: LocalState = serde_json::from_slice(&bytes)
+        let state_version: serde_json::Value = serde_json::from_slice(&bytes)
             .map_err(|error| format!("invalid Local State '{}': {error}", self.path.display()))?;
-        if state.version != LOCAL_STATE_VERSION {
-            return Err(format!(
-                "unsupported Local State version {}; expected {}",
-                state.version, LOCAL_STATE_VERSION
-            ));
+        let raw_version = state_version
+            .get("version")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                format!(
+                    "invalid Local State '{}': missing numeric version",
+                    self.path.display()
+                )
+            })?;
+        let version = u32::try_from(raw_version).map_err(|_| {
+            format!("unsupported Local State version {raw_version}; expected {LOCAL_STATE_VERSION}")
+        })?;
+        let mut state: LocalState = serde_json::from_value(state_version)
+            .map_err(|error| format!("invalid Local State '{}': {error}", self.path.display()))?;
+        match version {
+            1 => {
+                state.version = LOCAL_STATE_VERSION;
+                self.save(&state)?;
+            }
+            LOCAL_STATE_VERSION => {}
+            _ => {
+                return Err(format!(
+                    "unsupported Local State version {}; expected {}",
+                    version, LOCAL_STATE_VERSION
+                ))
+            }
         }
         Ok(state)
     }
@@ -668,6 +963,7 @@ mod tests {
             },
             target,
             path: "/workspace/.github/skills/review".to_string(),
+            description: "Review code changes.".to_string(),
             source_revision: Some("tree-sha".to_string()),
             content_digest: "content-sha".to_string(),
         }
@@ -702,6 +998,56 @@ mod tests {
     }
 
     #[test]
+    fn inventory_projects_each_target_and_watched_only_interest_with_stable_ids() {
+        let first = discovered_skill();
+        let mut second = first.clone();
+        second.target.id = "target:zed:/workspace/.config/zed/skills".to_string();
+        second.target.assistant = "zed".to_string();
+        second.target.path = "/workspace/.config/zed/skills".to_string();
+        second.path = "/workspace/.config/zed/skills/review".to_string();
+        let mut state = LocalState::default();
+        state.watchlists.push(tasc_core::Watchlist {
+            id: "watchlist:review-later".to_string(),
+            source: tasc_core::discovery::SkillSource {
+                id: "source:review".to_string(),
+                locator: first.identity.source.clone(),
+            },
+            path: Some("future-skill".to_string()),
+            last_observed_revision: None,
+            last_check_id: None,
+        });
+        let service = AgentService::new(
+            MemoryAdapter(vec![first.clone(), second.clone()]),
+            MemoryRepository(Arc::new(Mutex::new(state))),
+        );
+
+        let inventory = service.inventory().unwrap();
+        assert_eq!(inventory.total, 3);
+        assert_eq!(
+            inventory.items[0].action_id,
+            inventory.items[0].installation_id
+        );
+        assert!(inventory.items.iter().any(|item| {
+            item.action_id
+                == InventoryItem::canonical_installation_id(&first.identity.id, &first.target.id)
+                && item.lifecycle_state == Some(InstallationStatus::Installed)
+                && item.tracking_state == "untracked"
+                && item.watch_state == "not_watched"
+                && item.provenance.confidence == ProvenanceConfidence::Inferred
+        }));
+        assert!(inventory.items.iter().any(|item| {
+            item.target
+                .as_ref()
+                .is_some_and(|target| target.assistant == "zed")
+        }));
+        assert!(inventory
+            .items
+            .iter()
+            .any(|item| item.action_id == "watchlist:review-later" && item.kind == "watchlist"));
+        assert_eq!(service.inventory().unwrap().items, inventory.items);
+    }
+
+    #[test]
     fn filesystem_state_is_versioned_and_corruption_is_preserved_for_recovery() {
         let directory = unique_temp_dir();
         let path = directory.join("state.json");
@@ -733,6 +1079,27 @@ mod tests {
         assert_eq!(installation.source_revision, None);
         assert_eq!(installation.content_digest, None);
         assert_eq!(installation.last_error, None);
+    }
+
+    #[test]
+    fn loading_version_one_state_migrates_atomically_and_preserves_records() {
+        let directory = unique_temp_dir();
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("state.json");
+        let old = r#"{"version":1,"identities":[{"id":"skill:old","name":"old","source":"file:///skills","relative_path":"old"}],"targets":[{"id":"target:old","assistant":"copilot","path":"/skills"}],"installations":[{"id":"installation:old","skill_id":"skill:old","target_id":"target:old","path":"/skills/old"}]}"#;
+        fs::write(&path, old).unwrap();
+
+        let state = FsStateRepository::new(path.clone()).load().unwrap();
+        assert_eq!(state.version, LOCAL_STATE_VERSION);
+        assert_eq!(state.installations[0].id, "installation:old");
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted["version"], LOCAL_STATE_VERSION);
+
+        fs::write(&path, b"{broken").unwrap();
+        assert!(FsStateRepository::new(path.clone()).load().is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"{broken");
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

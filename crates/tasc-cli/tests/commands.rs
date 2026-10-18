@@ -23,6 +23,17 @@ fn run(directory: &PathBuf, state_path: &PathBuf, args: &[&str]) -> Output {
         .unwrap()
 }
 
+fn run_with_resolved_profile(directory: &PathBuf, home: &PathBuf, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_tasc"))
+        .args(args)
+        .current_dir(directory)
+        .env("HOME", home)
+        .env_remove("TASC_STATE_PATH")
+        .env_remove("XDG_STATE_HOME")
+        .output()
+        .unwrap()
+}
+
 #[test]
 fn skill_inventory_adoption_and_state_status_share_the_same_facts() {
     let directory = test_dir();
@@ -38,7 +49,7 @@ fn skill_inventory_adoption_and_state_status_share_the_same_facts() {
     let item = &inventory["items"][0];
     assert_eq!(item["identity"]["name"], "Code Review");
     assert_eq!(item["tracked"], false);
-    assert_eq!(inventory["schema_version"], 1);
+    assert_eq!(inventory["schema_version"], 2);
     let skill_id = item["identity"]["id"].as_str().unwrap();
 
     let adopted = run(&directory, &state_path, &["skill", "adopt", skill_id]);
@@ -59,7 +70,7 @@ fn skill_inventory_adoption_and_state_status_share_the_same_facts() {
     let output = run(&directory, &state_path, &["state", "status", "--json"]);
     assert!(output.status.success());
     let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(status["state_version"], 1);
+    assert_eq!(status["state_version"], 2);
     assert_eq!(status["identity_count"], 1);
     assert_eq!(status["target_count"], 1);
     assert_eq!(status["installation_count"], 1);
@@ -90,7 +101,7 @@ fn skill_inventory_adoption_and_state_status_share_the_same_facts() {
     let human_status = run(&directory, &state_path, &["state", "status"]);
     let human_status = String::from_utf8(human_status.stdout).unwrap();
     for fact in [
-        "Local State version: 1",
+        "Local State version: 2",
         "Identities: 1",
         "Adapter targets: 1",
         "Installations: 1",
@@ -100,6 +111,141 @@ fn skill_inventory_adoption_and_state_status_share_the_same_facts() {
         assert!(human_status.contains(fact), "missing {fact:?}");
     }
 
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn project_profile_wins_without_merging_and_user_profile_is_the_fallback() {
+    let directory = test_dir();
+    let home = directory.join("home");
+    let project_state = directory.join(".tasc/state.json");
+    let user_state = home.join(".local/state/tasc/state.json");
+    fs::create_dir_all(project_state.parent().unwrap()).unwrap();
+    fs::create_dir_all(user_state.parent().unwrap()).unwrap();
+    fs::write(
+        &project_state,
+        r#"{"version":2,"identities":[],"targets":[],"installations":[],"sources":[]}"#,
+    )
+    .unwrap();
+    fs::write(
+        &user_state,
+        r#"{"version":2,"identities":[{"id":"skill:user-only","name":"user-only","source":"file:///user","relative_path":"user-only"}],"targets":[],"installations":[],"sources":[]}"#,
+    )
+    .unwrap();
+
+    let output = run_with_resolved_profile(&directory, &home, &["state", "status", "--json"]);
+    assert!(output.status.success());
+    let project: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(project["profile"]["scope"], "project");
+    assert_eq!(project["identity_count"], 0);
+
+    fs::remove_file(&project_state).unwrap();
+    let output = run_with_resolved_profile(&directory, &home, &["state", "status", "--json"]);
+    assert!(output.status.success());
+    let user: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(user["profile"]["scope"], "user");
+    assert_eq!(user["identity_count"], 1);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn inventory_filters_pages_and_details_by_stable_action_id() {
+    let directory = test_dir();
+    let state_path = directory.join("state/state.json");
+    for (name, description) in [
+        ("zebra", "Last in alphabetical order."),
+        (
+            "alpha",
+            "A deliberately longer description used to verify normalized inventory excerpts.",
+        ),
+        ("user-skill", "A skill in the user Adapter Target."),
+    ] {
+        let skill = if name == "user-skill" {
+            directory.join("home/.copilot/skills").join(name)
+        } else {
+            directory.join(".github/skills").join(name)
+        };
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {description}\n---\n"),
+        )
+        .unwrap();
+    }
+
+    let output = run(
+        &directory,
+        &state_path,
+        &["skill", "list", "--sort", "name", "--limit", "1", "--json"],
+    );
+    assert!(output.status.success());
+    let page: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(page["total"], 3);
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["items"][0]["identity"]["name"], "alpha");
+    assert_eq!(
+        page["items"][0]["action_id"],
+        page["items"][0]["installation_id"]
+    );
+    assert_eq!(page["items"][0]["lifecycle_state"], "installed");
+    assert_eq!(page["items"][0]["tracking_state"], "untracked");
+    assert_eq!(page["items"][0]["watch_state"], "not_watched");
+    let action_id = page["items"][0]["action_id"].as_str().unwrap();
+
+    let details = run(
+        &directory,
+        &state_path,
+        &["skill", "list", "--detail", action_id, "--json"],
+    );
+    assert!(details.status.success());
+    let details: serde_json::Value = serde_json::from_slice(&details.stdout).unwrap();
+    assert_eq!(details["total"], 1);
+    assert!(details["items"][0]["description"]
+        .as_str()
+        .unwrap()
+        .contains("normalized"));
+
+    let filtered = run(
+        &directory,
+        &state_path,
+        &[
+            "skill",
+            "list",
+            "--scope",
+            "project",
+            "--status",
+            "installed",
+            "--json",
+        ],
+    );
+    assert!(filtered.status.success());
+    let filtered: serde_json::Value = serde_json::from_slice(&filtered.stdout).unwrap();
+    assert_eq!(filtered["total"], 2);
+    let user_scope = run(
+        &directory,
+        &state_path,
+        &["skill", "list", "--scope", "user", "--json"],
+    );
+    assert!(user_scope.status.success());
+    let user_scope: serde_json::Value = serde_json::from_slice(&user_scope.stdout).unwrap();
+    assert_eq!(user_scope["total"], 1);
+    assert_eq!(user_scope["items"][0]["identity"]["name"], "user-skill");
+    let human = run(
+        &directory,
+        &state_path,
+        &["skill", "list", "--detail", action_id],
+    );
+    let human = String::from_utf8(human.stdout).unwrap();
+    for fact in [
+        action_id,
+        "lifecycle state: installed",
+        "tracking state: untracked",
+        "watch state: not_watched",
+        "provenance confidence: inferred",
+        "description excerpt:",
+    ] {
+        assert!(human.contains(fact), "human inventory omitted {fact:?}");
+    }
     fs::remove_dir_all(directory).unwrap();
 }
 

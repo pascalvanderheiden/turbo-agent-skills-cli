@@ -147,7 +147,7 @@ impl AgentContext {
                         "items": inventory.items.iter().enumerate().map(|(index, item)| json!({
                             "rank": index + 1,
                             "name": item.identity.name,
-                            "assistant": item.target.assistant,
+                            "assistant": item.target.as_ref().map(|target| target.assistant.clone()),
                             "tracked": item.tracked,
                             "status": item.status
                         })).collect::<Vec<_>>()
@@ -432,7 +432,7 @@ impl ToolHandler for Dispatcher {
 }
 
 pub async fn run(offline: bool) -> Result<(), Diagnostic> {
-    let state_path = FsStateRepository::default_path().map_err(state_error)?;
+    let (state_path, _) = FsStateRepository::selected_profile_path().map_err(state_error)?;
     let context = Arc::new(AgentContext::new(state_path, offline));
     let program = std::env::var_os("COPILOT_CLI_PATH")
         .map(PathBuf::from)
