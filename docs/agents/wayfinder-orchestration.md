@@ -10,7 +10,10 @@ Three GitHub Agentic Workflows automate the handoff after manual wayfinding:
 3. `wayfinder-delivery` reconciles planned maps every 30 minutes. It answers
    Copilot blocker questions, assigns one dependency-ready ticket at a time,
    merges eligible Copilot pull requests without a code-review step, and closes
-   the map after all implementation work is complete.
+   the map after all implementation work is complete. It intentionally does not
+   subscribe to pull request events, because those events cannot be filtered by
+   native parent-map relationships and would activate the workflow for unrelated
+   pull requests.
 
 The workflows keep agent permissions read-only. All GitHub mutations use gh-aw
 safe outputs. Copilot assignment requires an Actions secret named

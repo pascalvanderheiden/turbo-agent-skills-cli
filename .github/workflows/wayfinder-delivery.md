@@ -6,8 +6,6 @@ on:
     types: [closed, reopened, labeled, unlabeled, assigned, unassigned]
   issue_comment:
     types: [created]
-  pull_request:
-    types: [opened, reopened, synchronize, ready_for_review, closed]
   schedule: every 30 minutes
   workflow_dispatch:
 permissions:

@@ -26,10 +26,13 @@ iex (irm https://raw.githubusercontent.com/pascalvanderheiden/turbo-agent-skills
 First run:
 
 ```sh
+tasc --banner
 tasc setup
 tasc skill list
 tasc state status
 ```
+
+`tasc --banner` plays the opt-in animated Turbo banner. It uses ANSI cursor redraws only in an interactive terminal and prints a safe static frame when piped.
 
 `tasc setup` offers the optional first-party Command Skill. It never installs it without your choice.
 
@@ -75,6 +78,7 @@ GitHub discovery and lifecycle operations require GitHub CLI (`gh`) and authenti
 ## Command examples
 
 ```sh
+tasc --banner
 tasc discover "review code changes"
 tasc skill search review --format json
 tasc skill install review --source owner/repo --dry-run

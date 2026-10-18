@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use tasc_agent::{
@@ -34,17 +34,21 @@ use tasc_core::{
 };
 
 mod agent;
+mod banner;
 
 #[derive(Parser)]
 #[command(name = "tasc", version, about = "TASC: manage local agent skills")]
 struct Cli {
     #[arg(long, global = true, value_enum, default_value = "human")]
     format: OutputFormat,
+    /// Play the opt-in Turbo Agent Skills CLI animated banner and exit.
+    #[arg(long, global = true)]
+    banner: bool,
     /// Reject operations requiring GitHub access before starting gh.
     #[arg(long, global = true)]
     offline: bool,
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -613,9 +617,26 @@ struct InventoryArgs {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    if cli.banner {
+        if let Err(error) = banner::run() {
+            if error.kind() != std::io::ErrorKind::BrokenPipe {
+                eprintln!("tasc: failed to render banner: {error}");
+            }
+        }
+        return;
+    }
+    let command = match cli.command.take() {
+        Some(command) => command,
+        None => Cli::command()
+            .error(
+                clap::error::ErrorKind::MissingSubcommand,
+                "a subcommand is required unless --banner is used",
+            )
+            .exit(),
+    };
     let json = cli.format == OutputFormat::Json
-        || match &cli.command {
+        || match &command {
             Commands::Source { command } => match command {
                 SourceCommands::List(output) | SourceCommands::Capabilities(output) => output.json,
                 SourceCommands::Show { output, .. } | SourceCommands::Add { output, .. } => {
@@ -696,7 +717,7 @@ async fn main() {
             }
             _ => false,
         };
-    let command = match &cli.command {
+    let command_name = match &command {
         Commands::Source {
             command: SourceCommands::List(_),
         } => "source list",
@@ -871,14 +892,14 @@ async fn main() {
             signal_cancel.cancel();
         }
     });
-    let result = run(cli, json, command, &cancel).await;
+    let result = run(cli, json, command_name, command, &cancel).await;
     signal.abort();
     if let Err(error) = result {
         if json {
             eprintln!(
                 "{}",
                 serde_json::json!({
-                    "schemaVersion": 1, "command": command, "diagnostic": error
+                    "schemaVersion": 1, "command": command_name, "diagnostic": error
                 })
             );
         } else {
@@ -892,6 +913,7 @@ async fn run(
     cli: Cli,
     json: bool,
     command_name: &str,
+    command: Commands,
     cancel: &Cancellation,
 ) -> Result<(), Diagnostic> {
     let (state_path, _) = FsStateRepository::selected_profile_path().map_err(local_error)?;
@@ -900,7 +922,7 @@ async fn run(
         FsStateRepository::new(state_path.clone()),
     );
     let remote = matches!(
-        &cli.command,
+        &command,
         Commands::Search(_)
             | Commands::Skill {
                 command: SkillCommands::Search(_)
@@ -924,7 +946,7 @@ async fn run(
             "Remove --offline to explicitly allow the operation.",
         ));
     }
-    let value = match cli.command {
+    let value = match command {
         Commands::Agent => return agent::run(cli.offline, cli.format == OutputFormat::Json).await,
         Commands::Source {
             command: SourceCommands::List(_),
