@@ -1,5 +1,6 @@
 use crate::{
     evaluation::validate_skill_package,
+    security::redact_possible_secrets,
     service::{SkillAdapter, StateRepository},
 };
 use serde::{Deserialize, Serialize};
@@ -13,8 +14,10 @@ use std::{
 };
 use tasc_core::{
     authoring::{
-        LocalContext, SkillDraft, SkillDraftStatus, WorkspaceDiagnostic, WorkspaceValidation,
+        LocalContext, SkillDraft, SkillDraftAnswers, SkillDraftStatus, WorkspaceDiagnostic,
+        WorkspaceValidation, SKILL_DRAFT_SCHEMA_VERSION, WORKSPACE_VALIDATION_SCHEMA_VERSION,
     },
+    categories::SKILL_CATEGORIES,
     evaluation::{EvaluationDiagnostic, EvaluationOutcome},
 };
 
@@ -30,6 +33,8 @@ pub struct SkillDraftInput {
     pub description: String,
     pub triggers: String,
     pub non_goals: String,
+    #[serde(default)]
+    pub categories: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -38,6 +43,7 @@ pub struct SkillDraftPlan {
     pub skill_path: String,
     pub local_context: Option<LocalContext>,
     pub questions: Vec<String>,
+    pub categories: Vec<String>,
     pub preview: String,
 }
 
@@ -149,9 +155,10 @@ impl<A: SkillAdapter, R: StateRepository, D: SkillDraftRepository> SkillAuthorin
     }
 
     pub fn plan(&self, input: &SkillDraftInput) -> Result<SkillDraftPlan, String> {
-        let workspace = validate_workspace(&input.workspace)?;
-        validate_input(input)?;
-        let skill_path = workspace.join(&input.name);
+        let safe_input = redact_input(input);
+        let workspace = validate_workspace(&safe_input.workspace)?;
+        validate_input(&safe_input)?;
+        let skill_path = workspace.join(&safe_input.name);
         self.ensure_not_installed(&skill_path, None)?;
         if fs::symlink_metadata(&skill_path).is_ok() {
             return Err(format!(
@@ -160,17 +167,27 @@ impl<A: SkillAdapter, R: StateRepository, D: SkillDraftRepository> SkillAuthorin
             ));
         }
         let local_context = inspect_local_context()?;
+        let preview = render_skill(&safe_input)?;
         Ok(SkillDraftPlan {
             workspace_path: workspace.to_string_lossy().into_owned(),
             skill_path: skill_path.to_string_lossy().into_owned(),
-            questions: Vec::new(),
-            preview: render_skill(input)?,
+            questions: vec![
+                "What concrete outcome should this skill produce, and what context must it gather first?"
+                    .to_string(),
+                "Give a specific trigger and a counterexample where this skill must stay inactive."
+                    .to_string(),
+                "What should the skill explicitly avoid, and how should it handle uncertainty?"
+                    .to_string(),
+            ],
+            categories: safe_input.categories,
+            preview,
             local_context,
         })
     }
 
     pub fn create(&self, input: &SkillDraftInput, approved: bool) -> Result<SkillDraft, String> {
-        let plan = self.plan(input)?;
+        let input = redact_input(input);
+        let plan = self.plan(&input)?;
         if !approved {
             return Err("Skill Draft creation requires explicit approval".to_string());
         }
@@ -179,14 +196,22 @@ impl<A: SkillAdapter, R: StateRepository, D: SkillDraftRepository> SkillAuthorin
         let id = format!("draft-{now}-{}-{sequence}", std::process::id());
         let skill_path = PathBuf::from(&plan.skill_path);
         let draft = SkillDraft {
-            schema_version: 1,
+            schema_version: SKILL_DRAFT_SCHEMA_VERSION,
             id: id.clone(),
             name: input.name.clone(),
             purpose: input.purpose.clone(),
             workspace_path: plan.workspace_path,
             skill_path: skill_path.to_string_lossy().into_owned(),
+            answers: SkillDraftAnswers {
+                purpose: input.purpose.clone(),
+                description: input.description.clone(),
+                triggers: input.triggers.clone(),
+                non_goals: input.non_goals.clone(),
+            },
+            categories: plan.categories,
             status: SkillDraftStatus::Incomplete,
             diagnostics: Vec::new(),
+            quality_guidance: Vec::new(),
             local_context: plan.local_context,
             recovery_path: None,
             created_at_unix_ms: now,
@@ -214,6 +239,8 @@ impl<A: SkillAdapter, R: StateRepository, D: SkillDraftRepository> SkillAuthorin
         self.ensure_not_installed(&skill_path, Some(id))?;
         validate_draft_directory(&skill_path, &workspace)?;
         let (outcome, diagnostics) = validate_draft_package(&skill_path);
+        draft.schema_version = SKILL_DRAFT_SCHEMA_VERSION;
+        draft.quality_guidance = quality_guidance(&skill_path);
         draft.status = if outcome == EvaluationOutcome::Passed {
             SkillDraftStatus::Ready
         } else {
@@ -231,7 +258,7 @@ impl<A: SkillAdapter, R: StateRepository, D: SkillDraftRepository> SkillAuthorin
                     "Correct the indicated SKILL.md issue in this Skill Workspace, then validate again."
                         .to_string()
                 },
-                message: diagnostic.message,
+                message: redact_possible_secrets(&diagnostic.message),
             })
             .collect();
         draft.updated_at_unix_ms = now_unix_ms();
@@ -252,12 +279,26 @@ impl<A: SkillAdapter, R: StateRepository, D: SkillDraftRepository> SkillAuthorin
     ) -> Result<WorkspaceValidation, String> {
         let draft = self.validate(id, workspace)?;
         Ok(WorkspaceValidation {
-            schema_version: 1,
+            schema_version: WORKSPACE_VALIDATION_SCHEMA_VERSION,
             draft_id: draft.id,
             status: draft.status,
             diagnostics: draft.diagnostics,
+            quality_guidance: draft.quality_guidance,
             validated_at_unix_ms: draft.updated_at_unix_ms,
         })
+    }
+
+    pub fn resume(&self, id: &str, workspace: &Path) -> Result<SkillDraft, String> {
+        let workspace = validate_workspace(workspace)?;
+        let mut draft = self.draft_repository.get(id)?;
+        if Path::new(&draft.workspace_path) != workspace {
+            return Err("selected workspace does not match the Skill Draft workspace".to_string());
+        }
+        let skill_path = recorded_skill_path(&draft, &workspace)?;
+        self.ensure_not_installed(&skill_path, Some(id))?;
+        validate_draft_directory(&skill_path, &workspace)?;
+        draft.schema_version = SKILL_DRAFT_SCHEMA_VERSION;
+        Ok(draft)
     }
 
     pub fn list(&self, workspace: Option<&Path>) -> Result<Vec<SkillDraft>, String> {
@@ -412,6 +453,7 @@ impl<A: SkillAdapter, R: StateRepository, D: SkillDraftRepository> SkillAuthorin
         draft.recovery_path = Some(recovery_path.to_string_lossy().into_owned());
         atomic_write(&skill_file, repaired.as_bytes())?;
         let (outcome, diagnostics) = validate_draft_package(&skill_path);
+        draft.quality_guidance = quality_guidance(&skill_path);
         draft.status = if outcome == EvaluationOutcome::Passed {
             SkillDraftStatus::Ready
         } else {
@@ -424,7 +466,7 @@ impl<A: SkillAdapter, R: StateRepository, D: SkillDraftRepository> SkillAuthorin
                 code: diagnostic.code,
                 severity: diagnostic.severity,
                 path: diagnostic.path,
-                message: diagnostic.message,
+                message: redact_possible_secrets(&diagnostic.message),
                 remediation:
                     "Review the diagnostic and correct this Skill Draft in the selected Workspace."
                         .to_string(),
@@ -552,7 +594,40 @@ fn validate_input(input: &SkillDraftInput) -> Result<(), String> {
     if input.non_goals.trim().is_empty() || input.non_goals.chars().count() > 4096 {
         return Err("skill non-goals must contain 1-4096 characters".to_string());
     }
+    let categories = input
+        .categories
+        .iter()
+        .collect::<std::collections::HashSet<_>>();
+    if categories.len() != input.categories.len()
+        || input
+            .categories
+            .iter()
+            .any(|category| !SKILL_CATEGORIES.iter().any(|known| known.id == category))
+    {
+        return Err(
+            "skill categories must be unique IDs from the descriptive category catalog".to_string(),
+        );
+    }
     Ok(())
+}
+
+fn redact_input(input: &SkillDraftInput) -> SkillDraftInput {
+    let redact = |value: &str| {
+        value
+            .lines()
+            .map(redact_possible_secrets)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    SkillDraftInput {
+        workspace: input.workspace.clone(),
+        name: input.name.clone(),
+        purpose: redact(&input.purpose),
+        description: redact(&input.description),
+        triggers: redact(&input.triggers),
+        non_goals: redact(&input.non_goals),
+        categories: input.categories.clone(),
+    }
 }
 
 fn validate_description(description: &str) -> Result<(), String> {
@@ -609,6 +684,27 @@ fn validate_draft_package(path: &Path) -> (EvaluationOutcome, Vec<EvaluationDiag
         outcome = EvaluationOutcome::Failed;
     }
     (outcome, diagnostics)
+}
+
+fn quality_guidance(path: &Path) -> Vec<WorkspaceDiagnostic> {
+    let skill_file = path.join("SKILL.md");
+    let Ok(contents) = fs::read_to_string(&skill_file) else {
+        return Vec::new();
+    };
+    if contents.lines().any(|line| {
+        line.trim_start_matches('#')
+            .trim()
+            .eq_ignore_ascii_case("examples")
+    }) {
+        return Vec::new();
+    }
+    vec![WorkspaceDiagnostic {
+        code: "quality_examples_suggested".to_string(),
+        severity: "suggestion".to_string(),
+        path: Some(skill_file.to_string_lossy().into_owned()),
+        message: "Consider adding a concise example to clarify expected inputs and outputs; this is optional and does not affect readiness.".to_string(),
+        remediation: "Add examples only when they improve clarity for this Skill.".to_string(),
+    }]
 }
 
 fn has_trigger_guidance(contents: &str) -> bool {
@@ -754,13 +850,16 @@ fn valid_skill_name(name: &str) -> bool {
 fn render_skill(input: &SkillDraftInput) -> Result<String, String> {
     let description = serde_json::to_string(input.description.trim())
         .map_err(|error| format!("cannot encode skill description: {error}"))?;
+    let metadata = if input.categories.is_empty() {
+        String::new()
+    } else {
+        let categories = serde_json::to_string(&input.categories)
+            .map_err(|error| format!("cannot encode skill categories: {error}"))?;
+        format!("metadata:\n  tascCategories: {categories}\n")
+    };
     Ok(format!(
-        "---\nname: {}\ndescription: {description}\n---\n\n# {}\n\n## Purpose\n\n{}\n\n## When to use\n\n{}\n\n## Instructions\n\n1. Confirm the request matches the purpose above.\n2. Gather the minimum necessary context and state assumptions.\n3. Provide a clear, actionable result; explain uncertainty instead of inventing facts.\n\n## Non-goals\n\n{}\n",
-        input.name,
-        input.name,
-        input.purpose.trim(),
-        input.triggers.trim(),
-        input.non_goals.trim()
+        "---\nname: {}\ndescription: {description}\n{metadata}---\n\n# {}\n\n## Purpose\n\n{}\n\n## When to use\n\n{}\n\n## Instructions\n\n1. Confirm the request matches the purpose above.\n2. Gather the minimum necessary context and state assumptions.\n3. Provide a clear, actionable result; explain uncertainty instead of inventing facts.\n\n## Non-goals\n\n{}\n",
+        input.name, input.name, input.purpose.trim(), input.triggers.trim(), input.non_goals.trim()
     ))
 }
 
@@ -942,6 +1041,7 @@ mod tests {
             description: "Test deterministic authoring.".to_string(),
             triggers: "When testing authoring.".to_string(),
             non_goals: "Do not edit installed skills.".to_string(),
+            categories: vec!["testing".to_string()],
         }
     }
 
@@ -1003,6 +1103,69 @@ mod tests {
             fs::read_to_string(result.recovery_path.unwrap()).unwrap(),
             invalid
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn drafts_resume_with_redacted_structured_answers_and_nonblocking_quality_guidance() {
+        let root = test_root();
+        let workspace = root.join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let service = test_service(&root);
+        let mut input = test_input(&workspace);
+        input.purpose = "Use api_key=credential-value-123 to test.".to_string();
+        let draft = service.create(&input, true).unwrap();
+
+        assert_eq!(draft.status, SkillDraftStatus::Ready);
+        assert_eq!(draft.answers.purpose, "Use api_key= [REDACTED]");
+        assert_eq!(draft.categories, vec!["testing"]);
+        assert!(draft.quality_guidance.iter().any(|item| {
+            item.code == "quality_examples_suggested" && item.severity == "suggestion"
+        }));
+        assert!(service
+            .resume(&draft.id, &workspace)
+            .unwrap()
+            .answers
+            .eq(&draft.answers));
+
+        let saved = fs::read_to_string(
+            root.join("draft-records")
+                .join(format!("{}.json", draft.id)),
+        )
+        .unwrap();
+        assert!(!saved.contains("credential-value-123"));
+        assert!(!saved.contains("transcript"));
+        let skill = fs::read_to_string(Path::new(&draft.skill_path).join("SKILL.md")).unwrap();
+        assert!(!skill.contains("credential-value-123"));
+        assert!(skill.contains("tascCategories: [\"testing\"]"));
+        assert!(service.resume(&draft.id, &root).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn normative_validation_failures_block_readiness_separately_from_quality_guidance() {
+        let root = test_root();
+        let workspace = root.join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let service = test_service(&root);
+        let draft = service.create(&test_input(&workspace), true).unwrap();
+        let skill_file = Path::new(&draft.skill_path).join("SKILL.md");
+        fs::write(
+            &skill_file,
+            "---\nname: authoring-test\n---\n## When to use\n\nWhen testing.\n",
+        )
+        .unwrap();
+
+        let validated = service.validate(&draft.id, &workspace).unwrap();
+        assert_eq!(validated.status, SkillDraftStatus::Incomplete);
+        assert!(validated
+            .diagnostics
+            .iter()
+            .any(|item| item.severity == "error"));
+        assert!(validated
+            .quality_guidance
+            .iter()
+            .all(|item| item.severity != "error"));
         fs::remove_dir_all(root).unwrap();
     }
 }

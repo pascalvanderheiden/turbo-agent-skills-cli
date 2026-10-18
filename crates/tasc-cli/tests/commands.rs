@@ -1665,6 +1665,7 @@ fn skill_authoring_requires_workspace_and_approval_and_preserves_remediable_draf
         "--workspace",
         &workspace_arg,
         "--dry-run",
+        "--offline",
         "--json",
     ]);
     assert!(questions.status.success());
@@ -1674,6 +1675,10 @@ fn skill_authoring_requires_workspace_and_approval_and_preserves_remediable_draf
         questions["result"]["questions"].as_array().unwrap().len(),
         5
     );
+    assert!(questions["result"]["questions"][3]
+        .as_str()
+        .unwrap()
+        .contains("counterexample"));
     assert!(!workspace.join("review-helper").exists());
 
     let args = [
@@ -1691,6 +1696,8 @@ fn skill_authoring_requires_workspace_and_approval_and_preserves_remediable_draf
         "When a user requests a Rust code review.",
         "--non-goals",
         "Do not run remote deployment commands.",
+        "--category",
+        "coding",
         "--json",
     ];
     let unapproved = invoke(&args);
@@ -1713,6 +1720,11 @@ fn skill_authoring_requires_workspace_and_approval_and_preserves_remediable_draf
     let created: serde_json::Value = serde_json::from_slice(&created.stdout).unwrap();
     assert_eq!(created["command"], "skill create");
     assert_eq!(created["result"]["draft"]["status"], "ready");
+    assert_eq!(created["result"]["draft"]["categories"][0], "coding");
+    assert!(!created["result"]["draft"]["qualityGuidance"]
+        .as_array()
+        .unwrap()
+        .is_empty());
     assert_eq!(
         created["result"]["draft"]["localContext"]["headings"][0],
         "Repository Context"
@@ -1728,7 +1740,26 @@ fn skill_authoring_requires_workspace_and_approval_and_preserves_remediable_draf
     let draft_id = created["result"]["draft"]["id"].as_str().unwrap();
     let skill_dir = workspace.join("review-helper");
     let skill_file = skill_dir.join("SKILL.md");
+    assert!(fs::read_to_string(&skill_file)
+        .unwrap()
+        .contains("tascCategories: [\"coding\"]"));
     assert!(!skill_dir.join(".tasc-draft.json").exists());
+    let resumed = invoke(&[
+        "skill",
+        "resume",
+        draft_id,
+        "--workspace",
+        &workspace_arg,
+        "--json",
+    ]);
+    assert!(resumed.status.success());
+    let resumed: serde_json::Value = serde_json::from_slice(&resumed.stdout).unwrap();
+    assert_eq!(resumed["command"], "skill resume");
+    assert_eq!(
+        resumed["result"]["draft"]["answers"]["triggers"],
+        "When a user requests a Rust code review."
+    );
+    assert_eq!(resumed["result"]["writesPerformed"], false);
     let original_invalid =
         "---\nname: review-helper\n---\n## When to use\n\nWhen explicitly requested.\n";
     fs::write(&skill_file, original_invalid).unwrap();
@@ -1816,6 +1847,92 @@ fn skill_authoring_requires_workspace_and_approval_and_preserves_remediable_draf
     let human_drafts = String::from_utf8(human_drafts.stdout).unwrap();
     assert!(human_drafts.contains("status: ready"));
     assert!(human_drafts.contains("review-helper"));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn categories_and_bundle_validation_are_versioned_and_non_deploying() {
+    let directory = test_dir();
+    fs::create_dir_all(&directory).unwrap();
+    let state_path = directory.join("state/state.json");
+    let invoke = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_tasc"))
+            .args(args)
+            .current_dir(&directory)
+            .env("HOME", directory.join("home"))
+            .env("TASC_STATE_PATH", &state_path)
+            .output()
+            .unwrap()
+    };
+
+    let categories = invoke(&["skill", "categories", "--json"]);
+    assert!(categories.status.success());
+    let categories: serde_json::Value = serde_json::from_slice(&categories.stdout).unwrap();
+    assert_eq!(categories["schemaVersion"], 1);
+    assert_eq!(categories["command"], "skill categories");
+    assert_eq!(categories["result"]["categories"][0]["id"], "automation");
+    assert!(categories["result"]["categories"][0]["actions"].is_null());
+
+    let identity = |name: &str| {
+        serde_json::json!({
+            "id": format!("skill:github.com/owner/repo/{name}"),
+            "name": name,
+            "source": "github.com/owner/repo",
+            "relative_path": name,
+        })
+    };
+    let manifest = serde_json::json!({
+        "schemaVersion": 1,
+        "id": "review-workflow",
+        "name": "Review workflow",
+        "version": "1.0.0",
+        "description": "Skills for code review.",
+        "categories": ["coding"],
+        "skills": [
+            { "identity": identity("first"), "order": 0, "dependencies": [] },
+            { "identity": identity("second"), "order": 1, "dependencies": ["skill:github.com/owner/repo/first"] }
+        ],
+        "targetIntent": [{ "assistant": "copilot", "scope": "project" }],
+        "policy": { "installRequiresApproval": true, "publishRequiresApproval": true }
+    });
+    let manifest_path = directory.join("bundle.json");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let manifest_path = manifest_path.to_string_lossy().into_owned();
+    let valid = invoke(&["bundle", "validate", &manifest_path, "--json"]);
+    assert!(valid.status.success());
+    let valid: serde_json::Value = serde_json::from_slice(&valid.stdout).unwrap();
+    assert_eq!(valid["command"], "bundle validate");
+    assert_eq!(valid["result"]["validation"]["valid"], true);
+    assert_eq!(valid["result"]["deploymentEnabled"], false);
+    assert!(!state_path.exists());
+
+    let mut invalid_manifest = manifest;
+    invalid_manifest["skills"][1]["order"] = serde_json::json!(0);
+    invalid_manifest["skills"][1]["identity"]["source"] =
+        serde_json::json!("******github.com/owner/repo");
+    invalid_manifest["policy"]["installRequiresApproval"] = serde_json::json!(false);
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&invalid_manifest).unwrap(),
+    )
+    .unwrap();
+    let invalid = invoke(&["bundle", "validate", &manifest_path, "--json"]);
+    assert!(invalid.status.success());
+    let invalid_output = String::from_utf8_lossy(&invalid.stdout);
+    let invalid: serde_json::Value = serde_json::from_slice(&invalid.stdout).unwrap();
+    assert_eq!(invalid["result"]["validation"]["valid"], false);
+    assert!(
+        invalid["result"]["validation"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 3
+    );
+    assert!(!invalid_output.contains("password"));
     fs::remove_dir_all(directory).unwrap();
 }
 

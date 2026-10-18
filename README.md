@@ -55,7 +55,7 @@ tasc eval show <run-id>
 # Validate local package metadata and inspect immutable Evaluation evidence
 
 tasc skill create --workspace ./skill-workspace --name review-helper
-# Answer any remaining authoring questions; no files are written until approval
+# Answer TASC's deterministic authoring questions; no files are written until approval
 
 tasc skill create --workspace ./skill-workspace --name review-helper \
   --purpose "Review Rust changes" \
@@ -67,11 +67,21 @@ tasc skill create --workspace ./skill-workspace --name review-helper \
   --description "Review Rust changes for correctness." \
   --triggers "When a user requests a Rust code review." \
   --non-goals "Do not run deployment commands." --yes
+tasc skill create --workspace ./skill-workspace --name review-helper \
+  --purpose "Review Rust changes" \
+  --description "Review Rust changes for correctness." \
+  --triggers "When a user requests a Rust code review." \
+  --non-goals "Do not run deployment commands." \
+  --category coding --category testing --yes
 tasc skill drafts --workspace ./skill-workspace --json
+tasc skill resume <draft-id> --workspace ./skill-workspace --json
 tasc skill validate <draft-id> --workspace ./skill-workspace --json
 tasc skill remediate <draft-id> --workspace ./skill-workspace \
   --description "Review Rust changes for correctness." --dry-run
-# Create, inspect, validate, and propose bounded Workspace-only repairs
+# Create, resume, inspect, validate, and propose bounded Workspace-only repairs
+tasc skill categories --json
+tasc bundle validate ./bundle.json --json
+# Categories are descriptive metadata; bundle validation never deploys
 
 tasc consistency check <skill-id-1> <skill-id-2> --json
 tasc consistency check --all-installed
@@ -234,23 +244,62 @@ original package changes or disappears.
 `skill create` is guided Skill Authoring, not Installation. It requires an
 explicit existing Skill Workspace, inspects the nearest local `CONTEXT.md` for
 headings and a digest, and asks for the skill name, purpose, description,
-activation guidance, and non-goals that were not supplied. It previews the
-proposed `SKILL.md` and requires interactive approval or `--yes` before writing.
+activation guidance, and non-goals that were not supplied. it uses TASC-owned grilling questions with a deterministic offline path, previews
+the proposed `SKILL.md`, and requires interactive approval or `--yes` before writing.
 `--dry-run` never writes. Draft records are durable in a sibling
 `<state-stem>.drafts` directory; incomplete drafts are marked in their package
-and are excluded from ready-skill discovery. Validation reports actionable
-diagnostics for package frontmatter, activation guidance, local links, and a
-10,000 whitespace-delimited-token limit. Failed drafts remain available for
-correction. The bounded `skill remediate` action only adds a missing
+and are excluded from ready-skill discovery. Structured authoring answers are
+redacted before persistence; no interview transcript is retained. `skill resume`
+reads the saved answers for the selected Workspace without writing files.
+Validation separates readiness-blocking normative diagnostics from optional
+quality guidance. Failed drafts remain available for correction. The bounded
+`skill remediate` action only adds a missing
 description, records a pre-change copy under `.tasc-recovery`, validates the
 result, and restores the original file if validation fails. Every skill-content
 write is confined to the selected Workspace; an Installation or discovered
 installed copy is never an authoring target.
 
-A ready draft offers installation, sharing, and Evaluation as separate
-follow-up choices. Creating or validating a draft does not run any of them;
-the user must explicitly choose a follow-up action. Authoring does not create
-commits or push files.
+A ready draft does not install, evaluate, export, share, commit, push, or publish.
+Each such follow-up requires a separate explicit user action. Authoring does not
+create commits or push files.
+
+`skill categories` lists TASC's descriptive category vocabulary. Categories may
+be attached to a draft with repeatable `--category` options and are stored as
+skill metadata; they do not change installation, tracking, or execution behavior.
+`bundle validate` reads a versioned JSON manifest and checks Skill Identity and
+source consistency, dependency ordering, target intent, and approval-required
+policy. It is read-only: bundle publication and deployment are not implemented
+by this command, and validation never installs anything.
+
+Bundle manifests use this versioned shape:
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "review-workflow",
+  "name": "Review workflow",
+  "version": "1.0.0",
+  "description": "Skills for a review workflow.",
+  "categories": ["coding"],
+  "skills": [
+    {
+      "identity": {
+        "id": "skill:github.com/example/skills/review",
+        "name": "review",
+        "source": "github.com/example/skills",
+        "relative_path": "review"
+      },
+      "order": 0,
+      "dependencies": []
+    }
+  ],
+  "targetIntent": [{ "assistant": "copilot", "scope": "project" }],
+  "policy": {
+    "installRequiresApproval": true,
+    "publishRequiresApproval": true
+  }
+}
+```
 
 `consistency check` requires at least two explicit selectors or the opt-in
 `--all-installed` flag. It performs bounded, deterministic local analysis of

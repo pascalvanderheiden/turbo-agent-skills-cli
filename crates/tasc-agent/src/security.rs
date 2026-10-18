@@ -1267,7 +1267,7 @@ fn contains_token_prefix(text: &str, prefix: &str, minimum_length: usize) -> boo
     })
 }
 
-fn redact_possible_secrets(line: &str) -> String {
+pub(crate) fn redact_possible_secrets(line: &str) -> String {
     let lower = line.to_ascii_lowercase();
     if lower.contains("-----begin") && lower.contains("private key-----") {
         return "[REDACTED PRIVATE KEY MATERIAL]".to_string();

@@ -13,6 +13,8 @@ use tasc_agent::{
     AgentService, CopilotAdapter, FsWatchCheckRepository, WatchService,
 };
 use tasc_core::{
+    bundle::SkillBundleManifest,
+    categories::SKILL_CATEGORIES,
     discovery::{Diagnostic, Envelope},
     insights::InsightStatus,
     security::SecuritySeverity,
@@ -85,6 +87,21 @@ enum Commands {
     Insight {
         #[command(subcommand)]
         command: InsightCommands,
+    },
+    /// Validate a bundle manifest without deploying it.
+    Bundle {
+        #[command(subcommand)]
+        command: BundleCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum BundleCommands {
+    /// Validate bundle identities, source constraints, ordering, targets, and approval policy.
+    Validate {
+        manifest: std::path::PathBuf,
+        #[command(flatten)]
+        output: JsonOutput,
     },
 }
 
@@ -265,6 +282,11 @@ enum InsightStatusArg {
 
 #[derive(Subcommand)]
 enum SkillCommands {
+    /// List descriptive Skill Categories.
+    Categories {
+        #[command(flatten)]
+        output: JsonOutput,
+    },
     /// Create a guided Skill Draft in an explicitly selected Skill Workspace.
     Create {
         #[arg(long, value_name = "PATH")]
@@ -279,6 +301,8 @@ enum SkillCommands {
         triggers: Option<String>,
         #[arg(long)]
         non_goals: Option<String>,
+        #[arg(long = "category", value_name = "CATEGORY")]
+        categories: Vec<String>,
         #[arg(long)]
         dry_run: bool,
         #[arg(long)]
@@ -298,6 +322,14 @@ enum SkillCommands {
     Drafts {
         #[arg(long, value_name = "PATH")]
         workspace: Option<std::path::PathBuf>,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
+    /// Resume a structured Skill Draft without writing to its Workspace.
+    Resume {
+        id: String,
+        #[arg(long, value_name = "PATH")]
+        workspace: std::path::PathBuf,
         #[command(flatten)]
         output: JsonOutput,
     },
@@ -503,9 +535,11 @@ async fn main() {
             } => args.output.json,
             Commands::Skill {
                 command:
-                    SkillCommands::Create { output, .. }
+                    SkillCommands::Categories { output }
+                    | SkillCommands::Create { output, .. }
                     | SkillCommands::Validate { output, .. }
                     | SkillCommands::Drafts { output, .. }
+                    | SkillCommands::Resume { output, .. }
                     | SkillCommands::Remediate { output, .. }
                     | SkillCommands::Install { output, .. }
                     | SkillCommands::Update { output, .. }
@@ -541,6 +575,9 @@ async fn main() {
                 | InsightCommands::Unsuppress { output, .. }
                 | InsightCommands::Propose { output, .. } => output.json,
                 InsightCommands::List { output, .. } => output.json,
+            },
+            Commands::Bundle { command } => match command {
+                BundleCommands::Validate { output, .. } => output.json,
             },
             _ => false,
         };
@@ -623,6 +660,9 @@ async fn main() {
         Commands::Insight {
             command: InsightCommands::Propose { .. },
         } => "insight propose",
+        Commands::Bundle {
+            command: BundleCommands::Validate { .. },
+        } => "bundle validate",
         Commands::Agent => "agent",
         Commands::Search(_)
         | Commands::Skill {
@@ -632,6 +672,9 @@ async fn main() {
             command: SkillCommands::Preview { .. },
         } => "skill preview",
         Commands::Skill {
+            command: SkillCommands::Categories { .. },
+        } => "skill categories",
+        Commands::Skill {
             command: SkillCommands::Create { .. },
         } => "skill create",
         Commands::Skill {
@@ -640,6 +683,9 @@ async fn main() {
         Commands::Skill {
             command: SkillCommands::Drafts { .. },
         } => "skill drafts",
+        Commands::Skill {
+            command: SkillCommands::Resume { .. },
+        } => "skill resume",
         Commands::Skill {
             command: SkillCommands::Remediate { .. },
         } => "skill remediate",
@@ -1183,6 +1229,49 @@ async fn run_local(
                 ),
             }
         }
+        Commands::Bundle {
+            command: BundleCommands::Validate { manifest, output },
+        } => {
+            let metadata = std::fs::symlink_metadata(&manifest).map_err(|error| {
+                local_error(format!(
+                    "cannot inspect bundle manifest '{}': {error}",
+                    manifest.display()
+                ))
+            })?;
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || metadata.len() > 1_048_576
+            {
+                return Err(local_error(
+                    "bundle manifest must be a regular, non-symlink file no larger than 1 MiB"
+                        .to_string(),
+                ));
+            }
+            let bytes = std::fs::read(&manifest).map_err(|error| {
+                local_error(format!(
+                    "cannot read bundle manifest '{}': {error}",
+                    manifest.display()
+                ))
+            })?;
+            let manifest: SkillBundleManifest = serde_json::from_slice(&bytes)
+                .map_err(|error| local_error(format!("invalid bundle manifest: {error}")))?;
+            let validation = manifest.validate();
+            return render_local_artifact(
+                serde_json::json!({
+                    "validation": validation,
+                    "deploymentEnabled": false,
+                }),
+                "bundle validate",
+                output.json || json,
+            );
+        }
+        Commands::Skill {
+            command: SkillCommands::Categories { output },
+        } => render_local_artifact(
+            serde_json::json!({ "categories": SKILL_CATEGORIES }),
+            "skill categories",
+            output.json || json,
+        ),
         Commands::Skill {
             command:
                 SkillCommands::Create {
@@ -1192,6 +1281,7 @@ async fn run_local(
                     description,
                     triggers,
                     non_goals,
+                    categories,
                     dry_run,
                     yes,
                     output,
@@ -1224,11 +1314,12 @@ async fn run_local(
             }
             let input = SkillDraftInput {
                 workspace,
-                name: prompt_value(name, "Skill name (lowercase slug)")?,
-                purpose: prompt_value(purpose, "What should the skill help accomplish?")?,
-                description: prompt_value(description, "Describe the skill in one sentence")?,
-                triggers: prompt_value(triggers, "When should the skill activate?")?,
-                non_goals: prompt_value(non_goals, "What should the skill not do?")?,
+                name: prompt_value(name, authoring_question("name"))?,
+                purpose: prompt_value(purpose, authoring_question("purpose"))?,
+                description: prompt_value(description, authoring_question("description"))?,
+                triggers: prompt_value(triggers, authoring_question("triggers"))?,
+                non_goals: prompt_value(non_goals, authoring_question("non-goals"))?,
+                categories,
             };
             let service = SkillAuthoringService::new(
                 CopilotAdapter::local(),
@@ -1246,7 +1337,7 @@ async fn run_local(
             if !yes {
                 confirm_action(
                     &format!(
-                        "Create an incomplete Skill Draft at {}:\n{}",
+                        "Create a Skill Draft at {}:\n{}",
                         plan.skill_path, plan.preview
                     ),
                     "Write this Skill Draft to the selected Workspace?",
@@ -1303,6 +1394,30 @@ async fn run_local(
             render_local_artifact(
                 serde_json::json!({ "drafts": drafts }),
                 "skill drafts",
+                output.json || json,
+            )
+        }
+        Commands::Skill {
+            command:
+                SkillCommands::Resume {
+                    id,
+                    workspace,
+                    output,
+                },
+        } => {
+            let service = SkillAuthoringService::new(
+                CopilotAdapter::local(),
+                repository,
+                FsSkillDraftRepository::new(state_path.with_extension("drafts")),
+            );
+            let draft = service.resume(&id, &workspace).map_err(local_error)?;
+            render_local_artifact(
+                serde_json::json!({
+                    "draft": draft,
+                    "nextStep": "Edit the SKILL.md in this Workspace and run skill validate.",
+                    "writesPerformed": false,
+                }),
+                "skill resume",
                 output.json || json,
             )
         }
@@ -1630,11 +1745,11 @@ fn confirm_plan(plan: &LifecycleResult, prompt: &str) -> Result<bool, Diagnostic
 
 fn authoring_question(field: &str) -> &'static str {
     match field {
-        "name" => "What concise lowercase skill name should identify this capability?",
-        "purpose" => "What user goal should this skill accomplish?",
-        "description" => "How should an assistant recognize what this skill does?",
-        "triggers" => "When should this skill activate, and what requests should trigger it?",
-        _ => "What should this skill explicitly not do?",
+        "name" => "What concise lowercase name describes one user-recognizable capability?",
+        "purpose" => "What observable outcome should this skill produce, and what must it know before starting?",
+        "description" => "In one sentence, what task does this skill handle and what context activates it?",
+        "triggers" => "Give a concrete activating request and a nearby counterexample where this skill should stay inactive.",
+        _ => "What actions, assumptions, or side effects are out of scope, and how should uncertainty be handled?",
     }
 }
 
