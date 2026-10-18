@@ -1,0 +1,107 @@
+<!doctype html>
+<!-- THROWAWAY PROTOTYPE: issue 46. Replace after user selects a direction. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>TASC agent shell v2 prototype</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0b1020; --panel:#111a31; --panel2:#172342; --ink:#f4f7ff; --muted:#aab7d6; --line:#2b3b66; --cyan:#5de4ff; --pink:#ff63c3; --yellow:#ffe66d; --green:#6dffb0; --red:#ff7b92; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:radial-gradient(circle at 20% 0%,#202b62 0,#0b1020 45%); color:var(--ink); font:15px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }
+    main { max-width:1240px; margin:auto; padding:28px 20px 100px; }
+    .banner { font-weight:900; font-size:clamp(20px,4vw,42px); line-height:1; letter-spacing:.08em; background:linear-gradient(90deg,var(--pink),var(--yellow),var(--cyan),var(--green)); color:transparent; background-clip:text; -webkit-background-clip:text; }
+    .sub { color:var(--muted); margin:10px 0 22px; }
+    .status { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px; }
+    .status span,.tag { border:1px solid var(--line); border-radius:999px; padding:5px 9px; color:var(--muted); background:#0e1730; }
+    .status b { color:var(--ink); }
+    .shell { border:1px solid var(--line); border-radius:14px; overflow:hidden; background:rgba(17,26,49,.92); box-shadow:0 18px 60px #0007; }
+    .top { padding:14px 16px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; gap:12px; }
+    .top strong { color:var(--cyan); }
+    .content { padding:16px; }
+    .grid { display:grid; grid-template-columns:1.3fr .7fr; gap:14px; }
+    .panel { border:1px solid var(--line); border-radius:10px; padding:14px; background:linear-gradient(145deg,#15213f,#0f1830); }
+    h2 { font-size:15px; margin:0 0 12px; color:var(--yellow); }
+    .muted { color:var(--muted); }
+    .row { display:grid; grid-template-columns:32px 1.1fr .9fr .8fr; gap:8px; padding:9px 0; border-bottom:1px solid #263657; }
+    .row:last-child { border-bottom:0; }
+    .row .num { color:var(--pink); }
+    .row .name { color:var(--cyan); }
+    .row .good { color:var(--green); }
+    .row .warn { color:var(--yellow); }
+    .log { display:grid; gap:9px; }
+    .event { padding:9px; border-left:3px solid var(--cyan); background:#0d1730; }
+    .event b { color:var(--green); }
+    pre { margin:0; white-space:pre-wrap; color:var(--muted); }
+    .prompt { margin-top:14px; padding:11px 12px; border:1px solid var(--cyan); border-radius:8px; color:var(--ink); background:#0b1530; }
+    .prompt b { color:var(--pink); }
+    .bottom { position:fixed; left:50%; bottom:18px; transform:translateX(-50%); display:flex; gap:10px; align-items:center; padding:8px 12px; border:1px solid var(--line); border-radius:999px; background:#101a33ee; box-shadow:0 10px 30px #0008; }
+    button { border:1px solid var(--line); border-radius:999px; background:#15213f; color:var(--ink); padding:7px 12px; font:inherit; cursor:pointer; }
+    button:hover,button.active { border-color:var(--cyan); color:var(--cyan); }
+    .variant { color:var(--yellow); min-width:180px; text-align:center; }
+    .hidden { display:none; }
+    @media(max-width:800px) { .grid { grid-template-columns:1fr; } .row { grid-template-columns:26px 1fr 1fr; } .row .path { grid-column:2/4; } }
+  </style>
+</head>
+<body>
+<main>
+  <div class="banner">⚡ T U R B O  A G E N T  S K I L L S</div>
+  <p class="sub">Throwaway UI prototype · issue 46 · use ←/→ or the bottom switcher.</p>
+  <div id="app"></div>
+</main>
+<div class="bottom">
+  <button id="prev" aria-label="Previous variant">←</button>
+  <span class="variant" id="label"></span>
+  <button id="next" aria-label="Next variant">→</button>
+</div>
+<script>
+  const variants = [
+    { key:"A", name:"Command-first", render:commandFirst },
+    { key:"B", name:"Dashboard-first", render:dashboardFirst },
+    { key:"C", name:"Inventory-first", render:inventoryFirst }
+  ];
+  const skills = [
+    ["1","review-helper","tracked","Copilot · project","good"],
+    ["2","security-audit","untracked","Copilot · user","warn"],
+    ["3","docs-writer","tracked","Claude · project","good"],
+    ["4","release-check","watched","GitHub source","warn"]
+  ];
+  function status() {
+    return `<div class="status"><span>gh <b class="good">● logged in</b></span><span>model <b>auto</b></span><span>tokens <b>1,284</b></span><span>skills <b>4</b></span><span>tracked <b>2</b></span><span>watched <b>1</b></span></div>`;
+  }
+  function table() {
+    return `<div class="panel"><h2>Skills · 1–4 of 4</h2>${skills.map(s => `<div class="row"><span class="num">${s[0]}</span><span class="name">${s[1]}</span><span class="${s[4]}">${s[2]}</span><span class="path">${s[3]}</span></div>`).join("")}</div>`;
+  }
+  function events() {
+    return `<div class="panel"><h2>Activity</h2><div class="log"><div class="event"><b>✓ Ready</b><br><span class="muted">4 skills discovered · 1 needs Tracking</span></div><div class="event"><b>◎ Thinking</b><br><span class="muted">Discovering skills for “review PRs”</span></div><div class="event"><b>! Action needed</b><br><span class="muted">Track security-audit? [a]ll [s]elect [n]o</span></div></div></div>`;
+  }
+  function commandFirst() {
+    return `<div class="shell"><div class="top"><strong>tasc agent</strong><span class="muted">/help · /model · /quit</span></div><div class="content">${status()}<div class="grid"><div class="panel"><h2>Conversation</h2><pre><span class="muted">you</span>  find a skill for reviewing PRs
+
+<span style="color:var(--cyan)">tasc</span>  <span style="color:var(--yellow)">◎</span> I found 3 candidates. Best fit:
+     <span style="color:var(--green)">1.</span> review-helper · matches PR review + Rust
+     <span style="color:var(--green)">2.</span> code-reviewer · matches PR review
+
+     Use <b>/skill install 1</b> to preview a secure install.</pre><div class="prompt"><b>tasc></b> /skill list</div></div>${events()}</div></div></div>`;
+  }
+  function dashboardFirst() {
+    return `<div class="shell"><div class="top"><strong>tasc · workspace overview</strong><span class="muted">profile: default</span></div><div class="content">${status()}<div class="grid"><div>${table()}<div class="panel" style="margin-top:14px"><h2>Next best actions</h2><p class="muted">→ Track 1 untracked installation</p><p class="muted">→ Review 1 watched source update</p><p class="muted">→ Run consistency check across 2 tracked skills</p></div></div>${events()}</div><div class="prompt"><b>tasc></b> ask anything or use /skill, /discover, /eval, /audit</div></div></div>`;
+  }
+  function inventoryFirst() {
+    return `<div class="shell"><div class="top"><strong>tasc · skill inventory</strong><span class="muted">↑↓ select · enter inspect · / commands</span></div><div class="content">${status()}<div class="grid"><div>${table()}<div class="panel" style="margin-top:14px"><h2>Selected · security-audit</h2><p class="muted">Untracked installation · user scope · .copilot</p><p class="muted">Source: manual copy · provenance unavailable</p><p><span class="tag">[t] track</span> <span class="tag">[e] eval</span> <span class="tag">[c] check</span> <span class="tag">[w] watch source</span></p></div></div><div class="panel"><h2>Details</h2><p class="muted">Description excerpt</p><p>Find exposed secrets and risky instructions in local Agent Skills.</p><p class="muted">Status</p><p style="color:var(--yellow)">Needs Tracking</p><div class="prompt"><b>?</b> Track this installation now?<br><span class="muted">[y]es · [s]elect more · [n]o</span></div></div></div></div></div>`;
+  }
+  let index = Number(new URLSearchParams(location.search).get("variant") || 0);
+  if (!Number.isFinite(index) || index < 0 || index >= variants.length) index = 0;
+  function render() {
+    const current = variants[index];
+    document.querySelector("#app").innerHTML = current.render();
+    document.querySelector("#label").textContent = `${current.key} · ${current.name}`;
+  }
+  function move(delta) { index = (index + delta + variants.length) % variants.length; history.replaceState(null, "", `?variant=${index}`); render(); }
+  document.querySelector("#prev").onclick = () => move(-1);
+  document.querySelector("#next").onclick = () => move(1);
+  addEventListener("keydown", event => { if (!["INPUT","TEXTAREA"].includes(document.activeElement.tagName)) { if (event.key === "ArrowLeft") move(-1); if (event.key === "ArrowRight") move(1); } });
+  render();
+</script>
+</body>
+</html>
