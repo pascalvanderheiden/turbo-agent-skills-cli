@@ -36,6 +36,14 @@ _Avoid_: Enabled plugin, Skill Identity
 The origin from which an Agent Skill can be discovered, installed, shared, or updated.
 _Avoid_: Registry, marketplace
 
+**Search**:
+A strict lookup of Agent Skills using explicit names, keywords, or metadata fields, returning reproducible matches without interpreting an unstated user intent.
+_Avoid_: Discover, recommendation
+
+**Discover**:
+An intent-oriented way to find Agent Skills across eligible local and remote Skill Sources, using explainable metadata, category, and capability evidence rather than strict keyword matching alone.
+_Avoid_: Search, opaque recommendation
+
 **Source Revision**:
 The reproducible upstream state observed for a Skill Source, identified by an immutable commit or digest when available, with a content digest as fallback. A declared version is descriptive metadata, not the sole update key.
 _Avoid_: Version, timestamp
@@ -163,6 +171,14 @@ _Avoid_: Skill Bundle, capability owner
 **Skill Bundle**:
 A named, versioned, deployable manifest of selected Skill Identities, source constraints, and installation intent that can be shared without copying credentials or unrelated Local State.
 _Avoid_: Skill Category, Portable Skill Bundle
+
+**Bundle Deployment**:
+The explicit installation of a Skill Bundle into selected Adapter Targets after resolving its source constraints, checking security policy, reviewing one bounded plan, and preserving user-owned changes.
+_Avoid_: Bulk install, silent sync
+
+**Profile Skill Source**:
+An optional Skill Source repository linked to a TASC Profile as the source-controlled home for authored Agent Skills, Categories, and Skill Bundles.
+_Avoid_: Marketplace, credential store
 
 **Watch Check**:
 A user-triggered comparison between a Watchlist target and its last observed Source Revision that reports changes without updating an Installation.
