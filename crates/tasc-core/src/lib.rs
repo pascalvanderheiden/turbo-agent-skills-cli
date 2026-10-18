@@ -275,7 +275,7 @@ impl Inventory {
             .items
             .iter()
             .filter(|item| {
-                query.detail.as_deref().map_or(true, |detail| {
+                query.detail.as_deref().is_none_or(|detail| {
                     item.action_id == detail
                         || item.identity.id == detail
                         || item.installation_id == detail
@@ -320,7 +320,7 @@ impl Inventory {
             }),
             "lifecycle" => items.sort_by(|left, right| {
                 lifecycle_filter(left.lifecycle_state)
-                    .cmp(&lifecycle_filter(right.lifecycle_state))
+                    .cmp(lifecycle_filter(right.lifecycle_state))
                     .then_with(|| left.action_id.cmp(&right.action_id))
             }),
             "scope" => items.sort_by(|left, right| {
@@ -363,9 +363,7 @@ impl Inventory {
 }
 
 fn matches_filter(value: Option<&str>, expected: Option<&str>) -> bool {
-    expected.map_or(true, |expected| {
-        value.is_some_and(|value| value.eq_ignore_ascii_case(expected))
-    })
+    expected.is_none_or(|expected| value.is_some_and(|value| value.eq_ignore_ascii_case(expected)))
 }
 
 fn lifecycle_filter(status: Option<InstallationStatus>) -> &'static str {

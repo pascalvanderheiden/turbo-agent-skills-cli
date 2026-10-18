@@ -7,6 +7,7 @@ import json
 import re
 import sys
 import tarfile
+import uuid
 from pathlib import Path
 
 
@@ -40,6 +41,49 @@ def validate_tag(tag, package_version, protected):
         raise ValueError("release tag is not protected by a ruleset")
 
 
+def validate_version_metadata(root, version):
+    root = Path(root)
+    checks = {
+        "crates/tasc-cli/Cargo.toml": (
+            r'^version\s*=\s*"([^"]+)"',
+            version,
+        ),
+        "docs/site/versions.json": (
+            r'"currentVersion"\s*:\s*"([^"]+)"',
+            version,
+        ),
+        "skills/tasc-command/manifest.json": (
+            r'"version"\s*:\s*"([^"]+)"',
+            version,
+        ),
+        "skills/tasc-command/SKILL.md": (
+            r"^  tasc-version: ([0-9]+\.[0-9]+\.[0-9]+)$",
+            version,
+        ),
+        "install.sh": (
+            r'^VERSION="([^"]+)"',
+            version,
+        ),
+        "install.ps1": (
+            r'^\$Version = "([^"]+)"',
+            version,
+        ),
+    }
+    for relative_path, (pattern, expected) in checks.items():
+        path = root / relative_path
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError as error:
+            raise ValueError(f"missing version metadata in {relative_path}: {error}") from error
+        match = re.search(pattern, content, re.MULTILINE)
+        if not match:
+            raise ValueError(f"could not read version metadata from {relative_path}")
+        if match.group(1) != expected:
+            raise ValueError(
+                f"{relative_path} version {match.group(1)} does not match release {expected}"
+            )
+
+
 def make_archive(binary, target, version, output_dir):
     if target not in TARGETS:
         raise ValueError(f"unsupported release target: {target}")
@@ -69,6 +113,56 @@ def make_archive(binary, target, version, output_dir):
     return archive
 
 
+def make_command_skill_archive(skill_directory, version, output_dir):
+    if not SEMVER.fullmatch(version):
+        raise ValueError("Command Skill version must be a stable vMAJOR.MINOR.PATCH SemVer")
+    skill_directory = Path(skill_directory)
+    manifest_path = skill_directory / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"missing or invalid Command Skill manifest: {error}") from error
+    if manifest.get("schemaVersion") != 1 or manifest.get("id") != "tasc-command":
+        raise ValueError("Command Skill manifest has an unsupported schema or ID")
+    if manifest.get("version") != version[1:]:
+        raise ValueError(
+            f"Command Skill version {manifest.get('version')} does not match release {version}"
+        )
+    skill_path = skill_directory / "SKILL.md"
+    adapter_path = skill_directory / "adapters" / "copilot.json"
+    if not skill_path.is_file() or not adapter_path.is_file():
+        raise ValueError("Command Skill package is missing SKILL.md or Copilot metadata")
+    skill = skill_path.read_text(encoding="utf-8")
+    if not re.search(rf"^  tasc-version: {re.escape(version[1:])}$", skill, re.MULTILINE):
+        raise ValueError("Command Skill frontmatter version does not match the release")
+    adapter = json.loads(adapter_path.read_text(encoding="utf-8"))
+    if adapter.get("schemaVersion") != 1 or adapter.get("adapter") != "copilot":
+        raise ValueError("Command Skill Copilot adapter metadata is invalid")
+
+    archive = Path(output_dir) / f"tasc-command-skill-{version}.tar.gz"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    with archive.open("wb") as output:
+        with gzip.GzipFile(filename="", fileobj=output, mode="wb", mtime=0) as compressed:
+            with tarfile.open(fileobj=compressed, mode="w", format=tarfile.GNU_FORMAT) as bundle:
+                for path in sorted(skill_directory.rglob("*")):
+                    if path.is_symlink():
+                        raise ValueError(f"Command Skill package cannot contain symlinks: {path}")
+                    if not path.is_file():
+                        continue
+                    relative = path.relative_to(skill_directory)
+                    info = tarfile.TarInfo(f"tasc-command/{relative.as_posix()}")
+                    info.size = path.stat().st_size
+                    info.mode = 0o644
+                    info.uid = 0
+                    info.gid = 0
+                    info.uname = ""
+                    info.gname = ""
+                    info.mtime = 0
+                    with path.open("rb") as contents:
+                        bundle.addfile(info, contents)
+    return archive
+
+
 def write_checksums(directory):
     directory = Path(directory)
     assets = sorted(
@@ -84,6 +178,29 @@ def write_checksums(directory):
     checksums = directory / "SHA256SUMS.txt"
     checksums.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return checksums
+
+
+def prepare_cyclonedx_sbom(path, identity):
+    path = Path(path)
+    if not identity:
+        raise ValueError("CycloneDX SBOM identity must not be empty")
+    try:
+        sbom = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"missing or invalid CycloneDX SBOM: {error}") from error
+    if (
+        sbom.get("bomFormat") != "CycloneDX"
+        or not sbom.get("specVersion")
+        or not sbom.get("components")
+    ):
+        raise ValueError("CycloneDX SBOM must declare format, specVersion, and components")
+
+    sbom["serialNumber"] = f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, identity)}"
+    path.write_text(
+        json.dumps(sbom, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
 
 
 def validate_assets(directory, version):
@@ -105,13 +222,60 @@ def validate_assets(directory, version):
         extra = sorted(targets - TARGETS)
         raise ValueError(f"release archive targets mismatch; missing={missing}, extra={extra}")
 
+    command_skill_archives = sorted(directory.glob("tasc-command-skill-v*.tar.gz"))
+    if version:
+        command_skill_path = directory / f"tasc-command-skill-{version}.tar.gz"
+        expected_command_skill_version = version.removeprefix("v")
+    elif len(command_skill_archives) == 1:
+        command_skill_path = command_skill_archives[0]
+        match = SEMVER.fullmatch(command_skill_path.name.removeprefix("tasc-command-skill-").removesuffix(".tar.gz"))
+        if not match:
+            raise ValueError("Command Skill package filename must use stable SemVer")
+        expected_command_skill_version = command_skill_path.name.removeprefix(
+            "tasc-command-skill-v"
+        ).removesuffix(".tar.gz")
+    else:
+        raise ValueError("release assets must contain exactly one Command Skill package")
+    try:
+        with tarfile.open(command_skill_path, "r:gz") as command_skill:
+            names = set(command_skill.getnames())
+            manifest_member = command_skill.extractfile("tasc-command/manifest.json")
+            skill_member = command_skill.extractfile("tasc-command/SKILL.md")
+            adapter_member = command_skill.extractfile("tasc-command/adapters/copilot.json")
+            if not manifest_member or not skill_member or not adapter_member:
+                raise ValueError("Command Skill archive is missing a required package file")
+            manifest = json.load(manifest_member)
+            skill = skill_member.read().decode("utf-8")
+            adapter = json.load(adapter_member)
+    except (OSError, tarfile.TarError, KeyError, json.JSONDecodeError) as error:
+        raise ValueError(f"missing or invalid Command Skill package: {error}") from error
+    if (
+        len(names) != 3
+        or manifest.get("version") != expected_command_skill_version
+        or not re.search(
+            rf"^  tasc-version: {re.escape(expected_command_skill_version)}$",
+            skill,
+            re.MULTILINE,
+        )
+        or adapter.get("schemaVersion") != 1
+        or adapter.get("adapter") != "copilot"
+    ):
+        raise ValueError("Command Skill archive contents or version do not match the release")
+
     sbom_path = directory / "tasc.cdx.json"
     try:
         sbom = json.loads(sbom_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"missing or invalid CycloneDX SBOM: {error}") from error
-    if not sbom.get("bomFormat") == "CycloneDX" or not sbom.get("components"):
-        raise ValueError("CycloneDX SBOM must declare bomFormat and components")
+    if (
+        sbom.get("bomFormat") != "CycloneDX"
+        or not sbom.get("serialNumber")
+        or not sbom.get("specVersion")
+        or not sbom.get("components")
+    ):
+        raise ValueError(
+            "CycloneDX SBOM must declare bomFormat, serialNumber, specVersion, and components"
+        )
 
     checksum_path = directory / "SHA256SUMS.txt"
     if not checksum_path.is_file():
@@ -135,14 +299,27 @@ def main():
     validate.add_argument("--version", required=True)
     validate.add_argument("--protected", action="store_true")
 
+    metadata = commands.add_parser("validate-version")
+    metadata.add_argument("--version", required=True)
+    metadata.add_argument("--root", default=".")
+
     package = commands.add_parser("package")
     package.add_argument("--binary", required=True)
     package.add_argument("--target", required=True)
     package.add_argument("--version", required=True)
     package.add_argument("--output-dir", default="dist")
 
+    command_skill = commands.add_parser("command-skill")
+    command_skill.add_argument("--source-dir", default="skills/tasc-command")
+    command_skill.add_argument("--version", required=True)
+    command_skill.add_argument("--output-dir", default="dist")
+
     checksums = commands.add_parser("checksums")
     checksums.add_argument("--directory", default="dist")
+
+    sbom = commands.add_parser("prepare-sbom")
+    sbom.add_argument("--path", required=True)
+    sbom.add_argument("--identity", required=True)
 
     assets = commands.add_parser("validate-assets")
     assets.add_argument("--directory", default="dist")
@@ -152,10 +329,16 @@ def main():
     try:
         if args.command == "validate-tag":
             validate_tag(args.tag, args.version, args.protected)
+        elif args.command == "validate-version":
+            validate_version_metadata(args.root, args.version)
         elif args.command == "package":
             print(make_archive(args.binary, args.target, args.version, args.output_dir))
+        elif args.command == "command-skill":
+            print(make_command_skill_archive(args.source_dir, args.version, args.output_dir))
         elif args.command == "checksums":
             print(write_checksums(args.directory))
+        elif args.command == "prepare-sbom":
+            print(prepare_cyclonedx_sbom(args.path, args.identity))
         else:
             validate_assets(args.directory, args.version)
     except (OSError, ValueError, tarfile.TarError) as error:

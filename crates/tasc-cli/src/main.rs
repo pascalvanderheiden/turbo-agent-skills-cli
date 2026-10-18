@@ -3,6 +3,9 @@ use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use tasc_agent::{
     authoring::{FsSkillDraftRepository, SkillAuthoringService, SkillDraftInput},
+    command_skill::{
+        self, CommandSkillApproval, CommandSkillPlan, CommandSkillResult, CommandSkillService,
+    },
     consistency::{
         ConsistencyArtifactRepository, ConsistencyService, FsConsistencyArtifactRepository,
     },
@@ -54,6 +57,8 @@ enum OutputFormat {
 enum Commands {
     /// Start a Copilot SDK conversational session.
     Agent,
+    /// Show the optional Command Skill installation choices without changing files.
+    Setup(JsonOutput),
     /// Record and inspect source metadata without installing skills.
     Source {
         #[command(subcommand)]
@@ -298,6 +303,11 @@ enum InsightStatusArg {
 
 #[derive(Subcommand)]
 enum SkillCommands {
+    /// Manage the first-party TASC Command Skill.
+    Command {
+        #[command(subcommand)]
+        command: CommandSkillCommands,
+    },
     /// List descriptive Skill Categories.
     Categories {
         #[command(flatten)]
@@ -432,6 +442,56 @@ enum SkillCommands {
         #[command(flatten)]
         output: JsonOutput,
     },
+}
+
+#[derive(Subcommand)]
+enum CommandSkillCommands {
+    /// Report supported Adapter Targets for an explicit installation scope.
+    Adapters {
+        #[arg(long, value_enum)]
+        scope: InstallScope,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
+    /// Perform a version and policy-capability handshake.
+    Capabilities {
+        #[arg(long)]
+        skill_version: Option<String>,
+        #[arg(long)]
+        policy_semantics_version: Option<u32>,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
+    /// List managed Command Skill Installations in the selected Profile.
+    List(JsonOutput),
+    /// Install, update, repair, or uninstall into an explicitly selected target.
+    Install(CommandSkillTargetArgs),
+    Update(CommandSkillTargetArgs),
+    Repair(CommandSkillTargetArgs),
+    Uninstall(CommandSkillTargetArgs),
+}
+
+#[derive(Args)]
+struct CommandSkillTargetArgs {
+    #[arg(long, value_enum)]
+    scope: InstallScope,
+    #[arg(long, value_enum, conflicts_with = "all_supported")]
+    adapter: Option<CommandSkillAdapterArg>,
+    #[arg(long, conflicts_with = "adapter")]
+    all_supported: bool,
+    #[arg(long)]
+    dry_run: bool,
+    #[arg(long)]
+    yes: bool,
+    #[arg(long)]
+    force: bool,
+    #[command(flatten)]
+    output: JsonOutput,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum CommandSkillAdapterArg {
+    Copilot,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -586,6 +646,17 @@ async fn main() {
                     | SkillCommands::Remove { output, .. }
                     | SkillCommands::Track { output, .. },
             } => output.json,
+            Commands::Skill {
+                command: SkillCommands::Command { command },
+            } => match command {
+                CommandSkillCommands::Adapters { output, .. }
+                | CommandSkillCommands::Capabilities { output, .. }
+                | CommandSkillCommands::List(output) => output.json,
+                CommandSkillCommands::Install(args)
+                | CommandSkillCommands::Update(args)
+                | CommandSkillCommands::Repair(args)
+                | CommandSkillCommands::Uninstall(args) => args.output.json,
+            },
             Commands::Watch { command } => match command {
                 WatchCommands::Add { output, .. }
                 | WatchCommands::Remove { output, .. }
@@ -620,7 +691,9 @@ async fn main() {
             Commands::Bundle { command } => match command {
                 BundleCommands::Validate { output, .. } => output.json,
             },
-            Commands::Audit(output) | Commands::Stats(output) => output.json,
+            Commands::Audit(output) | Commands::Stats(output) | Commands::Setup(output) => {
+                output.json
+            }
             _ => false,
         };
     let command = match &cli.command {
@@ -636,6 +709,49 @@ async fn main() {
         Commands::Source {
             command: SourceCommands::Capabilities(_),
         } => "source capabilities",
+        Commands::Setup(_) => "setup",
+        Commands::Skill {
+            command:
+                SkillCommands::Command {
+                    command: CommandSkillCommands::Adapters { .. },
+                },
+        } => "skill command adapters",
+        Commands::Skill {
+            command:
+                SkillCommands::Command {
+                    command: CommandSkillCommands::Capabilities { .. },
+                },
+        } => "skill command capabilities",
+        Commands::Skill {
+            command:
+                SkillCommands::Command {
+                    command: CommandSkillCommands::List(_),
+                },
+        } => "skill command list",
+        Commands::Skill {
+            command:
+                SkillCommands::Command {
+                    command: CommandSkillCommands::Install(_),
+                },
+        } => "skill command install",
+        Commands::Skill {
+            command:
+                SkillCommands::Command {
+                    command: CommandSkillCommands::Update(_),
+                },
+        } => "skill command update",
+        Commands::Skill {
+            command:
+                SkillCommands::Command {
+                    command: CommandSkillCommands::Repair(_),
+                },
+        } => "skill command repair",
+        Commands::Skill {
+            command:
+                SkillCommands::Command {
+                    command: CommandSkillCommands::Uninstall(_),
+                },
+        } => "skill command uninstall",
         Commands::Watch {
             command: WatchCommands::Add { .. },
         } => "watch add",
@@ -809,7 +925,7 @@ async fn run(
         ));
     }
     let value = match cli.command {
-        Commands::Agent => return agent::run(cli.offline).await,
+        Commands::Agent => return agent::run(cli.offline, cli.format == OutputFormat::Json).await,
         Commands::Source {
             command: SourceCommands::List(_),
         } => serde_json::json!({ "sources": discovery.sources()? }),
@@ -878,7 +994,7 @@ async fn run(
                 .await?
         ),
         Commands::Watch { command } => run_watch(command, state_path, cancel).await?,
-        command @ (Commands::Audit(_) | Commands::Stats(_)) => {
+        command @ (Commands::Audit(_) | Commands::Stats(_) | Commands::Setup(_)) => {
             return run_local(
                 command,
                 state_path,
@@ -899,6 +1015,19 @@ async fn run(
         Commands::Insight { command } => {
             return run_local(
                 Commands::Insight { command },
+                state_path,
+                cli.format == OutputFormat::Json,
+                cancel,
+            )
+            .await;
+        }
+        Commands::Skill {
+            command: SkillCommands::Command { command },
+        } => {
+            return run_local(
+                Commands::Skill {
+                    command: SkillCommands::Command { command },
+                },
                 state_path,
                 cli.format == OutputFormat::Json,
                 cancel,
@@ -2004,6 +2133,34 @@ async fn run_local(
     match command {
         Commands::Audit(output) => run_audit(state_path, repository, &service, output.json || json),
         Commands::Stats(output) => run_stats(state_path, repository, &service, output.json || json),
+        Commands::Setup(output) => {
+            let managed = CommandSkillService::new(repository.clone())
+                .list()?
+                .into_iter()
+                .map(|installation| installation.target_id)
+                .collect::<Vec<_>>();
+            render_local_artifact(
+                serde_json::json!({
+                    "commandSkill": {
+                        "offered": true,
+                        "installed": !managed.is_empty(),
+                        "installCommands": [
+                            "tasc skill command install --adapter copilot --scope user",
+                            "tasc skill command install --adapter copilot --scope project"
+                        ]
+                    },
+                    "supportedAdapters": {
+                        "user": command_skill::detected_adapters("user")["adapters"],
+                        "project": command_skill::detected_adapters("project")["adapters"]
+                    }
+                }),
+                "setup",
+                output.json || json,
+            )
+        }
+        Commands::Skill {
+            command: SkillCommands::Command { command },
+        } => run_command_skill(command, repository, json),
         Commands::Insight { command } => {
             let service = InsightService::new(
                 CopilotAdapter::local(),
@@ -2109,6 +2266,7 @@ async fn run_local(
                 ),
             }
         }
+
         Commands::Eval { command } => {
             let service = EvaluationService::new(
                 CopilotAdapter::local(),
@@ -2706,6 +2864,167 @@ async fn run_local(
             render_lifecycle(&result, "skill remove", output.json || json)
         }
         _ => unreachable!("discovery commands are dispatched by the shared discovery service"),
+    }
+}
+
+fn run_command_skill(
+    command: CommandSkillCommands,
+    repository: FsStateRepository,
+    json: bool,
+) -> Result<(), Diagnostic> {
+    match command {
+        CommandSkillCommands::Capabilities {
+            skill_version,
+            policy_semantics_version,
+            output,
+        } => {
+            let response =
+                command_skill::capabilities(skill_version.as_deref(), policy_semantics_version);
+            render_local_artifact(
+                response.get("result").cloned().unwrap_or(response),
+                "skill command capabilities",
+                output.json || json,
+            )
+        }
+        CommandSkillCommands::Adapters { scope, output } => {
+            let scope = install_scope_name(scope);
+            render_local_artifact(
+                command_skill::detected_adapters(scope),
+                "skill command adapters",
+                output.json || json,
+            )
+        }
+        CommandSkillCommands::List(output) => render_local_artifact(
+            serde_json::json!({
+                "installations": CommandSkillService::new(repository).list()?
+            }),
+            "skill command list",
+            output.json || json,
+        ),
+        CommandSkillCommands::Install(args) => {
+            run_command_skill_lifecycle("install", args, repository, json)
+        }
+        CommandSkillCommands::Update(args) => {
+            run_command_skill_lifecycle("update", args, repository, json)
+        }
+        CommandSkillCommands::Repair(args) => {
+            run_command_skill_lifecycle("repair", args, repository, json)
+        }
+        CommandSkillCommands::Uninstall(args) => {
+            run_command_skill_lifecycle("uninstall", args, repository, json)
+        }
+    }
+}
+
+fn run_command_skill_lifecycle(
+    operation: &str,
+    args: CommandSkillTargetArgs,
+    repository: FsStateRepository,
+    json: bool,
+) -> Result<(), Diagnostic> {
+    let scope = install_scope_name(args.scope);
+    if args.all_supported
+        && command_skill::detected_adapters(scope)["adapters"][0]["detected"] != true
+    {
+        return Err(Diagnostic::new(
+            "no_supported_adapters_detected",
+            "usage",
+            "tasc",
+            "No supported Adapter was detected for the selected scope.",
+            "Select an Adapter explicitly with --adapter copilot, or choose a detected scope.",
+        ));
+    }
+    if args.adapter.is_none() && !args.all_supported {
+        return Err(Diagnostic::new(
+            "adapter_selection_required",
+            "usage",
+            "tasc",
+            "Command Skill installation requires explicit Adapter selection.",
+            "Pass --adapter copilot or explicitly opt in with --all-supported.",
+        ));
+    }
+    let target = command_skill::supported_target(scope)?;
+    let service = CommandSkillService::new(repository);
+    let plan = service.plan(operation, scope, target, args.force)?;
+    let command = format!("skill command {operation}");
+    if args.dry_run {
+        return render_local_artifact(
+            serde_json::to_value(CommandSkillResult {
+                operation: operation.to_string(),
+                status: if plan.modified {
+                    InstallationStatus::Modified
+                } else {
+                    InstallationStatus::Planned
+                },
+                dry_run: true,
+                modified: plan.modified,
+                installation: None,
+                plan,
+            })
+            .map_err(|error| local_error(error.to_string()))?,
+            &command,
+            args.output.json || json,
+        );
+    }
+    if plan.modified && !args.force {
+        return Err(Diagnostic::new(
+            "modified_command_skill",
+            "usage",
+            "tasc",
+            "The Command Skill contains user modifications.",
+            "Review the dry-run plan and pass --force only if you approve replacing or removing those changes.",
+        ));
+    }
+    if !args.yes {
+        confirm_command_skill_plan(&plan)?;
+    }
+    let approval = CommandSkillApproval::approve(&plan)?;
+    let result = service.apply(plan, approval)?;
+    render_local_artifact(
+        serde_json::to_value(result).map_err(|error| local_error(error.to_string()))?,
+        &command,
+        args.output.json || json,
+    )
+}
+
+fn install_scope_name(scope: InstallScope) -> &'static str {
+    match scope {
+        InstallScope::Project => "project",
+        InstallScope::User => "user",
+    }
+}
+
+fn confirm_command_skill_plan(plan: &CommandSkillPlan) -> Result<(), Diagnostic> {
+    if !std::io::stdin().is_terminal() {
+        return Err(Diagnostic::new(
+            "command_skill_approval_required",
+            "usage",
+            "tasc",
+            "Command Skill mutation requires approval in an interactive terminal.",
+            "Review `tasc skill command <operation> --scope <scope> --adapter copilot --dry-run`, then rerun interactively or explicitly pass --yes.",
+        ));
+    }
+    eprintln!(
+        "Plan: {}",
+        serde_json::to_string_pretty(plan).map_err(|error| local_error(error.to_string()))?
+    );
+    eprint!("Approve this Command Skill Installation change? [y/N] ");
+    std::io::Write::flush(&mut std::io::stderr())
+        .map_err(|error| local_error(format!("cannot write confirmation prompt: {error}")))?;
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|error| local_error(format!("cannot read confirmation: {error}")))?;
+    if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        Ok(())
+    } else {
+        Err(Diagnostic::new(
+            "cancelled",
+            "cancelled",
+            "tasc",
+            "Command Skill Installation change cancelled.",
+            "Retry when ready.",
+        ))
     }
 }
 

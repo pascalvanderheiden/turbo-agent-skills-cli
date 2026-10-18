@@ -35,9 +35,10 @@ jobs:
             --tag "$GITHUB_REF_NAME" \
             --version "$(sed -n 's/^version = "\(.*\)"/\1/p' crates/tasc-cli/Cargo.toml | head -1)" \
             --protected
+          python3 .github/scripts/release.py validate-version --version "$version"
           cargo build --locked -p tasc
-          python3 docs/site/validate.py --binary target/debug/tasc --version "$version" --check-external
-          python3 -m unittest discover -s .github/scripts -p 'test_release.py'
+          python3 docs/site/validate.py --binary target/debug/tasc --version "$version"
+          python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 
   test:
     runs-on: ubuntu-24.04
@@ -139,6 +140,15 @@ jobs:
             --spec-version 1.5 \
             --override-filename tasc
           mv crates/tasc-cli/tasc.json dist/tasc.cdx.json
+          python3 .github/scripts/release.py prepare-sbom \
+            --path dist/tasc.cdx.json \
+            --identity "https://github.com/$GITHUB_REPOSITORY/releases/tag/$GITHUB_REF_NAME"
+      - name: Package inspectable TASC Command Skill
+        run: |
+          python3 .github/scripts/release.py command-skill \
+            --source-dir skills/tasc-command \
+            --version "$GITHUB_REF_NAME" \
+            --output-dir dist
       - name: Validate release assets and generate checksums
         run: |
           python3 .github/scripts/release.py checksums --directory dist

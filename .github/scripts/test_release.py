@@ -2,11 +2,21 @@ import gzip
 import hashlib
 import json
 import re
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
 
-from release import TARGETS, make_archive, validate_assets, validate_tag, write_checksums
+from release import (
+    TARGETS,
+    make_archive,
+    make_command_skill_archive,
+    prepare_cyclonedx_sbom,
+    validate_assets,
+    validate_tag,
+    validate_version_metadata,
+    write_checksums,
+)
 
 
 class ReleaseTests(unittest.TestCase):
@@ -41,6 +51,12 @@ class ReleaseTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     validate_tag(tag, version, protected)
 
+    def test_release_metadata_and_installer_versions_match(self):
+        root = Path(__file__).resolve().parents[2]
+        validate_version_metadata(root, "0.1.0")
+        with self.assertRaisesRegex(ValueError, "does not match release"):
+            validate_version_metadata(root, "0.2.0")
+
     def test_archives_reject_invalid_versions_and_targets(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "tasc"
@@ -68,6 +84,26 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(member.uid, 0)
                 self.assertEqual(archive.extractfile(member).read(), b"binary")
 
+    def test_command_skill_archive_is_reproducible_and_matches_release_version(self):
+        skill_directory = Path(__file__).resolve().parents[2] / "skills" / "tasc-command"
+        with tempfile.TemporaryDirectory() as directory:
+            first = make_command_skill_archive(skill_directory, "v0.1.0", directory)
+            first_bytes = first.read_bytes()
+            second = make_command_skill_archive(skill_directory, "v0.1.0", directory)
+
+            self.assertEqual(first_bytes, second.read_bytes())
+            with tarfile.open(first, "r:gz") as archive:
+                self.assertEqual(
+                   set(archive.getnames()),
+                   {
+                       "tasc-command/SKILL.md",
+                       "tasc-command/manifest.json",
+                       "tasc-command/adapters/copilot.json",
+                   },
+                )
+            with self.assertRaises(ValueError):
+                make_command_skill_archive(skill_directory, "v0.2.0", directory)
+
     def test_asset_validation_requires_all_targets_sbom_and_matching_checksums(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -81,14 +117,52 @@ class ReleaseTests(unittest.TestCase):
             for target in targets:
                 (root / f"tasc-v0.1.0-{target}.tar.gz").write_bytes(target.encode())
             (root / "tasc.cdx.json").write_text(
-                json.dumps({"bomFormat": "CycloneDX", "components": [{"name": "tasc"}]}),
+                json.dumps(
+                    {
+                        "bomFormat": "CycloneDX",
+                        "serialNumber": "urn:uuid:323cd151-d10f-5a98-96e7-50b88ed2e860",
+                        "specVersion": "1.5",
+                        "components": [{"name": "tasc"}],
+                    }
+                ),
                 encoding="utf-8",
+            )
+            make_command_skill_archive(
+                Path(__file__).resolve().parents[2] / "skills" / "tasc-command",
+                "v0.1.0",
+                root,
             )
             write_checksums(root)
             validate_assets(root, "v0.1.0")
             (root / "tasc.cdx.json").write_text("{}", encoding="utf-8")
             with self.assertRaises(ValueError):
                 validate_assets(root, "v0.1.0")
+
+    def test_reproducible_sbom_gets_deterministic_attestation_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            sbom_path = Path(directory) / "tasc.cdx.json"
+            sbom_path.write_text(
+                json.dumps(
+                    {
+                        "bomFormat": "CycloneDX",
+                        "specVersion": "1.5",
+                        "version": 1,
+                        "components": [{"name": "tasc"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            prepare_cyclonedx_sbom(sbom_path, "pascalvanderheiden/turbo-agent-skills-cli@v0.1.0")
+            first = sbom_path.read_bytes()
+            prepared = json.loads(first)
+
+            self.assertRegex(
+                prepared["serialNumber"],
+                r"^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            )
+            prepare_cyclonedx_sbom(sbom_path, "pascalvanderheiden/turbo-agent-skills-cli@v0.1.0")
+            self.assertEqual(first, sbom_path.read_bytes())
 
     def test_asset_validation_rejects_missing_platform_and_tampered_checksums(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -102,8 +176,20 @@ class ReleaseTests(unittest.TestCase):
             ):
                 (root / f"tasc-v0.1.0-{target}.tar.gz").write_bytes(target.encode())
             (root / "tasc.cdx.json").write_text(
-                json.dumps({"bomFormat": "CycloneDX", "components": [{"name": "tasc"}]}),
+                json.dumps(
+                    {
+                        "bomFormat": "CycloneDX",
+                        "serialNumber": "urn:uuid:323cd151-d10f-5a98-96e7-50b88ed2e860",
+                        "specVersion": "1.5",
+                        "components": [{"name": "tasc"}],
+                    }
+                ),
                 encoding="utf-8",
+            )
+            make_command_skill_archive(
+                Path(__file__).resolve().parents[2] / "skills" / "tasc-command",
+                "v0.1.0",
+                root,
             )
             write_checksums(root)
             (root / "tasc-v0.1.0-x86_64-pc-windows-msvc.tar.gz").unlink()

@@ -1,4 +1,5 @@
 pub mod authoring;
+pub mod command_skill;
 pub mod consistency;
 pub mod conversation;
 pub mod discovery;

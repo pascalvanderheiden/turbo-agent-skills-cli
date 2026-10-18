@@ -17,12 +17,24 @@ pub enum AgentToolRequest {
     ResolveReference {
         reference: String,
     },
+    TrackSkills {
+        selectors: Vec<String>,
+        all: bool,
+    },
     RunEvaluation {
         selector: String,
+    },
+    ListEvaluations,
+    ShowEvaluation {
+        id: String,
     },
     CheckConsistency {
         selectors: Vec<String>,
         all_installed: bool,
+    },
+    ListConsistency,
+    ShowConsistency {
+        id: String,
     },
     CheckSecurity {
         selectors: Vec<String>,
@@ -226,8 +238,19 @@ pub fn translate_tool_call(
         "tasc_resolve_reference" => Ok(AgentToolRequest::ResolveReference {
             reference: string_argument(&arguments, "reference").ok_or_else(invalid)?,
         }),
+        "tasc_track_skills" => Ok(AgentToolRequest::TrackSkills {
+            selectors: string_list(&arguments, "selectors").ok_or_else(invalid)?,
+            all: arguments
+                .get("all")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        }),
         "tasc_run_evaluation" => Ok(AgentToolRequest::RunEvaluation {
             selector: string_argument(&arguments, "selector").ok_or_else(invalid)?,
+        }),
+        "tasc_list_evaluations" => Ok(AgentToolRequest::ListEvaluations),
+        "tasc_show_evaluation" => Ok(AgentToolRequest::ShowEvaluation {
+            id: string_argument(&arguments, "id").ok_or_else(invalid)?,
         }),
         "tasc_check_consistency" => Ok(AgentToolRequest::CheckConsistency {
             selectors: string_list(&arguments, "selectors").ok_or_else(invalid)?,
@@ -235,6 +258,10 @@ pub fn translate_tool_call(
                 .get("allInstalled")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
+        }),
+        "tasc_list_consistency_checks" => Ok(AgentToolRequest::ListConsistency),
+        "tasc_show_consistency_check" => Ok(AgentToolRequest::ShowConsistency {
+            id: string_argument(&arguments, "id").ok_or_else(invalid)?,
         }),
         "tasc_check_security" => Ok(AgentToolRequest::CheckSecurity {
             selectors: string_list(&arguments, "selectors").ok_or_else(invalid)?,
@@ -374,7 +401,7 @@ pub fn fingerprint(parts: &[&[u8]]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentPlan, AgentSession, APPROVAL_TTL};
+    use super::{translate_tool_call, AgentPlan, AgentSession, AgentToolRequest, APPROVAL_TTL};
     use std::time::Instant;
 
     #[test]
@@ -434,6 +461,32 @@ mod tests {
                 .unwrap_err()
                 .code,
             "stale_approval"
+        );
+    }
+
+    #[test]
+    fn tracking_tool_uses_explicit_selectors_or_all_flag() {
+        assert_eq!(
+            translate_tool_call(
+                "tasc_track_skills",
+                serde_json::json!({"selectors":["installation:one"],"all":false})
+            )
+            .unwrap(),
+            AgentToolRequest::TrackSkills {
+                selectors: vec!["installation:one".to_string()],
+                all: false
+            }
+        );
+        assert_eq!(
+            translate_tool_call(
+                "tasc_track_skills",
+                serde_json::json!({"selectors":[],"all":true})
+            )
+            .unwrap(),
+            AgentToolRequest::TrackSkills {
+                selectors: Vec::new(),
+                all: true
+            }
         );
     }
 }

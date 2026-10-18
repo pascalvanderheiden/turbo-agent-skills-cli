@@ -3,40 +3,69 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="description" content="Task-oriented documentation for Turbo Agent Skills CLI.">
-    <title>TASC documentation</title>
+    <meta name="description" content="Discover, install, create, and safely manage coding-agent skills with TASC.">
+    <title>TASC | Turbo Agent Skills CLI</title>
     <style>
-      :root { color-scheme: light; font: 100%/1.6 system-ui, sans-serif; color: #182230; background: #f7f9fc; }
-      body { max-width: 58rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
-      a { color: #0755a5; }
+      :root { color-scheme: light; font: 100%/1.65 ui-monospace, monospace; color: #17202a; background: #f8efcf; }
+      body { max-width: 64rem; margin: 0 auto; padding: 1.5rem 1rem 4rem; }
+      a { color: #173f8a; text-decoration-thickness: .12em; text-underline-offset: .2em; }
+      a:focus { outline: 3px solid #a33b00; outline-offset: 3px; }
       .skip-link { position: absolute; left: -10000px; }
-      .skip-link:focus { left: 1rem; top: 1rem; background: white; padding: .5rem; }
-      main { padding: 1rem 0; }
-      .version { display: inline-block; padding: .15rem .6rem; border: 1px solid #526172; border-radius: 1rem; }
+      .skip-link:focus { left: 1rem; top: 1rem; background: #fff; padding: .5rem; }
+      header, nav, main { background: #fff9e8; border: 3px solid #17202a; box-shadow: 6px 6px 0 #17202a; margin: 1.5rem 0; padding: 1rem 1.25rem; }
+      nav ul { display: flex; flex-wrap: wrap; gap: .5rem 1.5rem; padding-left: 1.25rem; }
+      h1, h2 { color: #8b2b20; line-height: 1.2; }
+      .banner { color: #8b2b20; font-weight: 700; letter-spacing: .12em; }
+      pre { overflow-x: auto; padding: 1rem; background: #17202a; color: #fff9e8; }
+      code { font-family: inherit; }
     </style>
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to main content</a>
     <header>
-      <p><a href="https://github.com/pascalvanderheiden/turbo-agent-skills-cli">TASC on GitHub</a></p>
+      <p><strong>TASC // TURBO AGENT SKILLS CLI</strong></p>
+      <nav aria-label="Project links">
+        <ul>
+          <li><a href="docs/index.html">Stable documentation index</a></li>
+          <li><a href="https://github.com/pascalvanderheiden/turbo-agent-skills-cli/releases">Releases</a></li>
+          <li><a href="https://github.com/pascalvanderheiden/turbo-agent-skills-cli">Source code</a></li>
+        </ul>
+      </nav>
     </header>
-    <nav aria-label="Project links">
-      <ul>
-        <li><a href="v0.1.0/index.html">Version 0.1.0 task guides</a></li>
-        <li><a href="https://github.com/pascalvanderheiden/turbo-agent-skills-cli/releases">Releases</a></li>
-      </ul>
-    </nav>
     <main id="main">
-      <h1>TASC documentation</h1>
-      <p>Find a task guide for installing, safely managing, evaluating, and understanding local Agent Skills with Turbo Agent Skills CLI.</p>
-      <p>Documentation version: <span class="version">0.1.0</span></p>
-      <p><a href="v0.1.0/index.html">Read the TASC 0.1.0 task guides</a></p>
-      <h2>Project resources</h2>
+      <!-- README-CONTENT:START -->
+      <h1 id="tasc">TASC</h1>
+      <p class="banner">Turbo Agent Skills CLI</p>
+      <p>Local-first tools to discover, install, create, evaluate, and safely manage coding-agent skills.</p>
+      <h2 id="start-here">Start here</h2>
+      <p>Install TASC 0.1.0 on Linux, macOS, or Windows x64. The installers verify the selected release archive against its published SHA-256 checksum before installing it in a user-writable directory.</p>
+      <pre><code>curl -fsSL https://raw.githubusercontent.com/pascalvanderheiden/turbo-agent-skills-cli/v0.1.0/install.sh | bash</code></pre>
+      <pre><code>iex (irm https://raw.githubusercontent.com/pascalvanderheiden/turbo-agent-skills-cli/v0.1.0/install.ps1)</code></pre>
+      <p>First run:</p>
+      <pre><code>tasc setup
+tasc skill list
+tasc state status</code></pre>
+      <p><code>tasc setup</code> offers the optional first-party Command Skill. It never installs it without your choice.</p>
+      <h2 id="common-tasks">Common tasks</h2>
       <ul>
-        <li><a href="https://github.com/pascalvanderheiden/turbo-agent-skills-cli">Source code and issue tracker</a></li>
-        <li><a href="https://github.com/pascalvanderheiden/turbo-agent-skills-cli/releases">Release downloads and notes</a></li>
-        <li><a href="https://github.com/pascalvanderheiden/turbo-agent-skills-cli/blob/main/README.md">Full CLI overview</a></li>
+      <li><strong>Discover:</strong> <code>tasc discover &quot;review code changes&quot;</code> searches local skills and expands to GitHub when available.</li>
+      <li><strong>Install:</strong> <code>tasc skill install review --source owner/repo --dry-run</code>, then repeat with <code>--yes</code> after reviewing the plan.</li>
+      <li><strong>Create:</strong> <code>tasc skill create --workspace ./skill-workspace --name review-helper</code> authors in an explicit workspace; preview and approve before writing.</li>
+      <li><strong>Evaluate:</strong> <code>tasc eval run skill:file:///path/to/skill --json</code> runs deterministic package checks without executing skill instructions.</li>
+      <li><strong>Check:</strong> <code>tasc consistency check &lt;skill-id-1&gt; &lt;skill-id-2&gt; --json</code> compares selected skills. <code>tasc security check &lt;skill-id&gt;</code> checks local content without executing it.</li>
       </ul>
+      <p>Lifecycle changes require approval. <code>--dry-run</code> previews changes; locally modified skills need an explicit <code>--force</code>. Evaluations and checks produce immutable local evidence, not a security or quality guarantee.</p>
+      <h2 id="agent-and-command-skill">Agent and Command Skill</h2>
+      <p><code>tasc agent</code> starts a Copilot SDK conversation and displays the Turbo banner in an interactive terminal. Install and authenticate GitHub Copilot CLI first. The bundled TASC Command Skill is optional and uses the same versioned CLI contracts; manage it with <code>tasc skill command install</code>, <code>update</code>, <code>repair</code>, and <code>uninstall</code>.</p>
+      <p>Agent-assisted documentation changes may propose pull requests; they do not publish site copy or releases directly.</p>
+      <h2 id="documentation-and-releases">Documentation and releases</h2>
+      <ul>
+      <li><a href="https://pascalvanderheiden.github.io/turbo-agent-skills-cli/v0.1.0/index.html">TASC 0.1.0 user guides</a></li>
+      <li><a href="https://github.com/pascalvanderheiden/turbo-agent-skills-cli/releases">Release downloads, checksums, and attestations</a></li>
+      <li><a href="https://github.com/pascalvanderheiden/turbo-agent-skills-cli/blob/main/.github/RELEASE.md">Release governance and verification runbook</a></li>
+      </ul>
+      <p>TASC does not self-update. Select one of the five published Linux x64/ARM64, macOS x64/ARM64, or Windows x64 targets, verify the SHA-256 checksum, and install a newer release explicitly.</p>
+      <!-- README-CONTENT:END -->
     </main>
   </body>
 </html>
