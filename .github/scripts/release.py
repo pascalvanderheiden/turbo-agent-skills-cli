@@ -40,6 +40,49 @@ def validate_tag(tag, package_version, protected):
         raise ValueError("release tag is not protected by a ruleset")
 
 
+def validate_version_metadata(root, version):
+    root = Path(root)
+    checks = {
+        "crates/tasc-cli/Cargo.toml": (
+            r'^version\s*=\s*"([^"]+)"',
+            version,
+        ),
+        "docs/site/versions.json": (
+            r'"currentVersion"\s*:\s*"([^"]+)"',
+            version,
+        ),
+        "skills/tasc-command/manifest.json": (
+            r'"version"\s*:\s*"([^"]+)"',
+            version,
+        ),
+        "skills/tasc-command/SKILL.md": (
+            r"^  tasc-version: ([0-9]+\.[0-9]+\.[0-9]+)$",
+            version,
+        ),
+        "install.sh": (
+            r'^VERSION="([^"]+)"',
+            version,
+        ),
+        "install.ps1": (
+            r'^\$Version = "([^"]+)"',
+            version,
+        ),
+    }
+    for relative_path, (pattern, expected) in checks.items():
+        path = root / relative_path
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError as error:
+            raise ValueError(f"missing version metadata in {relative_path}: {error}") from error
+        match = re.search(pattern, content, re.MULTILINE)
+        if not match:
+            raise ValueError(f"could not read version metadata from {relative_path}")
+        if match.group(1) != expected:
+            raise ValueError(
+                f"{relative_path} version {match.group(1)} does not match release {expected}"
+            )
+
+
 def make_archive(binary, target, version, output_dir):
     if target not in TARGETS:
         raise ValueError(f"unsupported release target: {target}")
@@ -225,6 +268,10 @@ def main():
     validate.add_argument("--version", required=True)
     validate.add_argument("--protected", action="store_true")
 
+    metadata = commands.add_parser("validate-version")
+    metadata.add_argument("--version", required=True)
+    metadata.add_argument("--root", default=".")
+
     package = commands.add_parser("package")
     package.add_argument("--binary", required=True)
     package.add_argument("--target", required=True)
@@ -247,6 +294,8 @@ def main():
     try:
         if args.command == "validate-tag":
             validate_tag(args.tag, args.version, args.protected)
+        elif args.command == "validate-version":
+            validate_version_metadata(args.root, args.version)
         elif args.command == "package":
             print(make_archive(args.binary, args.target, args.version, args.output_dir))
         elif args.command == "command-skill":

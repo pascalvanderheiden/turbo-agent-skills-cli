@@ -49,7 +49,16 @@
     <main id="main">
       <section id="install">
         <h2>Install and verify</h2>
-        <p>Download the archive matching your operating system and CPU from the <a href="https://github.com/pascalvanderheiden/turbo-agent-skills-cli/releases">GitHub Releases page</a>. Archives are named <code>tasc-v0.1.0-&lt;Rust-target&gt;.tar.gz</code>.</p>
+        <p>Use the release-pinned installer for TASC 0.1.0. Each installer detects a supported platform, downloads the matching release archive, verifies its SHA-256 against <code>SHA256SUMS.txt</code>, and installs to a user-writable directory. Inspect the <a href="https://github.com/pascalvanderheiden/turbo-agent-skills-cli/blob/v0.1.0/install.sh">shell installer</a> or <a href="https://github.com/pascalvanderheiden/turbo-agent-skills-cli/blob/v0.1.0/install.ps1">PowerShell installer</a> before running it.</p>
+        <pre><code>curl -fsSL https://raw.githubusercontent.com/pascalvanderheiden/turbo-agent-skills-cli/v0.1.0/install.sh | bash</code></pre>
+        <pre><code>iex (irm https://raw.githubusercontent.com/pascalvanderheiden/turbo-agent-skills-cli/v0.1.0/install.ps1)</code></pre>
+        <p>The Bash installer supports Linux x64/ARM64, macOS Intel/Apple Silicon, and Windows x64 under Bash. The native PowerShell installer supports Windows x64. Unix-like systems install to <code>~/.local/bin</code>; Windows installs to <code>%LOCALAPPDATA%\Programs\TASC</code>. Set <code>TASC_INSTALL_DIR</code> to choose another writable directory.</p>
+        <p>After installation, initialize TASC and inspect your local inventory:</p>
+        <pre><code data-validate-command="setup;skill list;state status">tasc setup
+tasc skill list
+tasc state status</code></pre>
+        <p><code>tasc setup</code> offers the optional first-party TASC Command Skill; it never installs the Skill automatically.</p>
+        <p>The corresponding <a href="https://github.com/pascalvanderheiden/turbo-agent-skills-cli/releases/tag/v0.1.0">v0.1.0 release</a> publishes five verified targets:</p>
         <ul>
           <li>Linux x64: <code>x86_64-unknown-linux-gnu</code></li>
           <li>Linux ARM64: <code>aarch64-unknown-linux-gnu</code></li>
@@ -57,10 +66,7 @@
           <li>macOS Apple Silicon: <code>aarch64-apple-darwin</code></li>
           <li>Windows x64: <code>x86_64-pc-windows-msvc</code></li>
         </ul>
-        <p>Download <code>SHA256SUMS.txt</code> beside the archive. Verify the selected file before extracting it:</p>
-        <pre><code>sha256sum tasc-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
-shasum -a 256 tasc-v0.1.0-aarch64-apple-darwin.tar.gz</code></pre>
-        <p>Compare the resulting digest with the matching filename in the release checksum manifest. On Windows, use PowerShell <code>Get-FileHash -Algorithm SHA256 &lt;archive&gt;</code>. The published manifest covers all release assets, so do not run a whole-manifest check unless you downloaded every listed asset. Extract the verified archive and put its <code>tasc</code> executable on your PATH. TASC has no self-updater or installer script.</p>
+        <p>The installers verify the selected archive against the published checksum before extraction. You can also download the archive and manifest directly and verify the matching filename using <code>sha256sum</code>, <code>shasum -a 256</code>, or PowerShell <code>Get-FileHash -Algorithm SHA256</code>.</p>
         <p>Use GitHub CLI (<code>gh</code>) for GitHub discovery and skill lifecycle operations. A working GitHub CLI authentication is required for remote operations; local state and analysis commands work without network access. Waza is optional; the deterministic package smoke Evaluation does not execute skill instructions or require a model.</p>
       </section>
 
@@ -120,14 +126,17 @@ tasc insight suppress --reason "reviewed" --expires-in-days 30 example-insight</
 
       <section id="authoring">
         <h2>Author a skill</h2>
-        <p>Guided Skill Authoring (including <code>tasc skill create</code>) is not available in version 0.1.0. To author a skill today, create and edit its files yourself in a Skill Workspace—the explicitly selected writable source directory, not an installed copy. Review the skill format and retain the source in your own version control.</p>
-        <p>TASC’s Evaluation command can check local package metadata, but it is not a full authoring validator and does not prove that instructions are correct, safe, or effective. Do not treat a successful smoke Evaluation as approval to install or share a Skill Draft.</p>
+        <p><code>tasc skill create</code> guides authoring in an explicitly selected Skill Workspace. It previews the proposed skill and requires approval before writing; <code>--dry-run</code> never writes. Draft records are kept in the Workspace and incomplete drafts are excluded from ready-skill discovery.</p>
+        <pre><code data-validate-command="skill create --workspace ./skill-workspace --name review-helper --dry-run">tasc skill create --workspace ./skill-workspace --name review-helper --dry-run</code></pre>
+        <p>Resume a draft with <code>tasc skill resume</code>, inspect drafts with <code>tasc skill drafts</code>, and use <code>tasc skill validate</code> before treating a draft as ready. A ready draft is not installed or published by authoring.</p>
+        <p>Evaluation checks local package metadata but does not prove instructions are correct, safe, or effective. Do not treat a passing smoke Evaluation as approval to install or share a Skill Draft.</p>
       </section>
 
       <section id="security">
         <h2>Security and trust boundaries</h2>
-        <p>A TASC Security Check is planned but is not implemented in version 0.1.0. TASC does not scan skill contents for secrets, unsafe instructions, injection, permissions, executable content, or supply-chain indicators. Previewing a skill fetches and displays content; it does not execute it.</p>
-        <p>Review untrusted skill content and its source before installing or enabling it in an assistant. Treat skill instructions as untrusted input, follow the lifecycle dry-run and approval prompts, and avoid granting tools or permissions that are not needed. Evaluation and Consistency output are not security verdicts.</p>
+        <p><code>tasc security check</code> performs bounded static analysis of selected local skills or an explicitly selected Workspace. It checks for exposed secrets, unsafe permissions and instructions, injection or exfiltration patterns, risky executable content, supply-chain indicators, and suspicious references. It does not execute skills or fetch external references.</p>
+        <pre><code data-validate-command="security check --help">tasc security check --help</code></pre>
+        <p>Security findings are evidence, not a guarantee that content is safe. Review the source and skill instructions before installing or enabling them. Use exact-fingerprint suppressions with reasons and expiration; Evaluation and Consistency results are not security verdicts.</p>
         <p>Release archives have SHA-256 checksums, a CycloneDX SBOM, GitHub build-provenance attestations, and a separate SBOM attestation. Verify checksums and GitHub attestations before use. Platform-native code signing is not provided in this release.</p>
       </section>
 
@@ -166,7 +175,7 @@ tasc insight suppress --reason "reviewed" --expires-in-days 30 example-insight</
       </section>
     </main>
     <footer>
-      <p><a href="../index.html">Return to the documentation home</a></p>
+      <p><a href="../index.html">Return to the TASC landing page</a> · <a href="../docs/index.html">Browse all documentation versions</a></p>
     </footer>
   </body>
 </html>
