@@ -164,8 +164,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            draft="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" --jq .draft)"
+          release_id="$(
+            gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq ".[] | select(.tag_name == \"$GITHUB_REF_NAME\") | .id" |
+              head -1
+          )"
+          if [[ -n "$release_id" ]]; then
+            draft="$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" --jq .draft)"
             if [[ "$draft" == "true" ]]; then
               echo "An unpublished draft already exists for $GITHUB_REF_NAME; remove that draft before reassembling." >&2
             else
@@ -199,22 +204,31 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          draft="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" --jq .draft)"
-          if [[ "$draft" != "true" ]]; then
+          release_ids="$(
+            gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq ".[] | select(.tag_name == \"$GITHUB_REF_NAME\" and .draft == true) | .id"
+          )"
+          if [[ ! "$release_ids" =~ ^[0-9]+$ ]]; then
             echo "Expected a draft release for $GITHUB_REF_NAME; refusing to publish or mutate another release." >&2
             exit 1
           fi
+          echo "TASC_RELEASE_ID=$release_ids" >> "$GITHUB_ENV"
       - name: Publish immutable release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release edit "$GITHUB_REF_NAME" --draft=false
+        run: |
+          gh api --method PATCH \
+            "repos/$GITHUB_REPOSITORY/releases/$TASC_RELEASE_ID" \
+            -F draft=false >/dev/null
       - name: Verify release immutability
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ! immutable="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" --jq .immutable)"; then
-            if gh release edit "$GITHUB_REF_NAME" --draft; then
+          if ! immutable="$(gh api "repos/$GITHUB_REPOSITORY/releases/$TASC_RELEASE_ID" --jq .immutable)"; then
+            if gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/releases/$TASC_RELEASE_ID" \
+              -F draft=true >/dev/null; then
               echo "Could not verify release immutability; release was returned to draft." >&2
             else
               echo "Could not verify or return $GITHUB_REF_NAME to draft; manual intervention is required." >&2
@@ -222,7 +236,9 @@ jobs:
             exit 1
           fi
           if [[ "$immutable" != "true" ]]; then
-            if gh release edit "$GITHUB_REF_NAME" --draft; then
+            if gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/releases/$TASC_RELEASE_ID" \
+              -F draft=true >/dev/null; then
               echo "GitHub did not make $GITHUB_REF_NAME immutable; release was returned to draft." >&2
             else
               echo "GitHub did not make $GITHUB_REF_NAME immutable and it could not be returned to draft; manual intervention is required." >&2
