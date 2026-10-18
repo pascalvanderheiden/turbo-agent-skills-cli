@@ -175,7 +175,7 @@ fn valid_identity(identity: &SkillIdentity) -> bool {
         && valid_source_component(github_parts[1])
         && valid_source_component(github_parts[2])
         && !source.contains(['?', '#', '@', ' ']))
-        || (source.starts_with("file:///") && !source.contains(['?', '#']));
+        || valid_local_source(source);
     let path = identity.relative_path.as_str();
     let valid_path = !path.is_empty()
         && !path.starts_with('/')
@@ -185,6 +185,44 @@ fn valid_identity(identity: &SkillIdentity) -> bool {
             .all(|component| !component.is_empty() && component != "." && component != "..");
     let expected_id = format!("skill:{source}/{}", encode_path(path));
     identity.id == expected_id && valid_source && valid_path && valid_text(&identity.name, 128)
+}
+
+fn valid_local_source(source: &str) -> bool {
+    if source.contains(['?', '#']) {
+        return false;
+    }
+    let Some(encoded_path) = source.strip_prefix("file://") else {
+        return false;
+    };
+    let Some(path) = decode_uri_path(encoded_path) else {
+        return false;
+    };
+    if !path.starts_with('/') || path.contains('\\') || path.chars().any(char::is_control) {
+        return false;
+    }
+    let components = path.split('/').skip(1).collect::<Vec<_>>();
+    !components.is_empty()
+        && components
+            .iter()
+            .all(|component| !component.is_empty() && *component != "." && *component != "..")
+}
+
+fn decode_uri_path(path: &str) -> Option<String> {
+    let bytes = path.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = (*bytes.get(index + 1)? as char).to_digit(16)?;
+            let low = (*bytes.get(index + 2)? as char).to_digit(16)?;
+            decoded.push((high * 16 + low) as u8);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
 }
 
 fn valid_slug(value: &str) -> bool {
@@ -305,5 +343,29 @@ mod tests {
         let validation = manifest.validate();
         assert!(!validation.valid);
         assert!(validation.diagnostics.len() >= 4);
+    }
+
+    #[test]
+    fn bundle_manifest_rejects_traversal_and_malformed_local_file_sources() {
+        let mut manifest = manifest();
+        manifest.skills[0].identity.source = "file:///tmp/skill%20workspace".to_string();
+        manifest.skills[0].identity.id = "skill:file:///tmp/skill%20workspace/review".to_string();
+        manifest.skills[0].identity.relative_path = "review".to_string();
+        manifest.skills[1].dependencies =
+            vec!["skill:file:///tmp/skill%20workspace/review".to_string()];
+        assert!(manifest.validate().valid);
+
+        manifest.skills[0].identity.source = "file:///../../outside".to_string();
+        manifest.skills[0].identity.id = "skill:file:///../../outside/review".to_string();
+        manifest.skills[0].identity.relative_path = "review".to_string();
+        assert!(!manifest.validate().valid);
+
+        manifest.skills[0].identity.source = "file:///tmp/%2e%2e/outside".to_string();
+        manifest.skills[0].identity.id = "skill:file:///tmp/%2e%2e/outside/review".to_string();
+        assert!(!manifest.validate().valid);
+
+        manifest.skills[0].identity.source = "file:///tmp/%GG".to_string();
+        manifest.skills[0].identity.id = "skill:file:///tmp/%GG/review".to_string();
+        assert!(!manifest.validate().valid);
     }
 }

@@ -617,22 +617,36 @@ fn validate_input(input: &SkillDraftInput) -> Result<(), String> {
 }
 
 fn redact_input(input: &SkillDraftInput) -> SkillDraftInput {
-    let redact = |value: &str| {
-        value
-            .lines()
-            .map(redact_possible_secrets)
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
     SkillDraftInput {
         workspace: input.workspace.clone(),
         name: input.name.clone(),
-        purpose: redact(&input.purpose),
-        description: redact(&input.description),
-        triggers: redact(&input.triggers),
-        non_goals: redact(&input.non_goals),
+        purpose: redact_answer(&input.purpose),
+        description: redact_answer(&input.description),
+        triggers: redact_answer(&input.triggers),
+        non_goals: redact_answer(&input.non_goals),
         categories: input.categories.clone(),
     }
+}
+
+fn redact_answer(value: &str) -> String {
+    let mut in_private_key = false;
+    let mut redacted_lines = Vec::new();
+    for line in value.lines() {
+        let lower = line.to_ascii_lowercase();
+        if in_private_key {
+            if lower.contains("-----end") && lower.contains("private key") {
+                in_private_key = false;
+            }
+            continue;
+        }
+        if lower.contains("-----begin") && lower.contains("private key") {
+            redacted_lines.push("[REDACTED PRIVATE KEY MATERIAL]".to_string());
+            in_private_key = !(lower.contains("-----end") && lower.contains("private key"));
+            continue;
+        }
+        redacted_lines.push(redact_possible_secrets(line));
+    }
+    redacted_lines.join("\n")
 }
 
 fn validate_description(description: &str) -> Result<(), String> {
@@ -1158,6 +1172,35 @@ mod tests {
         assert!(!skill.contains("credential-value-123"));
         assert!(skill.contains("tascCategories: [\"testing\"]"));
         assert!(service.resume(&draft.id, &root).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn multiline_private_key_material_is_redacted_from_draft_and_skill_content() {
+        let root = test_root();
+        let workspace = root.join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let service = test_service(&root);
+        let mut input = test_input(&workspace);
+        let private_material = "unique-private-key-payload-for-regression";
+        input.purpose = format!(
+            "Use this key:\n-----BEGIN RSA PRIVATE KEY-----\n{private_material}\n-----END RSA PRIVATE KEY-----\nfor local testing."
+        );
+
+        let draft = service.create(&input, true).unwrap();
+        assert!(!draft.answers.purpose.contains(private_material));
+        assert!(draft
+            .answers
+            .purpose
+            .contains("[REDACTED PRIVATE KEY MATERIAL]"));
+        let skill_file = fs::read_to_string(Path::new(&draft.skill_path).join("SKILL.md")).unwrap();
+        assert!(!skill_file.contains(private_material));
+        let saved = fs::read_to_string(
+            root.join("draft-records")
+                .join(format!("{}.json", draft.id)),
+        )
+        .unwrap();
+        assert!(!saved.contains(private_material));
         fs::remove_dir_all(root).unwrap();
     }
 
