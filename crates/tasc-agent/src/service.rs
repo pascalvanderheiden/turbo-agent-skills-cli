@@ -8,7 +8,7 @@ use std::{
 use tasc_core::{
     AdapterTarget, Installation, InstallationStatus, Inventory, InventoryItem, LocalState,
     ProfileScope, ProvenanceConfidence, ProvenanceEvidence, ProvenanceKind, SkillIdentity,
-    StateStatus, TascProfile, INVENTORY_SCHEMA_VERSION, LOCAL_STATE_VERSION,
+    StateStatus, TascProfile, TrackingCohort, INVENTORY_SCHEMA_VERSION, LOCAL_STATE_VERSION,
 };
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -38,6 +38,13 @@ pub struct DiscoveredSkill {
     pub content_digest: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackingOnboarding {
+    pub installation_ids: Vec<String>,
+    pub candidates: Vec<InventoryItem>,
+    pub completed: bool,
+}
+
 pub struct AgentService<A, R> {
     adapter: A,
     repository: R,
@@ -58,24 +65,7 @@ impl<A: SkillAdapter, R: StateRepository> AgentService<A, R> {
     }
 
     fn inventory_for(&self, state: &LocalState) -> Result<Inventory, String> {
-        let mut discovered = self.adapter.discover()?;
-        discovered.sort_by(|left, right| {
-            (
-                &left.identity.id,
-                &left.target.id,
-                &left.path,
-                &left.content_digest,
-            )
-                .cmp(&(
-                    &right.identity.id,
-                    &right.target.id,
-                    &right.path,
-                    &right.content_digest,
-                ))
-        });
-        discovered.dedup_by(|left, right| {
-            left.identity.id == right.identity.id && left.target.id == right.target.id
-        });
+        let discovered = self.discovered()?;
         let mut seen = std::collections::HashSet::new();
         let mut items = Vec::new();
         for skill in discovered {
@@ -267,52 +257,170 @@ impl<A: SkillAdapter, R: StateRepository> AgentService<A, R> {
     }
 
     pub fn adopt(&self, skill_id: &str) -> Result<Installation, String> {
-        let discovered = self
-            .adapter
-            .discover()?
+        self.track(&[skill_id.to_string()], false)?
             .into_iter()
-            .find(|skill| skill.identity.id == skill_id)
-            .ok_or_else(|| format!("no discovered skill has identity '{skill_id}'"))?;
-        let installation_id = InventoryItem::canonical_installation_id(
-            &discovered.identity.id,
-            &discovered.target.id,
-        );
+            .next()
+            .ok_or_else(|| format!("no discovered skill has identity '{skill_id}'"))
+    }
+
+    pub fn track(&self, selectors: &[String], all: bool) -> Result<Vec<Installation>, String> {
+        if !all && selectors.is_empty() {
+            return Err("select one or more installation IDs, or pass --all".to_string());
+        }
+        let discovered = self.discovered()?;
         let mut state = self.repository.load()?;
         validate_state_version(&state)?;
-        if let Some(existing) = state
-            .installations
-            .iter()
-            .find(|installation| installation.id == installation_id)
-        {
-            return Ok(existing.clone());
-        }
-        if !state
-            .identities
-            .iter()
-            .any(|identity| identity.id == discovered.identity.id)
-        {
-            state.identities.push(discovered.identity.clone());
-        }
-        if !state
-            .targets
-            .iter()
-            .any(|target| target.id == discovered.target.id)
-        {
-            state.targets.push(discovered.target.clone());
-        }
-        let installation = Installation {
-            id: installation_id,
-            skill_id: discovered.identity.id,
-            target_id: discovered.target.id,
-            path: discovered.path,
-            source_revision: discovered.source_revision,
-            content_digest: Some(discovered.content_digest),
-            status: InstallationStatus::Installed,
-            last_error: None,
+        let selected = if all {
+            discovered
+                .iter()
+                .filter(|skill| !is_tracked(&state, skill))
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            resolve_discovered(&discovered, selectors)?
         };
-        state.installations.push(installation.clone());
+        let tracked = track_discovered(&mut state, selected);
         self.repository.save(&state)?;
-        Ok(installation)
+        Ok(tracked)
+    }
+
+    pub fn tracking_onboarding(&self) -> Result<TrackingOnboarding, String> {
+        let state = self.repository.load()?;
+        validate_state_version(&state)?;
+        let inventory = self.inventory_for(&state)?;
+        let handled = state
+            .tracking_cohorts
+            .iter()
+            .flat_map(|cohort| cohort.installation_ids.iter())
+            .collect::<std::collections::HashSet<_>>();
+        let mut candidates = inventory
+            .items
+            .into_iter()
+            .filter(|item| {
+                item.kind == "installation" && !item.tracked && !handled.contains(&item.action_id)
+            })
+            .collect::<Vec<_>>();
+        let mut installation_ids = candidates
+            .iter()
+            .map(|item| item.action_id.clone())
+            .collect::<Vec<_>>();
+        installation_ids.sort();
+        candidates.sort_by(|left, right| left.action_id.cmp(&right.action_id));
+        let completed = candidates.is_empty();
+        Ok(TrackingOnboarding {
+            installation_ids,
+            candidates,
+            completed,
+        })
+    }
+
+    pub fn complete_tracking_onboarding(
+        &self,
+        cohort_ids: &[String],
+        selected_ids: &[String],
+        all: bool,
+        defer: bool,
+    ) -> Result<Vec<Installation>, String> {
+        let discovered = self.discovered()?;
+        let mut state = self.repository.load()?;
+        validate_state_version(&state)?;
+        let handled = state
+            .tracking_cohorts
+            .iter()
+            .flat_map(|cohort| cohort.installation_ids.iter())
+            .collect::<std::collections::HashSet<_>>();
+        let mut current_cohort = discovered
+            .iter()
+            .filter(|skill| !is_tracked(&state, skill))
+            .map(|skill| {
+                InventoryItem::canonical_installation_id(&skill.identity.id, &skill.target.id)
+            })
+            .filter(|id| !handled.contains(id))
+            .collect::<Vec<_>>();
+        let mut expected_cohort = cohort_ids.to_vec();
+        current_cohort.sort();
+        expected_cohort.sort();
+        if current_cohort != expected_cohort {
+            return Err(
+                "installation cohort changed; list skills again before tracking".to_string(),
+            );
+        }
+        if current_cohort.is_empty() {
+            return Ok(Vec::new());
+        }
+        let selected = if defer {
+            Vec::new()
+        } else if all {
+            discovered
+                .iter()
+                .filter(|skill| {
+                    !is_tracked(&state, skill)
+                        && current_cohort.contains(&InventoryItem::canonical_installation_id(
+                            &skill.identity.id,
+                            &skill.target.id,
+                        ))
+                })
+                .cloned()
+                .collect()
+        } else {
+            if selected_ids.is_empty() {
+                return Err("select one or more installations or defer this cohort".into());
+            }
+            let selected = resolve_discovered(&discovered, selected_ids)?;
+            if selected.iter().any(|skill| {
+                is_tracked(&state, skill)
+                    || !current_cohort.contains(&InventoryItem::canonical_installation_id(
+                        &skill.identity.id,
+                        &skill.target.id,
+                    ))
+            }) {
+                return Err(
+                    "onboarding selection must contain untracked installations in this cohort"
+                        .into(),
+                );
+            }
+            selected
+        };
+        let tracked = track_discovered(&mut state, selected);
+        record_tracking_cohort(
+            &mut state,
+            current_cohort,
+            if defer {
+                "deferred"
+            } else if all {
+                "all"
+            } else {
+                "selected"
+            },
+            tracked
+                .iter()
+                .map(|installation| installation.id.clone())
+                .collect(),
+        );
+        self.repository.save(&state)?;
+        Ok(tracked)
+    }
+
+    fn discovered(&self) -> Result<Vec<DiscoveredSkill>, String> {
+        let mut discovered = self.adapter.discover()?;
+        discovered.sort_by(|left, right| {
+            (
+                &left.identity.id,
+                &left.target.id,
+                &left.path,
+                &left.content_digest,
+            )
+                .cmp(&(
+                    &right.identity.id,
+                    &right.target.id,
+                    &right.path,
+                    &right.content_digest,
+                ))
+        });
+        discovered.dedup_by(|left, right| {
+            left.identity.id == right.identity.id && left.target.id == right.target.id
+        });
+        Ok(discovered)
     }
 
     pub fn status(&self) -> Result<StateStatus, String> {
@@ -338,6 +446,128 @@ impl<A: SkillAdapter, R: StateRepository> AgentService<A, R> {
                 .count(),
         })
     }
+}
+
+fn is_tracked(state: &LocalState, skill: &DiscoveredSkill) -> bool {
+    let id = InventoryItem::canonical_installation_id(&skill.identity.id, &skill.target.id);
+    state
+        .installations
+        .iter()
+        .any(|installation| installation.id == id)
+}
+
+fn resolve_discovered(
+    discovered: &[DiscoveredSkill],
+    selectors: &[String],
+) -> Result<Vec<DiscoveredSkill>, String> {
+    let mut selected = Vec::new();
+    for selector in selectors {
+        let matches = discovered
+            .iter()
+            .filter(|skill| {
+                skill.identity.id == *selector
+                    || InventoryItem::canonical_installation_id(
+                        &skill.identity.id,
+                        &skill.target.id,
+                    ) == *selector
+            })
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            return Err(format!("no discovered installation matches '{selector}'"));
+        }
+        if matches.len() > 1 {
+            let mut candidates = matches
+                .iter()
+                .map(|skill| {
+                    InventoryItem::canonical_installation_id(&skill.identity.id, &skill.target.id)
+                })
+                .collect::<Vec<_>>();
+            candidates.sort();
+            return Err(format!(
+                "selector '{selector}' matches multiple Adapter Targets: {}",
+                candidates.join(", ")
+            ));
+        }
+        let skill = (*matches[0]).clone();
+        if !selected.iter().any(|item: &DiscoveredSkill| {
+            item.identity.id == skill.identity.id && item.target.id == skill.target.id
+        }) {
+            selected.push(skill);
+        }
+    }
+    Ok(selected)
+}
+
+fn track_discovered(state: &mut LocalState, selected: Vec<DiscoveredSkill>) -> Vec<Installation> {
+    let mut tracked = Vec::with_capacity(selected.len());
+    for discovered in selected {
+        let installation_id = InventoryItem::canonical_installation_id(
+            &discovered.identity.id,
+            &discovered.target.id,
+        );
+        if let Some(existing) = state
+            .installations
+            .iter()
+            .find(|installation| installation.id == installation_id)
+        {
+            tracked.push(existing.clone());
+        } else {
+            if !state
+                .identities
+                .iter()
+                .any(|identity| identity.id == discovered.identity.id)
+            {
+                state.identities.push(discovered.identity.clone());
+            }
+            if !state
+                .targets
+                .iter()
+                .any(|target| target.id == discovered.target.id)
+            {
+                state.targets.push(discovered.target.clone());
+            }
+            let installation = Installation {
+                id: installation_id,
+                skill_id: discovered.identity.id.clone(),
+                target_id: discovered.target.id.clone(),
+                path: discovered.path,
+                source_revision: discovered.source_revision,
+                content_digest: Some(discovered.content_digest),
+                status: InstallationStatus::Installed,
+                last_error: None,
+            };
+            state.installations.push(installation.clone());
+            tracked.push(installation);
+        }
+        state.watchlists.retain(|watchlist| {
+            watchlist.source.locator != discovered.identity.source
+                || watchlist.path.as_deref().is_none_or(|path| {
+                    normalized_skill_path(path)
+                        != normalized_skill_path(&discovered.identity.relative_path)
+                })
+        });
+    }
+    tracked
+}
+
+fn record_tracking_cohort(
+    state: &mut LocalState,
+    mut installation_ids: Vec<String>,
+    decision: &str,
+    mut selected_ids: Vec<String>,
+) {
+    installation_ids.sort();
+    installation_ids.dedup();
+    selected_ids.sort();
+    selected_ids.dedup();
+    state
+        .tracking_cohorts
+        .retain(|cohort| cohort.installation_ids != installation_ids);
+    state.tracking_cohorts.push(TrackingCohort {
+        installation_ids,
+        decision: decision.to_string(),
+        selected_ids,
+    });
 }
 
 fn validate_state_version(state: &LocalState) -> Result<(), String> {
@@ -1045,6 +1275,171 @@ mod tests {
             .iter()
             .any(|item| item.action_id == "watchlist:review-later" && item.kind == "watchlist"));
         assert_eq!(service.inventory().unwrap().items, inventory.items);
+    }
+
+    #[test]
+    fn tracking_is_target_scoped_and_removes_only_exact_watchlists() {
+        let first = discovered_skill();
+        let mut second = first.clone();
+        second.target.id = "target:zed:/workspace/.config/zed/skills".to_string();
+        second.target.assistant = "zed".to_string();
+        second.target.path = "/workspace/.config/zed/skills".to_string();
+        second.path = "/workspace/.config/zed/skills/review".to_string();
+        let mut state = LocalState::default();
+        state.watchlists = vec![
+            tasc_core::Watchlist {
+                id: "watchlist:exact".to_string(),
+                source: tasc_core::discovery::SkillSource {
+                    id: "source:review".to_string(),
+                    locator: first.identity.source.clone(),
+                },
+                path: Some(first.identity.relative_path.clone()),
+                last_observed_revision: None,
+                last_check_id: None,
+            },
+            tasc_core::Watchlist {
+                id: "watchlist:source".to_string(),
+                source: tasc_core::discovery::SkillSource {
+                    id: "source:review".to_string(),
+                    locator: first.identity.source.clone(),
+                },
+                path: None,
+                last_observed_revision: None,
+                last_check_id: None,
+            },
+        ];
+        let shared_state = Arc::new(Mutex::new(state));
+        let service = AgentService::new(
+            MemoryAdapter(vec![first.clone(), second.clone()]),
+            MemoryRepository(shared_state.clone()),
+        );
+        let first_id =
+            InventoryItem::canonical_installation_id(&first.identity.id, &first.target.id);
+
+        let tracked = service.track(&[first_id], false).unwrap();
+
+        assert_eq!(tracked.len(), 1);
+        assert_eq!(tracked[0].target_id, first.target.id);
+        assert_eq!(shared_state.lock().unwrap().installations.len(), 1);
+        assert_eq!(
+            shared_state
+                .lock()
+                .unwrap()
+                .watchlists
+                .iter()
+                .map(|watchlist| watchlist.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["watchlist:source"]
+        );
+        let inventory = service.inventory().unwrap();
+        assert_eq!(
+            inventory
+                .items
+                .iter()
+                .filter(|item| item.kind == "installation" && item.tracked)
+                .count(),
+            1
+        );
+        assert_eq!(
+            inventory
+                .items
+                .iter()
+                .filter(|item| item.kind == "installation" && !item.tracked)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn onboarding_deferral_is_cohort_scoped_and_new_installations_prompt_again() {
+        #[derive(Clone)]
+        struct MutableAdapter(Arc<Mutex<Vec<DiscoveredSkill>>>);
+
+        impl SkillAdapter for MutableAdapter {
+            fn discover(&self) -> Result<Vec<DiscoveredSkill>, String> {
+                Ok(self.0.lock().unwrap().clone())
+            }
+        }
+
+        let first = discovered_skill();
+        let mut second = first.clone();
+        second.identity.id = "skill:second".to_string();
+        second.identity.name = "second".to_string();
+        second.identity.relative_path = "second".to_string();
+        second.path = "/workspace/.github/skills/second".to_string();
+        let mut third = second.clone();
+        third.identity.id = "skill:third".to_string();
+        third.identity.name = "third".to_string();
+        third.identity.relative_path = "third".to_string();
+        third.path = "/workspace/.github/skills/third".to_string();
+        let adapter = MutableAdapter(Arc::new(Mutex::new(vec![first.clone()])));
+        let repository = MemoryRepository(Arc::new(Mutex::new(LocalState::default())));
+        let service = AgentService::new(adapter.clone(), repository.clone());
+        let cohort = service.tracking_onboarding().unwrap();
+        assert_eq!(cohort.candidates.len(), 1);
+        assert!(!cohort.completed);
+
+        service
+            .complete_tracking_onboarding(&cohort.installation_ids, &[], false, true)
+            .unwrap();
+        assert!(service.tracking_onboarding().unwrap().completed);
+
+        adapter
+            .0
+            .lock()
+            .unwrap()
+            .extend([second.clone(), third.clone()]);
+        let next_cohort = service.tracking_onboarding().unwrap();
+        assert_eq!(next_cohort.candidates.len(), 2);
+        assert!(!next_cohort.completed);
+        let second_id =
+            InventoryItem::canonical_installation_id(&second.identity.id, &second.target.id);
+        service
+            .complete_tracking_onboarding(
+                &next_cohort.installation_ids,
+                &[second_id.clone()],
+                false,
+                false,
+            )
+            .unwrap();
+        let completed = service.tracking_onboarding().unwrap();
+        assert!(completed.completed);
+        assert!(completed.candidates.is_empty());
+        assert_eq!(
+            service
+                .inventory()
+                .unwrap()
+                .items
+                .iter()
+                .filter(|item| item.kind == "installation" && !item.tracked)
+                .count(),
+            2
+        );
+        assert_eq!(repository.0.lock().unwrap().installations[0].id, second_id);
+
+        let mut fourth = third.clone();
+        fourth.identity.id = "skill:fourth".to_string();
+        fourth.identity.name = "fourth".to_string();
+        fourth.identity.relative_path = "fourth".to_string();
+        fourth.path = "/workspace/.github/skills/fourth".to_string();
+        adapter.0.lock().unwrap().push(fourth.clone());
+        let newest_cohort = service.tracking_onboarding().unwrap();
+        assert_eq!(newest_cohort.candidates.len(), 1);
+        let fourth_id =
+            InventoryItem::canonical_installation_id(&fourth.identity.id, &fourth.target.id);
+        service
+            .complete_tracking_onboarding(&newest_cohort.installation_ids, &[], true, false)
+            .unwrap();
+        let installations = &repository.0.lock().unwrap().installations;
+        assert!(installations
+            .iter()
+            .any(|installation| installation.id == second_id));
+        assert!(installations
+            .iter()
+            .any(|installation| installation.id == fourth_id));
+        assert!(!installations.iter().any(|installation| {
+            installation.skill_id == first.identity.id || installation.skill_id == third.identity.id
+        }));
     }
 
     #[test]
