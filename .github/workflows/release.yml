@@ -37,7 +37,7 @@ jobs:
             --protected
           python3 .github/scripts/release.py validate-version --version "$version"
           cargo build --locked -p tasc
-          python3 docs/site/validate.py --binary target/debug/tasc --version "$version" --check-external
+          python3 docs/site/validate.py --binary target/debug/tasc --version "$version"
           python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 
   test:

@@ -2,6 +2,7 @@ $Version = "0.1.0"
 $Repository = "pascalvanderheiden/turbo-agent-skills-cli"
 
 $ErrorActionPreference = "Stop"
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
     [System.Runtime.InteropServices.OSPlatform]::Windows
@@ -26,13 +27,13 @@ try {
     New-Item -ItemType Directory -Path $temporary | Out-Null
     $archivePath = Join-Path $temporary $archiveName
     $checksumsPath = Join-Path $temporary "SHA256SUMS.txt"
-    Invoke-WebRequest -Uri "$baseUrl/$archiveName" -OutFile $archivePath
-    Invoke-WebRequest -Uri "$baseUrl/SHA256SUMS.txt" -OutFile $checksumsPath
+    Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/$archiveName" -OutFile $archivePath
+    Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/SHA256SUMS.txt" -OutFile $checksumsPath
 
     $escapedName = [regex]::Escape($archiveName)
     $matches = [regex]::Matches(
         (Get-Content -Raw $checksumsPath),
-        "(?m)^([0-9a-fA-F]{64})  $escapedName$"
+        "(?m)^([0-9a-fA-F]{64})  $escapedName\r?$"
     )
     if ($matches.Count -ne 1) {
         throw "SHA256SUMS.txt has no unique checksum for $archiveName."

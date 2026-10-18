@@ -151,6 +151,8 @@ def check_external_link(href):
         if len(parts) >= 4 and parts[2] == "blob":
             api_path += f"/contents/{quote('/'.join(parts[4:]), safe='/')}"
             api_path += "?" + urlencode({"ref": parts[3]})
+        elif len(parts) >= 5 and parts[2:4] == ["releases", "tag"]:
+            api_path += f"/releases/tags/{quote(parts[4])}"
         elif len(parts) >= 3 and parts[2] == "releases":
             api_path += "/releases?per_page=1"
         href = f"https://api.github.com{api_path}"
@@ -201,7 +203,7 @@ def check_links(page, parser, check_external):
                 errors.append(f"{page}: invalid external link {href!r}")
             elif parsed.hostname == "pascalvanderheiden.github.io":
                 site_prefix = "/turbo-agent-skills-cli"
-                if not parsed.path.startswith(site_prefix):
+                if parsed.path != site_prefix and not parsed.path.startswith(site_prefix + "/"):
                     errors.append(f"{page}: invalid Pages link {href!r}")
                     continue
                 path_part = unquote(parsed.path[len(site_prefix) :]).lstrip("/")

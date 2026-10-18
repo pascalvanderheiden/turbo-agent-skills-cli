@@ -9,7 +9,7 @@ Public installs and Pages depend on the repository being publicly accessible. Co
 3. In repository **Settings → General → Releases**, enable **Enable release immutability**. Published release assets and their tag cannot be changed or deleted.
 4. In the `release-approval` environment, set `TASC_IMMUTABLE_RELEASES_ENABLED=true` only after enabling that repository setting. The publish job requires this explicit configuration and verifies the API's immutable status after publishing; if GitHub reports a mutable release or status cannot be confirmed, it attempts to return the release to draft and fails. Manually verify and correct the release if the rollback also fails.
 5. Allow GitHub Actions to create artifact attestations and use its short-lived OIDC identity. The release jobs request `id-token: write` and `attestations: write`; no long-lived signing secret is required.
-6. In **Settings → Pages**, select GitHub Actions as the build and deployment source. Ensure Actions can write Pages deployments and request an OIDC token; the Pages workflow validates a pull request but deploys only from the default branch or a published release.
+6. In **Settings → Pages**, select GitHub Actions as the build and deployment source. Ensure Actions can write Pages deployments and request an OIDC token; the Pages workflow validates a pull request but deploys only from the default branch or a published release. It checks live external links after publication, when the versioned release links exist.
 7. Keep the Pages landing page generated from the marked README section with `python3 docs/site/generate.py`. CI checks the generated output for drift. Agentic edits may propose a pull request; they do not publish content or releases directly.
 
 ## Stable release checklist
