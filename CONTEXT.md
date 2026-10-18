@@ -168,6 +168,14 @@ _Avoid_: Ignore, delete
 An actionable, user-facing recommendation derived from lifecycle state, Evaluations, or Consistency Checks. An Insight may aggregate closely related evidence, but each contributing finding remains independently traceable.
 _Avoid_: Metric, report
 
+**Audit**:
+A read-only deterministic health assessment of the selected TASC Profile's Local State, installations, sources, targets, and existing evidence. Audit findings are classified as errors, warnings, or optimizations and do not refresh or mutate the evidence they reference.
+_Avoid_: Evaluation, repair
+
+**Statistics Projection**:
+A read-only, profile-scoped summary of TASC inventory, provenance, lifecycle, watch and tracking state, audit finding classes, and comparable artifact outcomes. Statistics describe observed state without changing it or collapsing stale evidence into current evidence.
+_Avoid_: Audit, telemetry
+
 **Insight Status**:
 The lifecycle state of an Insight: `new`, `acknowledged`, `snoozed`, `suppressed`, `resolved`, `stale`, or `inconclusive`. Status changes do not alter the underlying evidence.
 _Avoid_: Finding status
