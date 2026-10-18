@@ -7,6 +7,11 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published stable release tag to validate
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -37,14 +42,14 @@ jobs:
       - name: Validate links, HTML, accessibility, commands, and version
         run: python3 docs/site/validate.py --binary target/debug/tasc
       - name: Check external links
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 docs/site/validate.py --binary target/debug/tasc --check-external
       - name: Validate published release documentation version
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
         run: python3 docs/site/validate.py --binary target/debug/tasc --version "${RELEASE_TAG#v}"
       - name: Configure Pages
         if: github.event_name == 'release' || github.ref == 'refs/heads/main'

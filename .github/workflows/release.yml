@@ -189,6 +189,7 @@ jobs:
     environment:
       name: release-approval
     permissions:
+      actions: write
       contents: write
     steps:
       - name: Require immutable-release configuration
@@ -245,3 +246,7 @@ jobs:
             fi
             exit 1
           fi
+      - name: Trigger published-release documentation validation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pages.yml --ref main -f release_tag="$GITHUB_REF_NAME"
