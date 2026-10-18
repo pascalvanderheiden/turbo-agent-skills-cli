@@ -13,11 +13,11 @@ A first-party Agent Skill distributed with TASC and installable into supported A
 _Avoid_: Wrapper, magic proxy, alternate implementation
 
 **Skill Authoring**:
-The guided creation of a new Agent Skill from stated goals and constraints, using TASC-authored grilling-style guidance by default and producing Skill Draft files that pass deterministic Agent Skills-standard validation before optional installation, Evaluation, export, sharing, or publication.
+The guided creation of a new Agent Skill from stated goals and constraints, producing a Skill Draft that must satisfy the Agent Skills standard before it is ready for optional follow-up actions.
 _Avoid_: Installation, adoption
 
 **Skill Draft**:
-The workspace files produced during Skill Authoring before deterministic validation succeeds. A Skill Draft may be retained for correction but is not presented as a ready Agent Skill.
+The resumable workspace artifact produced during Skill Authoring. An incomplete Skill Draft retains validation findings for correction; a ready Skill Draft has passed deterministic validation but is not installed, evaluated, exported, shared, or published automatically.
 _Avoid_: Installed Skill, validated skill
 
 **Skill Workspace**:
