@@ -115,6 +115,82 @@ fn skill_inventory_adoption_and_state_status_share_the_same_facts() {
 }
 
 #[test]
+fn skill_track_is_target_and_profile_scoped_and_returns_versioned_json() {
+    let directory = test_dir();
+    let profile_a = directory.join("state/profile-a.json");
+    let profile_b = directory.join("state/profile-b.json");
+    let project_skill = directory.join(".github/skills/review");
+    let user_skill = directory.join("home/.copilot/skills/review");
+    fs::create_dir_all(&project_skill).unwrap();
+    fs::create_dir_all(&user_skill).unwrap();
+    let project_contents = "---\nname: Review\ndescription: Project review skill.\n---\n";
+    let user_contents = "---\nname: Review\ndescription: User review skill.\n---\n";
+    fs::write(project_skill.join("SKILL.md"), project_contents).unwrap();
+    fs::write(user_skill.join("SKILL.md"), user_contents).unwrap();
+
+    let listed = run(&directory, &profile_a, &["skill", "list", "--json"]);
+    assert!(listed.status.success());
+    let inventory: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(inventory["items"].as_array().unwrap().len(), 2);
+    let selected_id = inventory["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["target"]["path"].as_str().unwrap().contains(".github"))
+        .unwrap()["action_id"]
+        .as_str()
+        .unwrap();
+
+    let tracked = run(
+        &directory,
+        &profile_a,
+        &["skill", "track", selected_id, "--json"],
+    );
+    assert!(tracked.status.success());
+    let tracked: serde_json::Value = serde_json::from_slice(&tracked.stdout).unwrap();
+    assert_eq!(tracked["schemaVersion"], 1);
+    assert_eq!(tracked["command"], "skill track");
+    assert_eq!(tracked["result"]["count"], 1);
+    assert_eq!(tracked["result"]["tracked"][0]["id"], selected_id);
+
+    let listed = run(&directory, &profile_a, &["skill", "list", "--json"]);
+    let inventory: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let items = inventory["items"].as_array().unwrap();
+    assert!(items
+        .iter()
+        .find(|item| item["action_id"] == selected_id)
+        .unwrap()["tracked"]
+        .as_bool()
+        .unwrap());
+    assert_eq!(
+        items.iter().filter(|item| item["tracked"] == true).count(),
+        1
+    );
+    assert_eq!(
+        fs::read_to_string(project_skill.join("SKILL.md")).unwrap(),
+        project_contents
+    );
+    assert_eq!(
+        fs::read_to_string(user_skill.join("SKILL.md")).unwrap(),
+        user_contents
+    );
+
+    let other_profile = run(&directory, &profile_b, &["skill", "list", "--json"]);
+    let other_inventory: serde_json::Value = serde_json::from_slice(&other_profile.stdout).unwrap();
+    assert_eq!(
+        other_inventory["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["tracked"] == true)
+            .count(),
+        0
+    );
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn project_profile_wins_without_merging_and_user_profile_is_the_fallback() {
     let directory = test_dir();
     let home = directory.join("home");

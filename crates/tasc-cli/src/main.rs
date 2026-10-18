@@ -371,6 +371,15 @@ enum SkillCommands {
     List(InventoryArgs),
     /// Explicitly record a discovered installation without changing its files.
     Adopt { id: String },
+    /// Track selected discovered installations, or every untracked installation.
+    Track {
+        #[arg(value_name = "INSTALLATION")]
+        selectors: Vec<String>,
+        #[arg(long, conflicts_with = "selectors")]
+        all: bool,
+        #[command(flatten)]
+        output: JsonOutput,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -509,7 +518,8 @@ async fn main() {
                     | SkillCommands::Remediate { output, .. }
                     | SkillCommands::Install { output, .. }
                     | SkillCommands::Update { output, .. }
-                    | SkillCommands::Remove { output, .. },
+                    | SkillCommands::Remove { output, .. }
+                    | SkillCommands::Track { output, .. },
             } => output.json,
             Commands::Watch { command } => match command {
                 WatchCommands::Add { output, .. }
@@ -652,6 +662,9 @@ async fn main() {
         Commands::Skill {
             command: SkillCommands::Remove { .. },
         } => "skill remove",
+        Commands::Skill {
+            command: SkillCommands::Track { .. },
+        } => "skill track",
         _ => "local",
     };
     let cancel = Cancellation::default();
@@ -1350,6 +1363,9 @@ async fn run_local(
         Commands::Skill {
             command: SkillCommands::List(args),
         } => {
+            if !json && !args.output.json && std::io::stdin().is_terminal() {
+                prompt_tracking_onboarding(&service)?;
+            }
             let mut inventory = service.inventory().map_err(local_error)?;
             inventory.profile = Some(repository.profile());
             let inventory = inventory
@@ -1377,6 +1393,25 @@ async fn run_local(
                 installation.skill_id, installation.path, installation.target_id
             );
             Ok(())
+        }
+        Commands::Skill {
+            command:
+                SkillCommands::Track {
+                    selectors,
+                    all,
+                    output,
+                },
+        } => {
+            let installations = service.track(&selectors, all).map_err(local_error)?;
+            let count = installations.len();
+            render_local_artifact(
+                serde_json::json!({
+                    "tracked": installations,
+                    "count": count,
+                }),
+                "skill track",
+                output.json || json,
+            )
         }
         Commands::State {
             command: StateCommands::Status(output),
@@ -1599,6 +1634,127 @@ fn render_local_artifact(
     } else {
         println!("{command} (schema version 1)");
         render_fields(&result, 0);
+    }
+    Ok(())
+}
+
+fn prompt_tracking_onboarding(
+    service: &AgentService<CopilotAdapter, FsStateRepository>,
+) -> Result<(), Diagnostic> {
+    let onboarding = service.tracking_onboarding().map_err(local_error)?;
+    if onboarding.completed || onboarding.candidates.is_empty() {
+        return Ok(());
+    }
+    eprintln!(
+        "TASC found {} untracked installation(s) in this Profile.",
+        onboarding.candidates.len()
+    );
+    eprint!("Track all, select installations, or not now? [a/s/n] ");
+    std::io::Write::flush(&mut std::io::stderr())
+        .map_err(|error| local_error(format!("cannot write tracking prompt: {error}")))?;
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|error| local_error(format!("cannot read tracking choice: {error}")))?;
+    let choice = answer.trim().to_ascii_lowercase();
+    let (selected_ids, all, defer) = match choice.as_str() {
+        "a" | "all" => (
+            onboarding
+                .candidates
+                .iter()
+                .map(|item| item.action_id.clone())
+                .collect::<Vec<_>>(),
+            true,
+            false,
+        ),
+        "s" | "select" | "selected" => {
+            for (index, item) in onboarding.candidates.iter().enumerate() {
+                eprintln!(
+                    "  {}. {} [{}] {}",
+                    index + 1,
+                    item.identity.name,
+                    item.action_id,
+                    item.target
+                        .as_ref()
+                        .map(|target| target.assistant.as_str())
+                        .unwrap_or("unknown")
+                );
+            }
+            eprint!("Enter comma-separated installation numbers or IDs: ");
+            std::io::Write::flush(&mut std::io::stderr())
+                .map_err(|error| local_error(format!("cannot write selection prompt: {error}")))?;
+            answer.clear();
+            std::io::stdin()
+                .read_line(&mut answer)
+                .map_err(|error| local_error(format!("cannot read tracking selection: {error}")))?;
+            let mut selected = Vec::new();
+            for token in
+                answer.split(|character: char| character == ',' || character.is_whitespace())
+            {
+                let token = token.trim();
+                if token.is_empty() {
+                    continue;
+                }
+                if let Ok(index) = token.parse::<usize>() {
+                    if let Some(item) = index
+                        .checked_sub(1)
+                        .and_then(|index| onboarding.candidates.get(index))
+                    {
+                        selected.push(item.action_id.clone());
+                    } else {
+                        return Err(Diagnostic::new(
+                            "invalid_tracking_selection",
+                            "usage",
+                            "tasc",
+                            "Selected installation number is out of range.",
+                            "Select one or more numbers shown in the onboarding list.",
+                        ));
+                    }
+                } else if onboarding
+                    .candidates
+                    .iter()
+                    .any(|item| item.action_id == token)
+                {
+                    selected.push(token.to_string());
+                } else {
+                    return Err(Diagnostic::new(
+                        "invalid_tracking_selection",
+                        "usage",
+                        "tasc",
+                        "Selection does not match an installation in this cohort.",
+                        "Select one or more numbers or stable IDs shown in the onboarding list.",
+                    ));
+                }
+            }
+            if selected.is_empty() {
+                return Err(Diagnostic::new(
+                    "empty_tracking_selection",
+                    "usage",
+                    "tasc",
+                    "No installations were selected.",
+                    "Select one or more installations or choose not now.",
+                ));
+            }
+            (selected, false, false)
+        }
+        "" | "n" | "no" | "not now" => (Vec::new(), false, true),
+        _ => {
+            return Err(Diagnostic::new(
+                "invalid_tracking_choice",
+                "usage",
+                "tasc",
+                "Choose all, selected, or not now.",
+                "Enter a, s, or n.",
+            ))
+        }
+    };
+    let installations = service
+        .complete_tracking_onboarding(&onboarding.installation_ids, &selected_ids, all, defer)
+        .map_err(local_error)?;
+    if defer {
+        eprintln!("Tracking deferred for this installation cohort.");
+    } else {
+        eprintln!("Tracked {} installation(s).", installations.len());
     }
     Ok(())
 }

@@ -34,6 +34,10 @@ tasc skill list --json
 tasc skill adopt skill:file:///path/to/.github/skills/example
 # Record an already-discovered installation without changing its files
 
+tasc skill track <installation-id> --json
+tasc skill track --all --json
+# Track selected installations or all currently untracked installations
+
 tasc state status
 # Show versioned Local State and discovery counts
 
@@ -123,6 +127,14 @@ description excerpt for each Installation or watched-only interest. Use
 `--sort`, `--offset`, `--limit`, `--status`, `--scope`, `--assistant`,
 `--provenance`, `--tracking`, `--watch`, or `--detail <stable-id>` to select
 rows; display row numbers are local to the current view.
+
+On an interactive first inventory of an untracked installation cohort, TASC
+offers to track all, select installations, or defer. Deferral is remembered for
+that cohort; discovering another installation presents a new prompt. `skill track`
+can explicitly adopt one or more stable Installation IDs, or `--all` to track
+every untracked installation in the selected Profile. Tracking only records
+metadata and never reinstalls or edits skill files. Tracking is scoped to both
+the selected Profile and Adapter Target.
 
 Project operations select `.tasc/state.json` when that project Profile exists;
 otherwise they use the user Profile at `$XDG_STATE_HOME/tasc/state.json` or
@@ -219,6 +231,8 @@ Checks record prior and observed commit revisions, report unavailable sources
 or GitHub CLI failures explicitly, and never update Installations. Repeated
 observations of the same revision reuse the same immutable check reference. A
 source selector matching multiple watched paths must use an exact Watchlist ID.
+An exact skill Watchlist entry is retired when that skill is explicitly tracked
+or installed; a broader source Watchlist remains and excludes installed matches.
 
 `eval run` performs deterministic package-only smoke validation of a local
 `SKILL.md` (frontmatter `name` and `description`) without executing skill
