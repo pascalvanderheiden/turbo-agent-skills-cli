@@ -488,23 +488,28 @@ impl<A: SkillAdapter, R: StateRepository, D: SkillDraftRepository> SkillAuthorin
         skill_path: &Path,
         own_draft_id: Option<&str>,
     ) -> Result<(), String> {
+        let candidate = canonical_or_absolute(skill_path);
         let state = self.state_repository.load()?;
         let discovered = self.adapter.discover()?;
         for installation in &state.installations {
             let installation_path = canonical_or_absolute(Path::new(&installation.path));
-            let candidate = canonical_or_absolute(skill_path);
             if candidate == installation_path || candidate.starts_with(&installation_path) {
                 return Err("Skill Workspace destination overlaps an Installation; installed copies are immutable authoring targets.".to_string());
             }
         }
         for skill in discovered {
             let installed_path = canonical_or_absolute(Path::new(&skill.path));
-            let candidate = canonical_or_absolute(skill_path);
             if own_draft_id.is_some() && candidate == installed_path {
                 continue;
             }
             if candidate == installed_path || candidate.starts_with(&installed_path) {
                 return Err("Skill Workspace destination overlaps a discovered installed skill; choose a separate workspace.".to_string());
+            }
+        }
+        for target_path in self.adapter.target_paths() {
+            let target = canonical_or_absolute(&target_path);
+            if candidate == target || candidate.starts_with(&target) {
+                return Err("Skill Workspace destination overlaps an Adapter Target; author the Skill Draft in a separate Workspace.".to_string());
             }
         }
         Ok(())
@@ -936,13 +941,27 @@ fn add_missing_description(contents: &str, description: &str) -> Result<String, 
 }
 
 fn canonical_or_absolute(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| {
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir().unwrap_or_default().join(path)
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+    let mut existing = absolute.clone();
+    let mut unresolved = Vec::new();
+    while fs::canonicalize(&existing).is_err() {
+        let Some(component) = existing.file_name() else {
+            return absolute;
+        };
+        unresolved.push(component.to_os_string());
+        if !existing.pop() {
+            return absolute;
         }
-    })
+    }
+    let mut canonical = fs::canonicalize(existing).unwrap_or(absolute);
+    for component in unresolved.iter().rev() {
+        canonical.push(component);
+    }
+    canonical
 }
 
 fn validate_draft_id(id: &str) -> Result<(), String> {

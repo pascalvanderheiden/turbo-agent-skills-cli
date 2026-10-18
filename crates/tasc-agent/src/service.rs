@@ -15,6 +15,9 @@ static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub trait SkillAdapter {
     fn discover(&self) -> Result<Vec<DiscoveredSkill>, String>;
+    fn target_paths(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
 }
 
 pub trait StateRepository {
@@ -493,6 +496,10 @@ fn normalize_private_root(path: PathBuf) -> PathBuf {
 }
 
 impl SkillAdapter for CopilotAdapter {
+    fn target_paths(&self) -> Vec<PathBuf> {
+        self.roots.clone()
+    }
+
     fn discover(&self) -> Result<Vec<DiscoveredSkill>, String> {
         let mut skills = Vec::new();
         for root in &self.roots {

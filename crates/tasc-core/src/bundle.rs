@@ -172,8 +172,8 @@ fn valid_identity(identity: &SkillIdentity) -> bool {
         || source.starts_with("https://github.com/"))
         && github_parts.len() == 3
         && github_parts[0] == "github.com"
-        && valid_slug(github_parts[1])
-        && valid_slug(github_parts[2])
+        && valid_source_component(github_parts[1])
+        && valid_source_component(github_parts[2])
         && !source.contains(['?', '#', '@', ' ']))
         || (source.starts_with("file:///") && !source.contains(['?', '#']));
     let path = identity.relative_path.as_str();
@@ -197,6 +197,16 @@ fn valid_slug(value: &str) -> bool {
             .iter()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
         && !value.contains("--")
+}
+
+fn valid_source_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 100
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'.' | b'_')
+        })
+        && value != "."
+        && value != ".."
 }
 
 fn valid_version(version: &str) -> bool {

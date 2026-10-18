@@ -1640,7 +1640,7 @@ fn watch_commands_record_deterministic_revisions_without_touching_installations(
 #[test]
 fn skill_authoring_requires_workspace_and_approval_and_preserves_remediable_drafts() {
     let directory = test_dir();
-    let workspace = directory.join(".github/skills");
+    let workspace = directory.join("skill-workspace");
     let state_path = directory.join("state/state.json");
     fs::create_dir_all(&workspace).unwrap();
     fs::write(
@@ -1939,7 +1939,7 @@ fn categories_and_bundle_validation_are_versioned_and_non_deploying() {
 #[test]
 fn skill_validation_reports_trigger_link_and_token_diagnostics() {
     let directory = test_dir();
-    let workspace = directory.join(".github/skills");
+    let workspace = directory.join("skill-workspace");
     let state_path = directory.join("state/state.json");
     fs::create_dir_all(&workspace).unwrap();
     let workspace_arg = workspace.to_string_lossy().into_owned();
@@ -2006,6 +2006,45 @@ fn skill_validation_reports_trigger_link_and_token_diagnostics() {
     assert!(codes.contains(&"workspace_link_missing"));
     assert!(codes.contains(&"token_limit_exceeded"));
     assert_eq!(validation["result"]["validation"]["status"], "incomplete");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn skill_authoring_refuses_adapter_target_workspaces_before_they_can_become_installations() {
+    let directory = test_dir();
+    let target = directory.join(".github/skills");
+    let state_path = directory.join("state/state.json");
+    fs::create_dir_all(&target).unwrap();
+    let workspace_arg = target.to_string_lossy().into_owned();
+    let output = Command::new(env!("CARGO_BIN_EXE_tasc"))
+        .args([
+            "skill",
+            "create",
+            "--workspace",
+            &workspace_arg,
+            "--name",
+            "new-draft",
+            "--purpose",
+            "Test that authoring stays outside installation targets.",
+            "--description",
+            "A separate Workspace is required.",
+            "--triggers",
+            "When authoring a skill.",
+            "--non-goals",
+            "Do not install automatically.",
+            "--yes",
+            "--json",
+        ])
+        .current_dir(&directory)
+        .env("HOME", directory.join("home"))
+        .env("TASC_STATE_PATH", &state_path)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("overlaps an Adapter Target"));
+    assert!(!target.join("new-draft").exists());
+    assert!(!state_path.with_extension("drafts").exists());
     fs::remove_dir_all(directory).unwrap();
 }
 
