@@ -54,7 +54,14 @@ impl<A: SkillAdapter, R: StateRepository> AgentService<A, R> {
     pub fn inventory(&self) -> Result<Inventory, String> {
         let state = self.repository.load()?;
         validate_state_version(&state)?;
-        self.inventory_for(&state)
+        self.inventory_from_state(&state)
+    }
+
+    pub fn inventory_from_state(&self, state: &LocalState) -> Result<Inventory, String> {
+        validate_state_version(state)?;
+        let mut inventory = self.inventory_for(state)?;
+        inventory.profile = Some(self.repository.profile());
+        Ok(inventory)
     }
 
     fn inventory_for(&self, state: &LocalState) -> Result<Inventory, String> {
@@ -623,7 +630,7 @@ fn frontmatter_value(contents: &str, key: &str) -> Option<String> {
     None
 }
 
-pub(crate) fn skill_content_digest(root: &Path) -> Result<String, String> {
+pub fn skill_content_digest(root: &Path) -> Result<String, String> {
     const MAX_SKILL_BYTES: u64 = 50 * 1024 * 1024;
     fn files(directory: &Path, output: &mut Vec<PathBuf>) -> Result<(), String> {
         for entry in fs::read_dir(directory)
@@ -808,14 +815,12 @@ impl FsStateRepository {
             }
         }
     }
-}
 
-impl StateRepository for FsStateRepository {
-    fn profile(&self) -> TascProfile {
-        FsStateRepository::profile(self)
+    pub fn load_read_only(&self) -> Result<LocalState, String> {
+        self.load_with_migration(false)
     }
 
-    fn load(&self) -> Result<LocalState, String> {
+    fn load_with_migration(&self, migrate: bool) -> Result<LocalState, String> {
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -847,7 +852,9 @@ impl StateRepository for FsStateRepository {
         match version {
             1 => {
                 state.version = LOCAL_STATE_VERSION;
-                self.save(&state)?;
+                if migrate {
+                    self.save(&state)?;
+                }
             }
             LOCAL_STATE_VERSION => {}
             _ => {
@@ -858,6 +865,16 @@ impl StateRepository for FsStateRepository {
             }
         }
         Ok(state)
+    }
+}
+
+impl StateRepository for FsStateRepository {
+    fn profile(&self) -> TascProfile {
+        FsStateRepository::profile(self)
+    }
+
+    fn load(&self) -> Result<LocalState, String> {
+        self.load_with_migration(true)
     }
 
     fn save(&self, state: &LocalState) -> Result<(), String> {
@@ -1099,6 +1116,23 @@ mod tests {
         fs::write(&path, b"{broken").unwrap();
         assert!(FsStateRepository::new(path.clone()).load().is_err());
         assert_eq!(fs::read(&path).unwrap(), b"{broken");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn read_only_state_load_does_not_migrate_version_one_files() {
+        let directory = unique_temp_dir();
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("state.json");
+        let old = r#"{"version":1,"identities":[],"targets":[],"installations":[]}"#;
+        fs::write(&path, old).unwrap();
+
+        let state = FsStateRepository::new(path.clone())
+            .load_read_only()
+            .unwrap();
+
+        assert_eq!(state.version, LOCAL_STATE_VERSION);
+        assert_eq!(fs::read_to_string(&path).unwrap(), old);
         fs::remove_dir_all(directory).unwrap();
     }
 

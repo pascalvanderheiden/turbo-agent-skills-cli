@@ -1519,6 +1519,7 @@ dependencies = [
  "async-trait",
  "clap",
  "github-copilot-sdk",
+ "serde",
  "serde_json",
  "tasc-agent",
  "tasc-core",
