@@ -1,5 +1,6 @@
 use crate::{
     evaluation::validate_skill_package,
+    security::{has_multiline_secret_declaration, redact_possible_secrets},
     service::{SkillAdapter, StateRepository},
 };
 use serde::{Deserialize, Serialize};
@@ -13,8 +14,10 @@ use std::{
 };
 use tasc_core::{
     authoring::{
-        LocalContext, SkillDraft, SkillDraftStatus, WorkspaceDiagnostic, WorkspaceValidation,
+        LocalContext, SkillDraft, SkillDraftAnswers, SkillDraftStatus, WorkspaceDiagnostic,
+        WorkspaceValidation, SKILL_DRAFT_SCHEMA_VERSION, WORKSPACE_VALIDATION_SCHEMA_VERSION,
     },
+    categories::SKILL_CATEGORIES,
     evaluation::{EvaluationDiagnostic, EvaluationOutcome},
 };
 
@@ -30,6 +33,8 @@ pub struct SkillDraftInput {
     pub description: String,
     pub triggers: String,
     pub non_goals: String,
+    #[serde(default)]
+    pub categories: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -38,6 +43,7 @@ pub struct SkillDraftPlan {
     pub skill_path: String,
     pub local_context: Option<LocalContext>,
     pub questions: Vec<String>,
+    pub categories: Vec<String>,
     pub preview: String,
 }
 
@@ -62,28 +68,37 @@ pub trait SkillDraftRepository {
 
 #[derive(Debug, Clone)]
 pub struct FsSkillDraftRepository {
-    directory: PathBuf,
+    workspace: PathBuf,
 }
 
 impl FsSkillDraftRepository {
-    pub fn new(directory: PathBuf) -> Self {
-        Self { directory }
+    pub fn new(workspace: PathBuf) -> Self {
+        Self { workspace }
     }
 }
 
 impl SkillDraftRepository for FsSkillDraftRepository {
     fn save(&self, draft: &SkillDraft) -> Result<(), String> {
         validate_draft_id(&draft.id)?;
+        let workspace = validate_workspace(&self.workspace)?;
+        if Path::new(&draft.workspace_path) != workspace {
+            return Err("Skill Draft Workspace does not match its Draft repository".to_string());
+        }
+        let directory = self
+            .draft_directory(true)?
+            .ok_or_else(|| "cannot initialize Skill Draft directory".to_string())?;
         let bytes = serde_json::to_vec_pretty(draft)
             .map_err(|error| format!("cannot serialize Skill Draft: {error}"))?;
-        atomic_write(&self.directory.join(format!("{}.json", draft.id)), &bytes)
+        atomic_write(&directory.join(format!("{}.json", draft.id)), &bytes)
     }
 
     fn list(&self) -> Result<Vec<SkillDraft>, String> {
         let mut drafts = Vec::new();
-        let entries = match fs::read_dir(&self.directory) {
+        let Some(directory) = self.draft_directory(false)? else {
+            return Ok(drafts);
+        };
+        let entries = match fs::read_dir(&directory) {
             Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(drafts),
             Err(error) => return Err(format!("cannot list Skill Drafts: {error}")),
         };
         for entry in entries {
@@ -116,7 +131,10 @@ impl SkillDraftRepository for FsSkillDraftRepository {
 
     fn get(&self, id: &str) -> Result<SkillDraft, String> {
         validate_draft_id(id)?;
-        let path = self.directory.join(format!("{id}.json"));
+        let directory = self
+            .draft_directory(false)?
+            .ok_or_else(|| "Skill Draft directory does not exist in this Workspace".to_string())?;
+        let path = directory.join(format!("{id}.json"));
         let metadata = fs::symlink_metadata(&path)
             .map_err(|error| format!("cannot inspect Skill Draft '{id}': {error}"))?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -130,6 +148,71 @@ impl SkillDraftRepository for FsSkillDraftRepository {
             return Err(format!("Skill Draft ID does not match '{id}'"));
         }
         Ok(draft)
+    }
+}
+
+impl FsSkillDraftRepository {
+    fn draft_directory(&self, create: bool) -> Result<Option<PathBuf>, String> {
+        let workspace = validate_workspace(&self.workspace)?;
+        let metadata_dir = workspace.join(".tasc");
+        let drafts_dir = metadata_dir.join("drafts");
+        for directory in [&metadata_dir, &drafts_dir] {
+            match fs::symlink_metadata(directory) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                    return Err(format!(
+                        "Skill Draft metadata path '{}' must be a non-symlink directory",
+                        directory.display()
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound && !create => {
+                    return Ok(None);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    match fs::create_dir(directory) {
+                        Ok(()) => {}
+                        Err(create_error)
+                            if create_error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                        Err(create_error) => {
+                            return Err(format!(
+                                "cannot create Skill Draft metadata directory '{}': {create_error}",
+                                directory.display()
+                            ));
+                        }
+                    }
+                    let metadata = fs::symlink_metadata(directory).map_err(|error| {
+                        format!(
+                            "cannot inspect Skill Draft metadata directory '{}': {error}",
+                            directory.display()
+                        )
+                    })?;
+                    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                        return Err(format!(
+                            "Skill Draft metadata path '{}' must be a non-symlink directory",
+                            directory.display()
+                        ));
+                    }
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "cannot inspect Skill Draft metadata directory '{}': {error}",
+                        directory.display()
+                    ));
+                }
+            }
+        }
+        let canonical_directory = fs::canonicalize(&drafts_dir).map_err(|error| {
+            format!(
+                "cannot resolve Skill Draft metadata directory '{}': {error}",
+                drafts_dir.display()
+            )
+        })?;
+        if !canonical_directory.starts_with(&workspace) {
+            return Err(
+                "Skill Draft metadata directory resolves outside its Workspace".to_string(),
+            );
+        }
+        Ok(Some(canonical_directory))
     }
 }
 
@@ -149,9 +232,10 @@ impl<A: SkillAdapter, R: StateRepository, D: SkillDraftRepository> SkillAuthorin
     }
 
     pub fn plan(&self, input: &SkillDraftInput) -> Result<SkillDraftPlan, String> {
-        let workspace = validate_workspace(&input.workspace)?;
-        validate_input(input)?;
-        let skill_path = workspace.join(&input.name);
+        let safe_input = redact_input(input);
+        let workspace = validate_workspace(&safe_input.workspace)?;
+        validate_input(&safe_input)?;
+        let skill_path = workspace.join(&safe_input.name);
         self.ensure_not_installed(&skill_path, None)?;
         if fs::symlink_metadata(&skill_path).is_ok() {
             return Err(format!(
@@ -160,17 +244,27 @@ impl<A: SkillAdapter, R: StateRepository, D: SkillDraftRepository> SkillAuthorin
             ));
         }
         let local_context = inspect_local_context()?;
+        let preview = render_skill(&safe_input)?;
         Ok(SkillDraftPlan {
             workspace_path: workspace.to_string_lossy().into_owned(),
             skill_path: skill_path.to_string_lossy().into_owned(),
-            questions: Vec::new(),
-            preview: render_skill(input)?,
+            questions: vec![
+                "What concrete outcome should this skill produce, and what context must it gather first?"
+                    .to_string(),
+                "Give a specific trigger and a counterexample where this skill must stay inactive."
+                    .to_string(),
+                "What should the skill explicitly avoid, and how should it handle uncertainty?"
+                    .to_string(),
+            ],
+            categories: safe_input.categories,
+            preview,
             local_context,
         })
     }
 
     pub fn create(&self, input: &SkillDraftInput, approved: bool) -> Result<SkillDraft, String> {
-        let plan = self.plan(input)?;
+        let input = redact_input(input);
+        let plan = self.plan(&input)?;
         if !approved {
             return Err("Skill Draft creation requires explicit approval".to_string());
         }
@@ -179,14 +273,22 @@ impl<A: SkillAdapter, R: StateRepository, D: SkillDraftRepository> SkillAuthorin
         let id = format!("draft-{now}-{}-{sequence}", std::process::id());
         let skill_path = PathBuf::from(&plan.skill_path);
         let draft = SkillDraft {
-            schema_version: 1,
+            schema_version: SKILL_DRAFT_SCHEMA_VERSION,
             id: id.clone(),
             name: input.name.clone(),
             purpose: input.purpose.clone(),
             workspace_path: plan.workspace_path,
             skill_path: skill_path.to_string_lossy().into_owned(),
+            answers: SkillDraftAnswers {
+                purpose: input.purpose.clone(),
+                description: input.description.clone(),
+                triggers: input.triggers.clone(),
+                non_goals: input.non_goals.clone(),
+            },
+            categories: plan.categories,
             status: SkillDraftStatus::Incomplete,
             diagnostics: Vec::new(),
+            quality_guidance: Vec::new(),
             local_context: plan.local_context,
             recovery_path: None,
             created_at_unix_ms: now,
@@ -214,6 +316,8 @@ impl<A: SkillAdapter, R: StateRepository, D: SkillDraftRepository> SkillAuthorin
         self.ensure_not_installed(&skill_path, Some(id))?;
         validate_draft_directory(&skill_path, &workspace)?;
         let (outcome, diagnostics) = validate_draft_package(&skill_path);
+        draft.schema_version = SKILL_DRAFT_SCHEMA_VERSION;
+        draft.quality_guidance = quality_guidance(&skill_path);
         draft.status = if outcome == EvaluationOutcome::Passed {
             SkillDraftStatus::Ready
         } else {
@@ -231,7 +335,7 @@ impl<A: SkillAdapter, R: StateRepository, D: SkillDraftRepository> SkillAuthorin
                     "Correct the indicated SKILL.md issue in this Skill Workspace, then validate again."
                         .to_string()
                 },
-                message: diagnostic.message,
+                message: redact_possible_secrets(&diagnostic.message),
             })
             .collect();
         draft.updated_at_unix_ms = now_unix_ms();
@@ -252,12 +356,26 @@ impl<A: SkillAdapter, R: StateRepository, D: SkillDraftRepository> SkillAuthorin
     ) -> Result<WorkspaceValidation, String> {
         let draft = self.validate(id, workspace)?;
         Ok(WorkspaceValidation {
-            schema_version: 1,
+            schema_version: WORKSPACE_VALIDATION_SCHEMA_VERSION,
             draft_id: draft.id,
             status: draft.status,
             diagnostics: draft.diagnostics,
+            quality_guidance: draft.quality_guidance,
             validated_at_unix_ms: draft.updated_at_unix_ms,
         })
+    }
+
+    pub fn resume(&self, id: &str, workspace: &Path) -> Result<SkillDraft, String> {
+        let workspace = validate_workspace(workspace)?;
+        let mut draft = self.draft_repository.get(id)?;
+        if Path::new(&draft.workspace_path) != workspace {
+            return Err("selected workspace does not match the Skill Draft workspace".to_string());
+        }
+        let skill_path = recorded_skill_path(&draft, &workspace)?;
+        self.ensure_not_installed(&skill_path, Some(id))?;
+        validate_draft_directory(&skill_path, &workspace)?;
+        draft.schema_version = SKILL_DRAFT_SCHEMA_VERSION;
+        Ok(draft)
     }
 
     pub fn list(&self, workspace: Option<&Path>) -> Result<Vec<SkillDraft>, String> {
@@ -412,6 +530,7 @@ impl<A: SkillAdapter, R: StateRepository, D: SkillDraftRepository> SkillAuthorin
         draft.recovery_path = Some(recovery_path.to_string_lossy().into_owned());
         atomic_write(&skill_file, repaired.as_bytes())?;
         let (outcome, diagnostics) = validate_draft_package(&skill_path);
+        draft.quality_guidance = quality_guidance(&skill_path);
         draft.status = if outcome == EvaluationOutcome::Passed {
             SkillDraftStatus::Ready
         } else {
@@ -424,7 +543,7 @@ impl<A: SkillAdapter, R: StateRepository, D: SkillDraftRepository> SkillAuthorin
                 code: diagnostic.code,
                 severity: diagnostic.severity,
                 path: diagnostic.path,
-                message: diagnostic.message,
+                message: redact_possible_secrets(&diagnostic.message),
                 remediation:
                     "Review the diagnostic and correct this Skill Draft in the selected Workspace."
                         .to_string(),
@@ -446,23 +565,28 @@ impl<A: SkillAdapter, R: StateRepository, D: SkillDraftRepository> SkillAuthorin
         skill_path: &Path,
         own_draft_id: Option<&str>,
     ) -> Result<(), String> {
+        let candidate = canonical_or_absolute(skill_path);
         let state = self.state_repository.load()?;
         let discovered = self.adapter.discover()?;
         for installation in &state.installations {
             let installation_path = canonical_or_absolute(Path::new(&installation.path));
-            let candidate = canonical_or_absolute(skill_path);
             if candidate == installation_path || candidate.starts_with(&installation_path) {
                 return Err("Skill Workspace destination overlaps an Installation; installed copies are immutable authoring targets.".to_string());
             }
         }
         for skill in discovered {
             let installed_path = canonical_or_absolute(Path::new(&skill.path));
-            let candidate = canonical_or_absolute(skill_path);
             if own_draft_id.is_some() && candidate == installed_path {
                 continue;
             }
             if candidate == installed_path || candidate.starts_with(&installed_path) {
                 return Err("Skill Workspace destination overlaps a discovered installed skill; choose a separate workspace.".to_string());
+            }
+        }
+        for target_path in self.adapter.target_paths() {
+            let target = canonical_or_absolute(&target_path);
+            if candidate == target || candidate.starts_with(&target) {
+                return Err("Skill Workspace destination overlaps an Adapter Target; author the Skill Draft in a separate Workspace.".to_string());
             }
         }
         Ok(())
@@ -552,7 +676,86 @@ fn validate_input(input: &SkillDraftInput) -> Result<(), String> {
     if input.non_goals.trim().is_empty() || input.non_goals.chars().count() > 4096 {
         return Err("skill non-goals must contain 1-4096 characters".to_string());
     }
+    let categories = input
+        .categories
+        .iter()
+        .collect::<std::collections::HashSet<_>>();
+    if categories.len() != input.categories.len()
+        || input
+            .categories
+            .iter()
+            .any(|category| !SKILL_CATEGORIES.iter().any(|known| known.id == category))
+    {
+        return Err(
+            "skill categories must be unique IDs from the descriptive category catalog".to_string(),
+        );
+    }
     Ok(())
+}
+
+fn redact_input(input: &SkillDraftInput) -> SkillDraftInput {
+    SkillDraftInput {
+        workspace: input.workspace.clone(),
+        name: input.name.clone(),
+        purpose: redact_answer(&input.purpose),
+        description: redact_answer(&input.description),
+        triggers: redact_answer(&input.triggers),
+        non_goals: redact_answer(&input.non_goals),
+        categories: input.categories.clone(),
+    }
+}
+
+fn redact_answer(value: &str) -> String {
+    let mut in_private_key = false;
+    let mut in_putty_key = false;
+    let mut in_multiline_secret: Option<usize> = None;
+    let mut redacted_lines = Vec::new();
+    for line in value.lines() {
+        let lower = line.to_ascii_lowercase();
+        let indentation = line.len() - line.trim_start_matches([' ', '\t']).len();
+        if let Some(secret_indentation) = in_multiline_secret {
+            if line.trim().is_empty() {
+                redacted_lines.push(String::new());
+                continue;
+            }
+            if indentation > secret_indentation {
+                redacted_lines.push(format!("{}[REDACTED]", &line[..indentation]));
+                continue;
+            }
+            in_multiline_secret = None;
+        }
+        if in_putty_key {
+            if lower.starts_with("private-mac:") {
+                in_putty_key = false;
+            }
+            continue;
+        }
+        if lower.starts_with("putty-user-key-file-") {
+            redacted_lines.push("[REDACTED PRIVATE KEY MATERIAL]".to_string());
+            in_putty_key = true;
+            continue;
+        }
+        if in_private_key {
+            if lower.contains("-----end") && lower.contains("private key") {
+                in_private_key = false;
+            }
+            continue;
+        }
+        if lower.contains("-----begin") && lower.contains("private key") {
+            redacted_lines.push("[REDACTED PRIVATE KEY MATERIAL]".to_string());
+            in_private_key = !(lower.contains("-----end") && lower.contains("private key"));
+            continue;
+        }
+        if has_multiline_secret_declaration(line) {
+            if let Some(separator) = line.find('=').or_else(|| line.find(':')) {
+                redacted_lines.push(format!("{} [REDACTED]", &line[..=separator]));
+                in_multiline_secret = Some(indentation);
+                continue;
+            }
+        }
+        redacted_lines.push(redact_possible_secrets(line));
+    }
+    redacted_lines.join("\n")
 }
 
 fn validate_description(description: &str) -> Result<(), String> {
@@ -609,6 +812,27 @@ fn validate_draft_package(path: &Path) -> (EvaluationOutcome, Vec<EvaluationDiag
         outcome = EvaluationOutcome::Failed;
     }
     (outcome, diagnostics)
+}
+
+fn quality_guidance(path: &Path) -> Vec<WorkspaceDiagnostic> {
+    let skill_file = path.join("SKILL.md");
+    let Ok(contents) = fs::read_to_string(&skill_file) else {
+        return Vec::new();
+    };
+    if contents.lines().any(|line| {
+        line.trim_start_matches('#')
+            .trim()
+            .eq_ignore_ascii_case("examples")
+    }) {
+        return Vec::new();
+    }
+    vec![WorkspaceDiagnostic {
+        code: "quality_examples_suggested".to_string(),
+        severity: "suggestion".to_string(),
+        path: Some(skill_file.to_string_lossy().into_owned()),
+        message: "Consider adding a concise example to clarify expected inputs and outputs; this is optional and does not affect readiness.".to_string(),
+        remediation: "Add examples only when they improve clarity for this Skill.".to_string(),
+    }]
 }
 
 fn has_trigger_guidance(contents: &str) -> bool {
@@ -754,13 +978,16 @@ fn valid_skill_name(name: &str) -> bool {
 fn render_skill(input: &SkillDraftInput) -> Result<String, String> {
     let description = serde_json::to_string(input.description.trim())
         .map_err(|error| format!("cannot encode skill description: {error}"))?;
+    let metadata = if input.categories.is_empty() {
+        String::new()
+    } else {
+        let categories = serde_json::to_string(&input.categories)
+            .map_err(|error| format!("cannot encode skill categories: {error}"))?;
+        format!("metadata:\n  tascCategories: {categories}\n")
+    };
     Ok(format!(
-        "---\nname: {}\ndescription: {description}\n---\n\n# {}\n\n## Purpose\n\n{}\n\n## When to use\n\n{}\n\n## Instructions\n\n1. Confirm the request matches the purpose above.\n2. Gather the minimum necessary context and state assumptions.\n3. Provide a clear, actionable result; explain uncertainty instead of inventing facts.\n\n## Non-goals\n\n{}\n",
-        input.name,
-        input.name,
-        input.purpose.trim(),
-        input.triggers.trim(),
-        input.non_goals.trim()
+        "---\nname: {}\ndescription: {description}\n{metadata}---\n\n# {}\n\n## Purpose\n\n{}\n\n## When to use\n\n{}\n\n## Instructions\n\n1. Confirm the request matches the purpose above.\n2. Gather the minimum necessary context and state assumptions.\n3. Provide a clear, actionable result; explain uncertainty instead of inventing facts.\n\n## Non-goals\n\n{}\n",
+        input.name, input.name, input.purpose.trim(), input.triggers.trim(), input.non_goals.trim()
     ))
 }
 
@@ -837,13 +1064,27 @@ fn add_missing_description(contents: &str, description: &str) -> Result<String, 
 }
 
 fn canonical_or_absolute(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| {
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir().unwrap_or_default().join(path)
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+    let mut existing = absolute.clone();
+    let mut unresolved = Vec::new();
+    while fs::canonicalize(&existing).is_err() {
+        let Some(component) = existing.file_name() else {
+            return absolute;
+        };
+        unresolved.push(component.to_os_string());
+        if !existing.pop() {
+            return absolute;
         }
-    })
+    }
+    let mut canonical = fs::canonicalize(existing).unwrap_or(absolute);
+    for component in unresolved.iter().rev() {
+        canonical.push(component);
+    }
+    canonical
 }
 
 fn validate_draft_id(id: &str) -> Result<(), String> {
@@ -925,12 +1166,12 @@ mod tests {
     }
 
     fn test_service(
-        root: &Path,
+        workspace: &Path,
     ) -> SkillAuthoringService<NoSkills, MemoryState, FsSkillDraftRepository> {
         SkillAuthoringService::new(
             NoSkills,
             MemoryState(LocalState::default()),
-            FsSkillDraftRepository::new(root.join("draft-records")),
+            FsSkillDraftRepository::new(workspace.to_path_buf()),
         )
     }
 
@@ -942,6 +1183,7 @@ mod tests {
             description: "Test deterministic authoring.".to_string(),
             triggers: "When testing authoring.".to_string(),
             non_goals: "Do not edit installed skills.".to_string(),
+            categories: vec!["testing".to_string()],
         }
     }
 
@@ -955,12 +1197,31 @@ mod tests {
         root
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn draft_repository_rejects_metadata_symlinks_outside_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_root();
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        fs::create_dir(&workspace).unwrap();
+        fs::create_dir(&outside).unwrap();
+        symlink(&outside, workspace.join(".tasc")).unwrap();
+        let service = test_service(&workspace);
+
+        let error = service.create(&test_input(&workspace), true).unwrap_err();
+        assert!(error.contains("must be a non-symlink directory"));
+        assert!(!outside.join("drafts").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn remediation_rejects_a_draft_changed_after_approval_plan() {
         let root = test_root();
         let workspace = root.join("workspace");
         fs::create_dir(&workspace).unwrap();
-        let service = test_service(&root);
+        let service = test_service(&workspace);
         let input = test_input(&workspace);
         let draft = service.create(&input, true).unwrap();
         let skill_file = Path::new(&draft.skill_path).join("SKILL.md");
@@ -985,7 +1246,7 @@ mod tests {
         let root = test_root();
         let workspace = root.join("workspace");
         fs::create_dir(&workspace).unwrap();
-        let service = test_service(&root);
+        let service = test_service(&workspace);
         let input = test_input(&workspace);
         let draft = service.create(&input, true).unwrap();
         let skill_file = Path::new(&draft.skill_path).join("SKILL.md");
@@ -1003,6 +1264,113 @@ mod tests {
             fs::read_to_string(result.recovery_path.unwrap()).unwrap(),
             invalid
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn drafts_resume_with_redacted_structured_answers_and_nonblocking_quality_guidance() {
+        let root = test_root();
+        let workspace = root.join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let service = test_service(&workspace);
+        let mut input = test_input(&workspace);
+        input.purpose = "Use api_key=credential-value-123 to test.".to_string();
+        let draft = service.create(&input, true).unwrap();
+
+        assert_eq!(draft.status, SkillDraftStatus::Ready);
+        assert_eq!(draft.answers.purpose, "Use api_key= [REDACTED]");
+        assert_eq!(draft.categories, vec!["testing"]);
+        assert!(draft.quality_guidance.iter().any(|item| {
+            item.code == "quality_examples_suggested" && item.severity == "suggestion"
+        }));
+        assert!(service
+            .resume(&draft.id, &workspace)
+            .unwrap()
+            .answers
+            .eq(&draft.answers));
+
+        let saved = fs::read_to_string(
+            workspace
+                .join(".tasc/drafts")
+                .join(format!("{}.json", draft.id)),
+        )
+        .unwrap();
+        assert!(!saved.contains("credential-value-123"));
+        assert!(!saved.contains("transcript"));
+        let skill = fs::read_to_string(Path::new(&draft.skill_path).join("SKILL.md")).unwrap();
+        assert!(!skill.contains("credential-value-123"));
+        assert!(skill.contains("tascCategories: [\"testing\"]"));
+        assert!(service.resume(&draft.id, &root).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn multiline_private_key_material_is_redacted_from_draft_and_skill_content() {
+        let root = test_root();
+        let workspace = root.join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let service = test_service(&workspace);
+        let mut input = test_input(&workspace);
+        let private_material = "unique-private-key-payload-for-regression";
+        let assigned_private_material = "private-assignment-secret-regression";
+        let quoted_private_material = "quoted-private-assignment-secret";
+        let yaml_secret_material = "multiline-yaml-secret-material-regression";
+        input.purpose = format!(
+            "Use this key:\n-----BEGIN RSA PRIVATE KEY-----\n{private_material}\n-----END RSA PRIVATE KEY-----\nfor local testing.\nPuTTY-User-Key-File-3: ssh-ed25519\nEncryption: none\nPrivate-Lines: 1\n{private_material}\nPrivate-MAC: 0123456789\nPrivateKey = {assigned_private_material}\n{{\"private_key\": \"{quoted_private_material}\"}}\napi_key: |\n  {yaml_secret_material}\n  another secret line\nsafe: retained"
+        );
+
+        let draft = service.create(&input, true).unwrap();
+        assert!(!draft.answers.purpose.contains(private_material));
+        assert!(!draft.answers.purpose.contains(assigned_private_material));
+        assert!(!draft.answers.purpose.contains(quoted_private_material));
+        assert!(!draft.answers.purpose.contains(yaml_secret_material));
+        assert!(draft
+            .answers
+            .purpose
+            .contains("[REDACTED PRIVATE KEY MATERIAL]"));
+        assert!(draft.answers.purpose.contains("safe: retained"));
+        assert!(!draft.answers.purpose.contains("PuTTY-User-Key-File"));
+        let skill_file = fs::read_to_string(Path::new(&draft.skill_path).join("SKILL.md")).unwrap();
+        assert!(!skill_file.contains(private_material));
+        assert!(!skill_file.contains(yaml_secret_material));
+        assert!(skill_file.contains("safe: retained"));
+        let saved = fs::read_to_string(
+            workspace
+                .join(".tasc/drafts")
+                .join(format!("{}.json", draft.id)),
+        )
+        .unwrap();
+        assert!(!saved.contains(private_material));
+        assert!(!saved.contains(assigned_private_material));
+        assert!(!saved.contains(quoted_private_material));
+        assert!(!saved.contains(yaml_secret_material));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn normative_validation_failures_block_readiness_separately_from_quality_guidance() {
+        let root = test_root();
+        let workspace = root.join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let service = test_service(&workspace);
+        let draft = service.create(&test_input(&workspace), true).unwrap();
+        let skill_file = Path::new(&draft.skill_path).join("SKILL.md");
+        fs::write(
+            &skill_file,
+            "---\nname: authoring-test\n---\n## When to use\n\nWhen testing.\n",
+        )
+        .unwrap();
+
+        let validated = service.validate(&draft.id, &workspace).unwrap();
+        assert_eq!(validated.status, SkillDraftStatus::Incomplete);
+        assert!(validated
+            .diagnostics
+            .iter()
+            .any(|item| item.severity == "error"));
+        assert!(validated
+            .quality_guidance
+            .iter()
+            .all(|item| item.severity != "error"));
         fs::remove_dir_all(root).unwrap();
     }
 }
