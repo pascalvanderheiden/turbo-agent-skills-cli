@@ -2,6 +2,7 @@ import gzip
 import hashlib
 import json
 import re
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -83,7 +84,7 @@ class ReleaseTests(unittest.TestCase):
             second = make_command_skill_archive(skill_directory, "v0.1.0", directory)
 
             self.assertEqual(first_bytes, second.read_bytes())
-            with __import__("tarfile").open(first, "r:gz") as archive:
+            with tarfile.open(first, "r:gz") as archive:
                 self.assertEqual(
                    set(archive.getnames()),
                    {

@@ -88,6 +88,12 @@ def make_command_skill_archive(skill_directory, version, output_dir):
     adapter_path = skill_directory / "adapters" / "copilot.json"
     if not skill_path.is_file() or not adapter_path.is_file():
         raise ValueError("Command Skill package is missing SKILL.md or Copilot metadata")
+    skill = skill_path.read_text(encoding="utf-8")
+    if not re.search(rf"^  tasc-version: {re.escape(version[1:])}$", skill, re.MULTILINE):
+        raise ValueError("Command Skill frontmatter version does not match the release")
+    adapter = json.loads(adapter_path.read_text(encoding="utf-8"))
+    if adapter.get("schemaVersion") != 1 or adapter.get("adapter") != "copilot":
+        raise ValueError("Command Skill Copilot adapter metadata is invalid")
 
     archive = Path(output_dir) / f"tasc-command-skill-{version}.tar.gz"
     archive.parent.mkdir(parents=True, exist_ok=True)
@@ -149,7 +155,20 @@ def validate_assets(directory, version):
         extra = sorted(targets - TARGETS)
         raise ValueError(f"release archive targets mismatch; missing={missing}, extra={extra}")
 
-    command_skill_path = directory / f"tasc-command-skill-{version}.tar.gz"
+    command_skill_archives = sorted(directory.glob("tasc-command-skill-v*.tar.gz"))
+    if version:
+        command_skill_path = directory / f"tasc-command-skill-{version}.tar.gz"
+        expected_command_skill_version = version.removeprefix("v")
+    elif len(command_skill_archives) == 1:
+        command_skill_path = command_skill_archives[0]
+        match = SEMVER.fullmatch(command_skill_path.name.removeprefix("tasc-command-skill-").removesuffix(".tar.gz"))
+        if not match:
+            raise ValueError("Command Skill package filename must use stable SemVer")
+        expected_command_skill_version = command_skill_path.name.removeprefix(
+            "tasc-command-skill-v"
+        ).removesuffix(".tar.gz")
+    else:
+        raise ValueError("release assets must contain exactly one Command Skill package")
     try:
         with tarfile.open(command_skill_path, "r:gz") as command_skill:
             names = set(command_skill.getnames())
@@ -159,9 +178,21 @@ def validate_assets(directory, version):
             if not manifest_member or not skill_member or not adapter_member:
                 raise ValueError("Command Skill archive is missing a required package file")
             manifest = json.load(manifest_member)
+            skill = skill_member.read().decode("utf-8")
+            adapter = json.load(adapter_member)
     except (OSError, tarfile.TarError, KeyError, json.JSONDecodeError) as error:
         raise ValueError(f"missing or invalid Command Skill package: {error}") from error
-    if len(names) != 3 or manifest.get("version") != version.removeprefix("v"):
+    if (
+        len(names) != 3
+        or manifest.get("version") != expected_command_skill_version
+        or not re.search(
+            rf"^  tasc-version: {re.escape(expected_command_skill_version)}$",
+            skill,
+            re.MULTILINE,
+        )
+        or adapter.get("schemaVersion") != 1
+        or adapter.get("adapter") != "copilot"
+    ):
         raise ValueError("Command Skill archive contents or version do not match the release")
 
     sbom_path = directory / "tasc.cdx.json"
