@@ -9,8 +9,16 @@ A reusable capability bundle that supplies instructions and supporting resources
 _Avoid_: Plugin, prompt pack
 
 **TASC Command Skill**:
-A first-party Agent Skill distributed with TASC and installable into supported Adapter Targets. It enables a user’s own coding assistant to perform the same authorized TASC operations as the CLI and dedicated TASC agent while preserving TASC’s plans, approvals, policies, and Local State.
+A first-party Agent Skill distributed with each TASC release and installable into explicitly selected supported Adapter Targets at user or project scope. It delegates user-facing TASC operations to the installed `tasc` executable through stable noun-first commands and versioned machine-readable envelopes; it never reimplements domain or persistence logic. A capability handshake gates compatibility, and the binary remains authoritative for Profiles, policies, security checks, plans, approvals, and Local State.
 _Avoid_: Wrapper, magic proxy, alternate implementation
+
+**Command Skill Installation**:
+A managed Installation of the TASC Command Skill into one Adapter Target and scope. It records first-party provenance and version, tracks successfully approved installs automatically, supports explicit update, repair, and uninstall, and refuses silent overwrite when the user has modified the installed content.
+_Avoid_: Automatic enablement, unmanaged helper
+
+**Command Skill Parity**:
+Equivalent authorized outcomes across the CLI, dedicated TASC agent, and TASC Command Skill for stable user-facing operations. Parity compares normalized machine-readable results, diagnostics, policy decisions, and approval boundaries; internal diagnostics are not part of the external parity surface.
+_Avoid_: Identical interface, duplicated implementation
 
 **Skill Authoring**:
 The guided creation of a new Agent Skill from stated goals and constraints, producing a Skill Draft that must satisfy the Agent Skills standard before it is ready for optional follow-up actions.
