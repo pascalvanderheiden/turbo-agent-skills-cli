@@ -226,23 +226,21 @@ impl CopilotAdapter {
 
     pub fn target(scope: &str) -> Result<AdapterTarget, String> {
         let path = match scope {
-            "project" => fs::canonicalize(
+            "project" => canonicalize_or_create(
                 std::env::current_dir()
-                    .map_err(|error| format!("cannot locate project target: {error}"))?,
+                    .map_err(|error| format!("cannot locate project target: {error}"))?
+                    .join(".github")
+                    .join("skills"),
             )
-            .map_err(|error| format!("cannot resolve project target: {error}"))?
-            .join(".github")
-            .join("skills"),
+            .map_err(|error| format!("cannot resolve project target: {error}"))?,
             "user" => {
                 let home = std::env::var_os("HOME")
                     .or_else(|| std::env::var_os("USERPROFILE"))
                     .ok_or_else(|| {
                         "cannot locate user target: home directory is not set".to_string()
                     })?;
-                fs::canonicalize(PathBuf::from(home))
+                canonicalize_or_create(PathBuf::from(home).join(".copilot").join("skills"))
                     .map_err(|error| format!("cannot resolve user target: {error}"))?
-                    .join(".copilot")
-                    .join("skills")
             }
             _ => return Err(format!("unsupported Copilot installation scope '{scope}'")),
         };
@@ -255,11 +253,36 @@ impl CopilotAdapter {
     }
 }
 
+fn canonicalize_normalized(path: PathBuf) -> std::io::Result<PathBuf> {
+    // A missing target directory is a valid state when a fresh project/user scope is being
+    // initialized; callers that need a path should call canonicalize_or_create instead.
+    let canonical = fs::canonicalize(&path)?;
+    Ok(normalize_private_root(canonical))
+}
+
+fn canonicalize_or_create(path: PathBuf) -> std::io::Result<PathBuf> {
+    if !path.exists() {
+        fs::create_dir_all(&path)?;
+    }
+    let canonical = fs::canonicalize(&path)?;
+    Ok(normalize_private_root(canonical))
+}
+
+fn normalize_private_root(path: PathBuf) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        let string = path.to_string_lossy();
+        if let Some(rest) = string.strip_prefix("/private/") {
+            return PathBuf::from(format!("/{rest}"));
+        }
+    }
+    path
+}
+
 impl SkillAdapter for CopilotAdapter {
     fn discover(&self) -> Result<Vec<DiscoveredSkill>, String> {
         let mut skills = Vec::new();
         for root in &self.roots {
-            let canonical_root = match fs::canonicalize(root) {
+            let canonical_root = match canonicalize_normalized(root.clone()) {
                 Ok(path) => path,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => {

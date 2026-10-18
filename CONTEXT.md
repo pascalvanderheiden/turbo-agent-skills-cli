@@ -8,6 +8,10 @@ TASC helps people maintain, assess, and improve reusable agent skills across the
 A reusable capability bundle that supplies instructions and supporting resources to a coding assistant.
 _Avoid_: Plugin, prompt pack
 
+**TASC Command Skill**:
+A first-party Agent Skill distributed with TASC and installable into supported Adapter Targets. It enables a user’s own coding assistant to perform the same authorized TASC operations as the CLI and dedicated TASC agent while preserving TASC’s plans, approvals, policies, and Local State.
+_Avoid_: Wrapper, magic proxy, alternate implementation
+
 **Skill Authoring**:
 The guided creation of a new Agent Skill from stated goals and constraints, producing skill files that are validated before optional installation or sharing.
 _Avoid_: Installation, adoption
@@ -48,6 +52,10 @@ _Avoid_: Unknown skill, unmanaged file
 The explicit act of recording an Untracked Installation in Local State without reinstalling or modifying its files.
 _Avoid_: Install, import
 
+**Tracking**:
+The user-facing workflow for adopting an already installed skill into Local State so lifecycle, Evaluation, Consistency, Security, and update operations can address it. Uninstalled skills are watched, not tracked.
+_Avoid_: Watchlist, installation
+
 **Watchlist**:
 A user-selected set of Skill Sources or skill-relative paths monitored for relevant changes. A Watchlist detects changes but does not silently update installations.
 _Avoid_: Favorites, subscriptions
@@ -55,6 +63,10 @@ _Avoid_: Favorites, subscriptions
 **Local State**:
 TASC's versioned, user-owned metadata about Skill Identities, sources, installations, watchlists, and run references. Evaluation and check outputs are stored as separate local artifacts; credentials are not copied into Local State.
 _Avoid_: Cache, registry
+
+**TASC Profile**:
+A named user or project scope over Local State that groups tracked skills, watchlists, status, and related run references without making installed skill content writable.
+_Avoid_: Skill Workspace, installation target
 
 **Evaluation**:
 A repeatable assessment of an Agent Skill against defined scenarios and quality criteria.
@@ -143,6 +155,14 @@ _Avoid_: Log, report
 **Portable Skill Bundle**:
 An explicit export containing an Agent Skill, its source metadata, and selected Run Artifacts without credentials or unrelated Local State.
 _Avoid_: Backup, package
+
+**Skill Category**:
+A descriptive tag used to organize and discover Agent Skills without changing installation, tracking, or execution behavior.
+_Avoid_: Skill Bundle, capability owner
+
+**Skill Bundle**:
+A named, versioned, deployable manifest of selected Skill Identities, source constraints, and installation intent that can be shared without copying credentials or unrelated Local State.
+_Avoid_: Skill Category, Portable Skill Bundle
 
 **Watch Check**:
 A user-triggered comparison between a Watchlist target and its last observed Source Revision that reports changes without updating an Installation.
