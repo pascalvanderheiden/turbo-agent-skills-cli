@@ -216,6 +216,27 @@ impl AgentContext {
                 let artifact = service.run(&self.resolve_selector(&selector)?, None, false)?;
                 success("eval run", evaluation_summary(&artifact))
             }
+            AgentToolRequest::ListEvaluations => {
+                let service = EvaluationService::new(
+                    CopilotAdapter::local(),
+                    FsStateRepository::new(self.state_path.clone()),
+                    FsRunArtifactRepository::new(self.state_path.with_extension("evaluations")),
+                );
+                let artifacts = service.list()?;
+                success(
+                    "eval list",
+                    json!({"artifacts":artifacts.iter().map(evaluation_summary).collect::<Vec<_>>()}),
+                )
+            }
+            AgentToolRequest::ShowEvaluation { id } => {
+                let service = EvaluationService::new(
+                    CopilotAdapter::local(),
+                    FsStateRepository::new(self.state_path.clone()),
+                    FsRunArtifactRepository::new(self.state_path.with_extension("evaluations")),
+                );
+                let artifact = service.show(&id)?;
+                success("eval show", evaluation_summary(&artifact))
+            }
             AgentToolRequest::CheckConsistency {
                 selectors,
                 all_installed,
@@ -232,6 +253,35 @@ impl AgentContext {
                 )
                 .check(&selectors, all_installed)?;
                 success("consistency check", consistency_summary(&artifact))
+            }
+            AgentToolRequest::ListConsistency => {
+                let service = ConsistencyService::new(
+                    CopilotAdapter::local(),
+                    FsStateRepository::new(self.state_path.clone()),
+                    FsConsistencyArtifactRepository::new(
+                        self.state_path.with_extension("consistency-checks"),
+                    ),
+                    FsRunArtifactRepository::new(self.state_path.with_extension("evaluations")),
+                    FsWatchCheckRepository::new(self.state_path.with_extension("watch-checks")),
+                );
+                let artifacts = service.list()?;
+                success(
+                    "consistency list",
+                    json!({"artifacts":artifacts.iter().map(consistency_summary).collect::<Vec<_>>()}),
+                )
+            }
+            AgentToolRequest::ShowConsistency { id } => {
+                let service = ConsistencyService::new(
+                    CopilotAdapter::local(),
+                    FsStateRepository::new(self.state_path.clone()),
+                    FsConsistencyArtifactRepository::new(
+                        self.state_path.with_extension("consistency-checks"),
+                    ),
+                    FsRunArtifactRepository::new(self.state_path.with_extension("evaluations")),
+                    FsWatchCheckRepository::new(self.state_path.with_extension("watch-checks")),
+                );
+                let artifact = service.show(&id)?;
+                success("consistency show", consistency_summary(&artifact))
             }
             AgentToolRequest::CheckSecurity {
                 selectors,
@@ -680,6 +730,7 @@ enum ShellCommand {
     Approve(String),
     Deny(String),
     Cancel,
+    Cli(Vec<String>),
     Request(String),
 }
 
@@ -710,9 +761,27 @@ fn parse_shell_command(input: &str) -> Result<ShellCommand, String> {
             [model] => Ok(ShellCommand::ModelSession((*model).to_string())),
             _ => Err("Usage: /model [list|MODEL|profile MODEL]".to_string()),
         },
-        "skill" | "evaluation" | "eval" | "consistency" | "security" | "audit" | "stats"
-        | "profile" | "profiles" | "bundle" | "bundles" | "command-skill" | "command-skills" => {
-            if arguments.is_empty() && !matches!(name, "audit" | "stats" | "profiles") {
+        "audit" | "stats" => {
+            let mut args = vec![name.to_string()];
+            args.extend(arguments.split_whitespace().map(str::to_string));
+            Ok(ShellCommand::Cli(args))
+        }
+        "profile" if arguments == "status" => Ok(ShellCommand::Cli(vec![
+            "state".to_string(),
+            "status".to_string(),
+        ])),
+        "profiles" if arguments.is_empty() => Ok(ShellCommand::Cli(vec![
+            "state".to_string(),
+            "status".to_string(),
+        ])),
+        "bundle" if arguments == "validate" || arguments.starts_with("validate ") => {
+            let mut args = vec!["bundle".to_string(), "validate".to_string()];
+            args.extend(arguments.split_whitespace().skip(1).map(str::to_string));
+            Ok(ShellCommand::Cli(args))
+        }
+        "skill" | "evaluation" | "eval" | "consistency" | "security" | "profile" | "profiles"
+        | "bundle" | "bundles" | "command-skill" | "command-skills" => {
+            if arguments.is_empty() && !matches!(name, "profiles") {
                 return Err(format!("Usage: /{name} OPERATION [ARGUMENTS]"));
             }
             let noun = match name {
@@ -749,6 +818,12 @@ fn read_profile_model(state_path: &Path) -> Result<Option<String>, Diagnostic> {
         Err(error) => return Err(state_error(error.to_string())),
     };
     let preferences: Value = serde_json::from_slice(&contents).map_err(serialization_error)?;
+    if preferences["schemaVersion"] != 1 {
+        return Err(selection_error(
+            "unsupported_agent_preferences",
+            "The saved Profile model preference has an unsupported version.",
+        ));
+    }
     Ok(preferences
         .get("model")
         .and_then(Value::as_str)
@@ -778,6 +853,7 @@ fn save_profile_model(state_path: &Path, model: &str) -> Result<(), Diagnostic> 
         let _ = std::fs::remove_file(&temporary);
         return Err(state_error(error.to_string()));
     }
+
     drop(file);
     if let Err(error) = std::fs::rename(&temporary, path) {
         let _ = std::fs::remove_file(&temporary);
@@ -786,9 +862,40 @@ fn save_profile_model(state_path: &Path, model: &str) -> Result<(), Diagnostic> 
     Ok(())
 }
 
+fn run_cli_command(args: &[String], offline: bool, json_output: bool) -> Result<(), Diagnostic> {
+    let executable = std::env::current_exe().map_err(|error| state_error(error.to_string()))?;
+    let mut command = Command::new(executable);
+    command.arg("--format");
+    command.arg(if json_output { "json" } else { "human" });
+    if offline {
+        command.arg("--offline");
+    }
+    let output = command
+        .args(args)
+        .output()
+        .map_err(|error| state_error(error.to_string()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if json_output {
+        print!("{stdout}");
+        eprint!("{stderr}");
+    } else {
+        print!("{}", safe_text(&stdout));
+        eprint!("{}", safe_text(&stderr));
+    }
+    if !output.status.success() && output.stdout.is_empty() && output.stderr.is_empty() {
+        return Err(selection_error(
+            "tasc_command_failed",
+            "The requested TASC command did not complete successfully.",
+        ));
+    }
+    Ok(())
+}
+
 fn gh_authenticated() -> bool {
     Command::new("gh")
         .args(["auth", "status", "--hostname", "github.com"])
+        .env("GH_PROMPT_DISABLED", "1")
         .output()
         .is_ok_and(|output| output.status.success())
 }
@@ -800,9 +907,7 @@ fn dashboard_status(state_path: &Path, model: &str, token_usage: Option<(i64, i6
     )
     .inventory()
     .ok();
-    let items = inventory
-        .map(|inventory| inventory.items)
-        .unwrap_or_default();
+    let items = inventory.as_ref().map(|inventory| &inventory.items);
     json!({
         "githubCliAuthenticated": gh_authenticated(),
         "model": model,
@@ -811,10 +916,29 @@ fn dashboard_status(state_path: &Path, model: &str, token_usage: Option<(i64, i6
             "outputTokens": output,
             "totalTokens": input.saturating_add(output)
         })),
-        "skillCount": items.len(),
-        "trackedCount": items.iter().filter(|item| item.tracked).count(),
-        "watchedCount": items.iter().filter(|item| item.watch_state != "not_watched").count()
+        "skillCount": items.map(Vec::len),
+        "trackedCount": items.map(|items| items.iter().filter(|item| item.tracked).count()),
+        "untrackedCount": items.map(|items| items.iter().filter(|item| !item.tracked).count()),
+        "watchedCount": items.map(|items| items.iter().filter(|item| item.watch_state != "not_watched").count())
     })
+}
+
+fn onboarding_message(status: &Value) -> String {
+    let untracked = status["untrackedCount"].as_u64().unwrap_or_default();
+    if untracked > 0 {
+        format!(
+            "Onboarding: {untracked} untracked installation(s). Review /skill list, then choose /skill track all or /skill track <installation-id>."
+        )
+    } else {
+        "First steps: /skill list · /help · /quit".to_string()
+    }
+}
+
+fn display_count(status: &Value, key: &str) -> String {
+    status[key]
+        .as_u64()
+        .map(|count| count.to_string())
+        .unwrap_or_else(|| "unavailable".to_string())
 }
 
 fn dashboard_output(status: &Value, color: bool, json_output: bool) -> String {
@@ -828,21 +952,29 @@ fn dashboard_output(status: &Value, color: bool, json_output: bool) -> String {
         banner.to_string()
     };
     format!(
-        "{banner}\nGitHub CLI: {} · Model: {} · Tokens: {} · Skills: {} ({} tracked, {} watched)\nFirst steps: /skill list · /help · /quit",
+        "{banner}\nGitHub CLI: {} · Model: {} · Tokens: {} · Skills: {} ({} tracked, {} watched)\n{}",
         if status["githubCliAuthenticated"] == true {
             "authenticated"
         } else {
             "not authenticated"
         },
-        status["model"].as_str().unwrap_or("auto"),
+        safe_text(status["model"].as_str().unwrap_or("auto")),
         status["tokenUsage"]
             .get("totalTokens")
             .and_then(Value::as_i64)
             .map(|tokens| tokens.to_string())
             .unwrap_or_else(|| "unavailable".to_string()),
-        status["skillCount"].as_u64().unwrap_or_default(),
-        status["trackedCount"].as_u64().unwrap_or_default(),
-        status["watchedCount"].as_u64().unwrap_or_default()
+        display_count(status, "skillCount"),
+        display_count(status, "trackedCount"),
+        display_count(status, "watchedCount"),
+        onboarding_message(status)
+    )
+}
+
+fn output_policy(interactive: bool, no_color: bool, json_output: bool) -> (bool, bool) {
+    (
+        interactive || json_output,
+        interactive && !no_color && !json_output,
     )
 }
 
@@ -863,15 +995,20 @@ async fn set_session_model(
     model: &str,
 ) -> Result<(), Diagnostic> {
     let models = list_models(client).await?;
-    if model != "auto" && !models.iter().any(|available| available == model) {
-        return Err(selection_error(
+    validate_model_choice(model, &models)?;
+    session.set_model(model, None).await.map_err(sdk_error)?;
+    Ok(())
+}
+
+fn validate_model_choice(model: &str, available: &[String]) -> Result<(), Diagnostic> {
+    if model == "auto" || available.iter().any(|available| available == model) {
+        Ok(())
+    } else {
+        Err(selection_error(
             "unknown_model",
             "That model is not exposed by the Copilot SDK for this account.",
-        ));
+        ))
     }
-    session.set_model(model, None).await.map_err(sdk_error)?;
-    println!("Session model set to {model}; Profile preference unchanged.");
-    Ok(())
 }
 
 async fn interact(
@@ -884,9 +1021,13 @@ async fn interact(
     let mut events = session.subscribe();
     let mut stdout = tokio::io::stdout();
     let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let color = interactive && std::env::var_os("NO_COLOR").is_none() && !context.json_output;
+    let (show_dashboard, color) = output_policy(
+        interactive,
+        std::env::var_os("NO_COLOR").is_some(),
+        context.json_output,
+    );
     let mut model = profile_model.unwrap_or_else(|| "auto".to_string());
-    if interactive || context.json_output {
+    if show_dashboard {
         let usage = session
             .rpc()
             .usage()
@@ -991,8 +1132,8 @@ async fn interact(
                                 })
                             );
                         } else {
-                            println!("Models: auto (default), {}", models.join(", "));
-                            println!("Current session model: {model}");
+                            println!("Models: auto (default), {}", safe_text(&models.join(", ")));
+                            println!("Current session model: {}", safe_text(&model));
                         }
                     }
                     Err(error) => print_shell_event("error", &error.message, context.json_output),
@@ -1001,7 +1142,16 @@ async fn interact(
             }
             ShellCommand::ModelSession(selected) => {
                 match set_session_model(client, session, &selected).await {
-                    Ok(()) => model = selected,
+                    Ok(()) => {
+                        model = selected.clone();
+                        print_shell_event(
+                            "result",
+                            &format!(
+                                "Session model set to {selected}; Profile preference unchanged."
+                            ),
+                            context.json_output,
+                        );
+                    }
                     Err(error) => print_shell_event("error", &error.message, context.json_output),
                 }
                 continue;
@@ -1057,6 +1207,12 @@ async fn interact(
                     "No active operation. Press Ctrl-C while a request is running to cancel it.",
                     context.json_output,
                 );
+                continue;
+            }
+            ShellCommand::Cli(args) => {
+                if let Err(error) = run_cli_command(&args, context.offline, context.json_output) {
+                    print_shell_event("error", &error.message, context.json_output);
+                }
                 continue;
             }
             ShellCommand::Request(prompt) => {
@@ -1125,15 +1281,19 @@ async fn interact(
 }
 
 fn print_shell_event(kind: &str, message: &str, json_output: bool) {
-    if json_output {
-        println!(
-            "{}",
-            json!({"schemaVersion":1,"command":"agent.event","type":kind,"message":message})
-        );
-    } else if kind == "error" || kind == "warning" || kind == "activity" || kind == "plan" {
-        eprintln!("{kind}: {message}");
+    let rendered = shell_event_output(kind, message, json_output);
+    if kind == "error" || kind == "warning" || kind == "activity" || kind == "plan" {
+        eprintln!("{rendered}");
     } else {
-        println!("{kind}: {message}");
+        println!("{rendered}");
+    }
+}
+
+fn shell_event_output(kind: &str, message: &str, json_output: bool) -> String {
+    if json_output {
+        json!({"schemaVersion":1,"command":"agent.event","type":kind,"message":message}).to_string()
+    } else {
+        format!("{kind}: {message}")
     }
 }
 
@@ -1192,9 +1352,29 @@ fn tools(dispatcher: Arc<Dispatcher>) -> Vec<Tool> {
             json!({"type":"object","properties":{"selector":{"type":"string"}},"required":["selector"],"additionalProperties":false}),
         ),
         (
+            "tasc_list_evaluations",
+            "List immutable Evaluation Run Artifacts.",
+            json!({"type":"object","properties":{},"additionalProperties":false}),
+        ),
+        (
+            "tasc_show_evaluation",
+            "Show one immutable Evaluation Run Artifact.",
+            json!({"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false}),
+        ),
+        (
             "tasc_check_consistency",
             "Create a local Consistency Check for explicit skills or all installed skills.",
             json!({"type":"object","properties":{"selectors":{"type":"array","items":{"type":"string"}},"allInstalled":{"type":"boolean"}},"required":["selectors","allInstalled"],"additionalProperties":false}),
+        ),
+        (
+            "tasc_list_consistency_checks",
+            "List immutable Consistency Check Artifacts.",
+            json!({"type":"object","properties":{},"additionalProperties":false}),
+        ),
+        (
+            "tasc_show_consistency_check",
+            "Show one immutable Consistency Check Artifact.",
+            json!({"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false}),
         ),
         (
             "tasc_check_security",
@@ -1289,7 +1469,11 @@ fn tool_command(name: &str) -> &'static str {
         "tasc_resolve_reference" => "agent.resolve_reference",
         "tasc_track_skills" => "skill track",
         "tasc_run_evaluation" => "eval run",
+        "tasc_list_evaluations" => "eval list",
+        "tasc_show_evaluation" => "eval show",
         "tasc_check_consistency" => "consistency check",
+        "tasc_list_consistency_checks" => "consistency list",
+        "tasc_show_consistency_check" => "consistency show",
         "tasc_check_security" => "security check",
         "tasc_plan_lifecycle" => "skill lifecycle plan",
         "tasc_list_security_checks" => "security list",
@@ -1312,8 +1496,12 @@ fn looks_like_reference(selector: &str) -> bool {
 
 fn render_event(name: &str, data: &Value, json_output: bool) {
     match translate_sdk_event(name, data) {
-        Some(AgentEvent::ToolStarted(tool)) => print_shell_event("activity", &tool, json_output),
-        Some(AgentEvent::ToolCompleted(tool)) => print_shell_event("progress", &tool, json_output),
+        Some(AgentEvent::ToolStarted(tool)) => {
+            print_shell_event("activity", &safe_text(&tool), json_output)
+        }
+        Some(AgentEvent::ToolCompleted(tool)) => {
+            print_shell_event("progress", &safe_text(&tool), json_output)
+        }
         Some(AgentEvent::Warning(message)) => {
             print_shell_event("warning", &safe_text(&message), json_output)
         }
@@ -1447,7 +1635,9 @@ fn safe_text(text: &str) -> String {
 mod tests {
     use super::{
         dashboard_output, dashboard_status, lifecycle_summary, model_preferences_path,
-        parse_shell_command, read_profile_model, save_profile_model, session_config, ShellCommand,
+        onboarding_message, output_policy, parse_shell_command, read_profile_model,
+        save_profile_model, session_config, shell_event_output, validate_model_choice,
+        ShellCommand,
     };
     use std::{
         fs,
@@ -1484,12 +1674,20 @@ mod tests {
     fn parses_canonical_commands_and_legacy_approval_aliases() {
         assert_eq!(parse_shell_command("/quit").unwrap(), ShellCommand::Quit);
         assert_eq!(
+            parse_shell_command("/cancel").unwrap(),
+            ShellCommand::Cancel
+        );
+        assert_eq!(
             parse_shell_command("/model claude-sonnet").unwrap(),
             ShellCommand::ModelSession("claude-sonnet".to_string())
         );
         assert_eq!(
             parse_shell_command("/model profile claude-sonnet").unwrap(),
             ShellCommand::ModelProfile("claude-sonnet".to_string())
+        );
+        assert_eq!(
+            parse_shell_command("/model").unwrap(),
+            ShellCommand::ModelList
         );
         assert_eq!(
             parse_shell_command("/evaluation run skill:example")
@@ -1499,6 +1697,22 @@ mod tests {
                     .to_string()
             )
         );
+        assert!(matches!(
+            parse_shell_command("/audit").unwrap(),
+            ShellCommand::Cli(args) if args == ["audit"]
+        ));
+        assert!(matches!(
+            parse_shell_command("/profile status").unwrap(),
+            ShellCommand::Cli(args) if args == ["state", "status"]
+        ));
+        assert!(matches!(
+            parse_shell_command("/bundle validate skills.json").unwrap(),
+            ShellCommand::Cli(args) if args == ["bundle", "validate", "skills.json"]
+        ));
+        assert!(matches!(
+            parse_shell_command("/command-skill install").unwrap(),
+            ShellCommand::Request(_)
+        ));
         assert_eq!(
             parse_shell_command(":approve tasc-approve-token").unwrap(),
             ShellCommand::Approve("tasc-approve-token".to_string())
@@ -1526,11 +1740,39 @@ mod tests {
         assert_eq!(status["model"], "auto");
         assert!(status["tokenUsage"].is_null());
         assert!(status["skillCount"].is_number());
+        assert_eq!(
+            onboarding_message(&status),
+            "First steps: /skill list · /help · /quit"
+        );
         let rendered = dashboard_output(&status, false, true);
         assert!(!rendered.contains("\u{1b}["));
         assert!(rendered.contains("\"command\":\"agent.dashboard\""));
         assert!(!dashboard_output(&status, false, false).contains("\u{1b}["));
         assert!(dashboard_output(&status, true, false).contains("\u{1b}["));
+        let onboarding = serde_json::json!({"untrackedCount":2});
+        assert!(onboarding_message(&onboarding).contains("2 untracked installation(s)"));
+        let with_usage = dashboard_status(&test_path(), "auto", Some((11, 7)));
+        assert_eq!(with_usage["tokenUsage"]["totalTokens"], 18);
+        let cancelled: serde_json::Value =
+            serde_json::from_str(&shell_event_output("cancelled", "stopped", true)).unwrap();
+        assert_eq!(cancelled["type"], "cancelled");
+        assert_eq!(output_policy(false, false, false), (false, false));
+        assert_eq!(output_policy(false, false, true), (true, false));
+        assert_eq!(output_policy(true, true, false), (true, false));
+        assert_eq!(output_policy(true, false, false), (true, true));
+    }
+
+    #[test]
+    fn model_selection_accepts_auto_or_sdk_exposed_ids_only() {
+        let models = vec!["claude-sonnet".to_string(), "gpt-5".to_string()];
+        assert!(validate_model_choice("auto", &models).is_ok());
+        assert!(validate_model_choice("claude-sonnet", &models).is_ok());
+        assert_eq!(
+            validate_model_choice("hidden-model", &models)
+                .unwrap_err()
+                .code,
+            "unknown_model"
+        );
     }
 
     #[test]
