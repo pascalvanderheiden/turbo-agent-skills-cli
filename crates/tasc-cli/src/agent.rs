@@ -962,12 +962,12 @@ fn display_count(status: &Value, key: &str) -> String {
 }
 
 const TURBO_BANNER_LINES: [&str; 6] = [
-    " _____   ___    ____    ____",
-    "|_   _| / _ \\  / ___|  / ___|",
-    "  | |  / /_\\ \\ \\___ \\ | |",
-    "  | |  |  _  |  ___) || |___",
-    "  |_|  |_| |_| |____/  \\____|",
-    "      TURBO AGENT SKILLS CLI",
+    "  _________   _____ ______",
+    " /_  __/   | / ___// ____/",
+    "  / / / /| | \\__ \\/ /",
+    " / / / ___ |___/ / /___",
+    "/_/ /_/  |_/____/\\____/",
+    "   TURBO AGENT SKILLS CLI",
 ];
 const RAINBOW_ANSI: [&str; 6] = ["91", "93", "92", "96", "94", "95"];
 
@@ -1822,7 +1822,7 @@ mod tests {
         assert!(rendered.contains("\"command\":\"agent.dashboard\""));
         let plain_dashboard = dashboard_output(&status, false, false);
         assert!(!plain_dashboard.contains("\u{1b}["));
-        assert!(plain_dashboard.contains(" _____   ___    ____    ____"));
+        assert!(plain_dashboard.contains("  _________   _____ ______"));
         assert!(plain_dashboard.contains("TURBO AGENT SKILLS CLI"));
         let rainbow_dashboard = dashboard_output(&status, true, false);
         for color in RAINBOW_ANSI {
