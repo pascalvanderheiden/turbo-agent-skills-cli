@@ -590,6 +590,21 @@ fn rank_discover(query: &str, mut candidates: Vec<DiscoverCandidate>) -> Vec<Dis
             .then_with(|| left.item.id.cmp(&right.item.id))
             .then_with(|| left.item.identity.name.cmp(&right.item.identity.name))
             .then_with(|| left.item.description.cmp(&right.item.description))
+            .then_with(|| left.item.source.id.cmp(&right.item.source.id))
+            .then_with(|| left.item.categories.cmp(&right.item.categories))
+            .then_with(|| left.item.capabilities.cmp(&right.item.capabilities))
+            .then_with(|| {
+                left.item
+                    .provenance
+                    .raw_evidence
+                    .cmp(&right.item.provenance.raw_evidence)
+            })
+            .then_with(|| {
+                left.item
+                    .provenance
+                    .explanation
+                    .cmp(&right.item.provenance.explanation)
+            })
     });
     let mut seen = std::collections::BTreeSet::new();
     candidates
@@ -1093,6 +1108,34 @@ mod tests {
             .match_reasons
             .iter()
             .any(|reason| reason == "name keyword matches: 1"));
+
+        let duplicate_metadata = vec![
+            discover_candidate(
+                "skill:duplicate",
+                "review-helper",
+                "Reviews Rust code",
+                &["zeta"],
+                &["write tests"],
+                0,
+            ),
+            discover_candidate(
+                "skill:duplicate",
+                "review-helper",
+                "Reviews Rust code",
+                &["alpha"],
+                &["write docs"],
+                0,
+            ),
+        ];
+        let deduplicated = rank_discover("review rust", duplicate_metadata.clone());
+        let mut reversed_duplicates = duplicate_metadata;
+        reversed_duplicates.reverse();
+        assert_eq!(
+            rank_discover("review rust", reversed_duplicates),
+            deduplicated
+        );
+        assert_eq!(deduplicated.len(), 1);
+        assert_eq!(deduplicated[0].categories, vec!["alpha"]);
 
         let category = rank_discover(
             "category:security",
