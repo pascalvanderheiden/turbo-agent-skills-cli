@@ -47,6 +47,11 @@ GitHub's maintained boundary between Copilot CLI and SDK features is
   wire-protocol surface. Pin versions and tolerate optional or changed fields.
   Newer source also documents server-level Auto-tier metadata behind
   `DYNAMIC_AUTO_TIERS`; do not rely on it with pinned `1.0.22`.
+- **Product decision**: TASC's model choice defaults to the logical value
+  `auto`. Treat it as TASC's sentinel for runtime automatic/default routing,
+  not as a concrete model ID that must appear in `list_models()`. Do not
+  persist the concrete model selected internally by automatic routing.
+  Auto-tier preference remains a separate SDK setting.
 
 ### Usage and authentication
 
@@ -127,9 +132,13 @@ turn; replace tools while idle or abort first
 
 1. Use `get_auth_status()` before model/session operations; do not infer auth
    state from generic failures.
-2. Populate model choices from `list_models()` and switch with
-   `set_model()`. Persist profile defaults in TASC Local State; keep
-   session-only overrides out of it.
+2. Default every agent to `auto`. Populate alternative fixed-model choices
+   from `list_models()` and switch them with `set_model()`. `/model` follows
+   the v2 map's existing semantics: a profile selection persists in TASC
+   Local State, while a session override applies only to the active session.
+   Selecting `auto` clears any fixed-model choice and returns to runtime
+   automatic/default routing; it must not depend on an `auto` entry being
+   returned by pinned `1.0.22`'s experimental model-list payload.
 3. Report only SDK-supplied usage: live `assistant.usage` plus
    `usage.get_metrics()` before teardown. Do not synthesize token counts or
    hard-code billing conversion.
