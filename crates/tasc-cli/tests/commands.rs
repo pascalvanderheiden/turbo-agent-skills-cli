@@ -204,6 +204,116 @@ fn audit_detects_modified_installation_content() {
 }
 
 #[test]
+fn stats_matches_evidence_to_the_correct_installation_for_duplicate_identities() {
+    let directory = test_dir();
+    let project_skill = directory.join(".github/skills/review");
+    let user_skill = directory.join("home/.copilot/skills/review");
+    let state_path = directory.join("state/state.json");
+    for path in [&project_skill, &user_skill] {
+        fs::create_dir_all(path).unwrap();
+        fs::write(
+            path.join("SKILL.md"),
+            "---\nname: Review\ndescription: Review changes.\ngithub-repo: https://github.com/example/repo\ngithub-path: skills/review\n---\n",
+        )
+        .unwrap();
+    }
+    let inventory = run(&directory, &state_path, &["skill", "list", "--json"]);
+    assert!(inventory.status.success());
+    let inventory: serde_json::Value = serde_json::from_slice(&inventory.stdout).unwrap();
+    assert_eq!(inventory["items"].as_array().unwrap().len(), 2);
+    let items = inventory["items"].as_array().unwrap();
+    assert_eq!(items[0]["identity"]["id"], items[1]["identity"]["id"]);
+    assert_ne!(items[0]["path"], items[1]["path"]);
+    let selected = &items[1];
+    let digest = tasc_agent::service::skill_content_digest(std::path::Path::new(
+        selected["path"].as_str().unwrap(),
+    ))
+    .unwrap();
+
+    let security_dir = state_path.with_extension("security-checks");
+    fs::create_dir_all(&security_dir).unwrap();
+    let security = serde_json::json!({
+        "schemaVersion": 1,
+        "id": "security-second-installation",
+        "createdAtUnixMs": 1,
+        "completedAtUnixMs": 2,
+        "selectors": [],
+        "allInstalled": true,
+        "analyzer": "test",
+        "analyzerVersion": "1",
+        "ruleVersion": "1",
+        "status": "complete",
+        "policy": {"failOn": null, "minimumConfidence": 0},
+        "skills": [{
+            "identity": selected["identity"],
+            "sourceRevision": null,
+            "contentDigest": digest,
+            "path": selected["path"]
+        }],
+        "findings": [],
+        "suppressedFingerprints": [],
+        "unavailableChecks": [],
+        "diagnostics": []
+    });
+    fs::write(
+        security_dir.join("security-second-installation.json"),
+        serde_json::to_vec_pretty(&security).unwrap(),
+    )
+    .unwrap();
+
+    let consistency_dir = state_path.with_extension("consistency-checks");
+    fs::create_dir_all(&consistency_dir).unwrap();
+    let consistency = serde_json::json!({
+        "schemaVersion": 1,
+        "id": "consistency-second-installation",
+        "createdAtUnixMs": 1,
+        "completedAtUnixMs": 2,
+        "selectors": [],
+        "allInstalled": true,
+        "analyzer": "test",
+        "analyzerVersion": "1",
+        "ruleVersion": "1",
+        "skills": [{
+            "identity": selected["identity"],
+            "sourceRevision": null,
+            "contentDigest": digest,
+            "path": selected["path"]
+        }],
+        "categories": [],
+        "findings": [],
+        "inferredEvidenceStatus": "not-run"
+    });
+    fs::write(
+        consistency_dir.join("consistency-second-installation.json"),
+        serde_json::to_vec_pretty(&consistency).unwrap(),
+    )
+    .unwrap();
+
+    let stats = run(&directory, &state_path, &["stats", "--json"]);
+    assert!(
+        stats.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stats.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&stats.stdout).unwrap();
+    for id in [
+        "security-second-installation",
+        "consistency-second-installation",
+    ] {
+        let outcome = report["outcomes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|outcome| outcome["id"] == id)
+            .unwrap();
+        assert_eq!(outcome["freshness"], "current", "{id}");
+    }
+    assert_eq!(report["summary"]["evidenceFreshness"]["current"], 2);
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn stats_preserves_stale_inconclusive_and_not_run_evaluation_outcomes() {
     let directory = test_dir();
     let state_path = directory.join("state/state.json");

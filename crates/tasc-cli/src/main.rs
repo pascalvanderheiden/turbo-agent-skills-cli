@@ -1488,14 +1488,12 @@ fn evidence_freshness_evaluation(
     let Some(inventory) = inventory else {
         return EvidenceFreshness::Unavailable;
     };
-    let Some(item) = inventory.items.iter().find(|item| {
-        item.kind == "installation"
-            && item.identity.id == artifact.identity.id
-            && artifact
-                .installation_id
-                .as_ref()
-                .is_none_or(|id| &item.installation_id == id)
-    }) else {
+    let Some(item) = inventory_installation(
+        inventory,
+        &artifact.identity.id,
+        artifact.installation_id.as_deref(),
+        artifact.package_path.as_deref(),
+    ) else {
         return EvidenceFreshness::Stale;
     };
     let mut compared = false;
@@ -1539,23 +1537,11 @@ fn evidence_freshness_consistency(
         let Some(inventory) = inventory else {
             return EvidenceFreshness::Unavailable;
         };
-        if !inventory
-            .items
-            .iter()
-            .any(|item| item.identity.id == skill.identity.id)
-        {
-            return EvidenceFreshness::Stale;
-        }
-        let Some(current_item) = inventory
-            .items
-            .iter()
-            .find(|item| item.kind == "installation" && item.identity.id == skill.identity.id)
+        let Some(current_item) =
+            inventory_installation(inventory, &skill.identity.id, None, Some(&skill.path))
         else {
             return EvidenceFreshness::Stale;
         };
-        if current_item.path != skill.path {
-            return EvidenceFreshness::Stale;
-        }
         match tasc_agent::service::skill_content_digest(std::path::Path::new(&current_item.path)) {
             Ok(current) => {
                 compared = true;
@@ -1582,16 +1568,11 @@ fn evidence_freshness_security(
         let Some(inventory) = inventory else {
             return EvidenceFreshness::Unavailable;
         };
-        let Some(current_item) = inventory
-            .items
-            .iter()
-            .find(|item| item.kind == "installation" && item.identity.id == skill.identity.id)
+        let Some(current_item) =
+            inventory_installation(inventory, &skill.identity.id, None, Some(&skill.path))
         else {
             return EvidenceFreshness::Stale;
         };
-        if current_item.path != skill.path {
-            return EvidenceFreshness::Stale;
-        }
         let Some(recorded) = skill.content_digest.as_ref() else {
             continue;
         };
@@ -1610,6 +1591,20 @@ fn evidence_freshness_security(
     } else {
         EvidenceFreshness::Unknown
     }
+}
+
+fn inventory_installation<'a>(
+    inventory: &'a Inventory,
+    identity_id: &str,
+    installation_id: Option<&str>,
+    path: Option<&str>,
+) -> Option<&'a tasc_core::InventoryItem> {
+    inventory.items.iter().find(|item| {
+        item.kind == "installation"
+            && item.identity.id == identity_id
+            && installation_id.is_none_or(|id| item.installation_id == id)
+            && path.is_none_or(|path| item.path == path)
+    })
 }
 
 fn evidence_outcomes(
