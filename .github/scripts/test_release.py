@@ -11,6 +11,7 @@ from release import (
     TARGETS,
     make_archive,
     make_command_skill_archive,
+    prepare_cyclonedx_sbom,
     validate_assets,
     validate_tag,
     validate_version_metadata,
@@ -116,7 +117,14 @@ class ReleaseTests(unittest.TestCase):
             for target in targets:
                 (root / f"tasc-v0.1.0-{target}.tar.gz").write_bytes(target.encode())
             (root / "tasc.cdx.json").write_text(
-                json.dumps({"bomFormat": "CycloneDX", "components": [{"name": "tasc"}]}),
+                json.dumps(
+                    {
+                        "bomFormat": "CycloneDX",
+                        "serialNumber": "urn:uuid:323cd151-d10f-5a98-96e7-50b88ed2e860",
+                        "specVersion": "1.5",
+                        "components": [{"name": "tasc"}],
+                    }
+                ),
                 encoding="utf-8",
             )
             make_command_skill_archive(
@@ -130,6 +138,32 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_assets(root, "v0.1.0")
 
+    def test_reproducible_sbom_gets_deterministic_attestation_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            sbom_path = Path(directory) / "tasc.cdx.json"
+            sbom_path.write_text(
+                json.dumps(
+                    {
+                        "bomFormat": "CycloneDX",
+                        "specVersion": "1.5",
+                        "version": 1,
+                        "components": [{"name": "tasc"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            prepare_cyclonedx_sbom(sbom_path, "pascalvanderheiden/turbo-agent-skills-cli@v0.1.0")
+            first = sbom_path.read_bytes()
+            prepared = json.loads(first)
+
+            self.assertRegex(
+                prepared["serialNumber"],
+                r"^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            )
+            prepare_cyclonedx_sbom(sbom_path, "pascalvanderheiden/turbo-agent-skills-cli@v0.1.0")
+            self.assertEqual(first, sbom_path.read_bytes())
+
     def test_asset_validation_rejects_missing_platform_and_tampered_checksums(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -142,7 +176,14 @@ class ReleaseTests(unittest.TestCase):
             ):
                 (root / f"tasc-v0.1.0-{target}.tar.gz").write_bytes(target.encode())
             (root / "tasc.cdx.json").write_text(
-                json.dumps({"bomFormat": "CycloneDX", "components": [{"name": "tasc"}]}),
+                json.dumps(
+                    {
+                        "bomFormat": "CycloneDX",
+                        "serialNumber": "urn:uuid:323cd151-d10f-5a98-96e7-50b88ed2e860",
+                        "specVersion": "1.5",
+                        "components": [{"name": "tasc"}],
+                    }
+                ),
                 encoding="utf-8",
             )
             make_command_skill_archive(

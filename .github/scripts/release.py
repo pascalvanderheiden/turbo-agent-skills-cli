@@ -7,6 +7,7 @@ import json
 import re
 import sys
 import tarfile
+import uuid
 from pathlib import Path
 
 
@@ -179,6 +180,29 @@ def write_checksums(directory):
     return checksums
 
 
+def prepare_cyclonedx_sbom(path, identity):
+    path = Path(path)
+    if not identity:
+        raise ValueError("CycloneDX SBOM identity must not be empty")
+    try:
+        sbom = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"missing or invalid CycloneDX SBOM: {error}") from error
+    if (
+        sbom.get("bomFormat") != "CycloneDX"
+        or not sbom.get("specVersion")
+        or not sbom.get("components")
+    ):
+        raise ValueError("CycloneDX SBOM must declare format, specVersion, and components")
+
+    sbom["serialNumber"] = f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, identity)}"
+    path.write_text(
+        json.dumps(sbom, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 def validate_assets(directory, version):
     directory = Path(directory)
     archives = sorted(directory.glob("tasc-v*-*.tar.gz"))
@@ -243,8 +267,15 @@ def validate_assets(directory, version):
         sbom = json.loads(sbom_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"missing or invalid CycloneDX SBOM: {error}") from error
-    if not sbom.get("bomFormat") == "CycloneDX" or not sbom.get("components"):
-        raise ValueError("CycloneDX SBOM must declare bomFormat and components")
+    if (
+        sbom.get("bomFormat") != "CycloneDX"
+        or not sbom.get("serialNumber")
+        or not sbom.get("specVersion")
+        or not sbom.get("components")
+    ):
+        raise ValueError(
+            "CycloneDX SBOM must declare bomFormat, serialNumber, specVersion, and components"
+        )
 
     checksum_path = directory / "SHA256SUMS.txt"
     if not checksum_path.is_file():
@@ -286,6 +317,10 @@ def main():
     checksums = commands.add_parser("checksums")
     checksums.add_argument("--directory", default="dist")
 
+    sbom = commands.add_parser("prepare-sbom")
+    sbom.add_argument("--path", required=True)
+    sbom.add_argument("--identity", required=True)
+
     assets = commands.add_parser("validate-assets")
     assets.add_argument("--directory", default="dist")
     assets.add_argument("--version")
@@ -302,6 +337,8 @@ def main():
             print(make_command_skill_archive(args.source_dir, args.version, args.output_dir))
         elif args.command == "checksums":
             print(write_checksums(args.directory))
+        elif args.command == "prepare-sbom":
+            print(prepare_cyclonedx_sbom(args.path, args.identity))
         else:
             validate_assets(args.directory, args.version)
     except (OSError, ValueError, tarfile.TarError) as error:
