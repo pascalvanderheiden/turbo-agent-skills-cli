@@ -50,6 +50,17 @@ class ReleaseTests(unittest.TestCase):
         self.assertNotIn('releases/tags/$GITHUB_REF_NAME" --jq .draft', content)
         self.assertNotIn('gh release edit "$GITHUB_REF_NAME"', content)
 
+    def test_published_release_dispatches_release_aware_pages_validation(self):
+        root = Path(__file__).resolve().parents[2]
+        release = (root / ".github" / "workflows" / "release.yml").read_text()
+        pages = (root / ".github" / "workflows" / "pages.yml").read_text()
+
+        self.assertIn("actions: write", release)
+        self.assertIn('gh workflow run pages.yml --ref main -f release_tag="$GITHUB_REF_NAME"', release)
+        self.assertIn("release_tag:", pages)
+        self.assertIn("inputs.release_tag != ''", pages)
+        self.assertIn("github.event.release.tag_name || inputs.release_tag", pages)
+
     def test_tag_must_be_protected_stable_semver_matching_package(self):
         validate_tag("v0.1.0", "0.1.0", True)
         for tag, version, protected in (
