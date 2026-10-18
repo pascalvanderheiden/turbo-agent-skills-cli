@@ -907,16 +907,31 @@ fn dashboard_status(state_path: &Path, model: &str, token_usage: Option<(i64, i6
     )
     .inventory()
     .ok();
-    let items = inventory.as_ref().map(|inventory| &inventory.items);
+    dashboard_status_for_items(
+        gh_authenticated(),
+        model,
+        token_usage,
+        inventory
+            .as_ref()
+            .map(|inventory| inventory.items.as_slice()),
+    )
+}
+
+fn dashboard_status_for_items(
+    github_cli_authenticated: bool,
+    model: &str,
+    token_usage: Option<(i64, i64)>,
+    items: Option<&[tasc_core::InventoryItem]>,
+) -> Value {
     json!({
-        "githubCliAuthenticated": gh_authenticated(),
+        "githubCliAuthenticated": github_cli_authenticated,
         "model": model,
         "tokenUsage": token_usage.map(|(input, output)| json!({
             "inputTokens": input,
             "outputTokens": output,
             "totalTokens": input.saturating_add(output)
         })),
-        "skillCount": items.map(Vec::len),
+        "skillCount": items.map(|items| items.len()),
         "trackedCount": items.map(|items| items.iter().filter(|item| item.tracked).count()),
         "untrackedCount": items.map(|items| items.iter().filter(|item| !item.tracked).count()),
         "watchedCount": items.map(|items| items.iter().filter(|item| item.watch_state != "not_watched").count())
@@ -1634,7 +1649,7 @@ fn safe_text(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        dashboard_output, dashboard_status, lifecycle_summary, model_preferences_path,
+        dashboard_output, dashboard_status_for_items, lifecycle_summary, model_preferences_path,
         onboarding_message, output_policy, parse_shell_command, read_profile_model,
         save_profile_model, session_config, shell_event_output, validate_model_choice,
         ShellCommand,
@@ -1736,7 +1751,7 @@ mod tests {
 
     #[test]
     fn dashboard_status_preserves_unavailable_token_usage_and_is_semantic_json() {
-        let status = dashboard_status(&test_path(), "auto", None);
+        let status = dashboard_status_for_items(false, "auto", None, Some(&[]));
         assert_eq!(status["model"], "auto");
         assert!(status["tokenUsage"].is_null());
         assert!(status["skillCount"].is_number());
@@ -1751,7 +1766,7 @@ mod tests {
         assert!(dashboard_output(&status, true, false).contains("\u{1b}["));
         let onboarding = serde_json::json!({"untrackedCount":2});
         assert!(onboarding_message(&onboarding).contains("2 untracked installation(s)"));
-        let with_usage = dashboard_status(&test_path(), "auto", Some((11, 7)));
+        let with_usage = dashboard_status_for_items(false, "auto", Some((11, 7)), Some(&[]));
         assert_eq!(with_usage["tokenUsage"]["totalTokens"], 18);
         let cancelled: serde_json::Value =
             serde_json::from_str(&shell_event_output("cancelled", "stopped", true)).unwrap();
