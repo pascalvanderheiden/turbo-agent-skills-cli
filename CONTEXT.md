@@ -96,6 +96,18 @@ _Avoid_: Skill Workspace, installation target
 A deterministic command addressed to the TASC agent using noun-first syntax, with compatibility aliases normalized to one canonical command. Slash Commands and natural-language requests share the same authorized TASC operations.
 _Avoid_: Prompt shortcut, alternate API
 
+**Command Palette**:
+The live, filterable entry surface for discovering and choosing canonical Slash Commands in an Agent Session.
+_Avoid_: Command menu, prompt shortcut
+
+**Picker**:
+A bounded, navigable selection surface for choosing finite command targets such as models, skills, profiles, evaluations, or bundles.
+_Avoid_: List, selector dialog
+
+**Presentation Event**:
+A human-readable terminal category that distinguishes input, TASC output, prompts, information, work in progress, warnings, errors, completed outcomes, and next-step guidance without changing the underlying command result.
+_Avoid_: Log line, diagnostic code
+
 **Agent Session**:
 One interactive TASC agent conversation with its selected Profile, model preference, status, pending approvals, progress state, and run references. Session preferences may override Profile preferences without changing them unless explicitly saved.
 _Avoid_: Profile, Run Artifact

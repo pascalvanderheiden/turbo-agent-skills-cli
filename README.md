@@ -32,7 +32,7 @@ tasc skill list
 tasc state status
 ```
 
-`tasc --banner` plays the opt-in animated Turbo banner. It uses ANSI cursor redraws only in an interactive terminal and prints a safe static frame when piped.
+`tasc --banner` shows the static TASC terminal banner in a terminal session and prints a safe static render when output is piped.
 
 `tasc setup` offers the optional first-party Command Skill. It never installs it without your choice.
 
