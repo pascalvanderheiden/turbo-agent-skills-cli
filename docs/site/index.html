@@ -19,6 +19,7 @@
       header { position: relative; overflow: hidden; }
       header::before { content: ""; display: block; height: .35rem; margin: -1.25rem -1.25rem 1.25rem; background: linear-gradient(90deg, #ff4d6d 0 16.6%, #ffb703 16.6% 33.2%, #8ac926 33.2% 49.8%, #00c2ff 49.8% 66.4%, #6c63ff 66.4% 83%, #d946ef 83%); }
       .logo { display: block; width: min(100%, 50rem); height: auto; margin: 0 auto; }
+      .product-shot { display: block; max-width: 100%; height: auto; border: 1px solid #273469; }
       .fleet { display: flex; justify-content: center; gap: clamp(1rem, 7vw, 5rem); margin: 1rem 0; color: #8ac926; font-weight: 800; line-height: 1.05; text-align: center; white-space: pre; }
       .fleet span:nth-child(2) { color: #00c2ff; }
       .fleet span:nth-child(3) { color: #d946ef; }
@@ -73,6 +74,7 @@ tasc setup
 tasc skill list
 tasc state status</code></pre>
       <p><code>tasc --banner</code> shows the static TASC terminal banner in a terminal session and prints a safe static render when output is piped.</p>
+      <p>Human Presentation Events share the labels <code>› Input</code>, <code>◆ TASC</code>, <code>? Prompt</code>, <code>· Info</code>, <code>... Working</code>, <code>! Warning</code>, <code>× Error</code>, <code>✓ Done</code>, and <code>↳ Next</code> across the Agent Session, CLI diagnostics, and installers. Capable terminals color only the glyph and label, leaving body text in the terminal foreground. With <code>NO_COLOR</code> (including an empty value), piped output, or <code>TERM=dumb</code>, events use plain ASCII labels such as <code>INFO:</code>, <code>ERROR:</code>, and <code>DONE:</code> without ANSI, animation, or redraw. Prompts, progress, warnings, and errors use stderr; results use stdout. JSON output keeps its existing envelopes and exit codes without presentation labels or decoration.</p>
       <p><code>tasc setup</code> offers the optional first-party Command Skill. It never installs it without your choice.</p>
       <h2 id="common-tasks">Common tasks</h2>
       <ul>

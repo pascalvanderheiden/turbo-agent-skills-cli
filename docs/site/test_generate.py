@@ -21,6 +21,55 @@ class LandingPageTests(unittest.TestCase):
         self.assertNotIn("<script>", content)
         self.assertIn("&lt;script&gt;", content)
 
+    def test_markdown_images_rewrite_site_assets_and_escape_alt_text(self):
+        content = render_markdown(
+            '![Session "preview" & <events>](docs/site/assets/session.png)'
+        )
+        self.assertEqual(
+            content,
+            '<p><img class="product-shot" src="assets/session.png" '
+            'alt="Session &quot;preview&quot; &amp; &lt;events&gt;"></p>',
+        )
+
+    def test_markdown_images_preserve_other_paths_and_escape_sources(self):
+        content = render_markdown('![Session](assets/session.png?label="preview"&v=1)')
+        self.assertIn('src="assets/session.png?label=&quot;preview&quot;&amp;v=1"', content)
+
+    def test_markdown_links_and_images_reject_unsafe_urls(self):
+        for prefix in ("", "!"):
+            for href in (
+                "javascript:alert",
+                "data:image/png;base64,abc",
+                "file:///tmp/session.png",
+                "//example.com/session.png",
+                " //example.com/session.png",
+                "\\\\example.com/session.png",
+                "/\\example.com/session.png",
+                "java\tscript:alert",
+            ):
+                with self.subTest(prefix=prefix, href=href):
+                    with self.assertRaises(ValueError):
+                        render_markdown(f"{prefix}[Session]({href})")
+
+    def test_inline_code_does_not_render_images(self):
+        self.assertEqual(
+            render_markdown("`![Session](docs/site/assets/session.png)`"),
+            "<p><code>![Session](docs/site/assets/session.png)</code></p>",
+        )
+
+    def test_markdown_links_still_render_without_image_path_rewriting(self):
+        self.assertEqual(
+            render_markdown("[Asset](docs/site/assets/session.png)"),
+            '<p><a href="docs/site/assets/session.png">Asset</a></p>',
+        )
+
+    def test_product_shots_are_responsive_and_bordered(self):
+        template = (SITE / "index.html").read_text(encoding="utf-8")
+        self.assertRegex(
+            template,
+            r"\.product-shot\s*\{[^}]*max-width: 100%;[^}]*height: auto;[^}]*border: 1px solid",
+        )
+
     def test_site_template_generation_is_deterministic(self):
         template = (SITE / "index.html").read_text(encoding="utf-8")
         content = generated_content()
