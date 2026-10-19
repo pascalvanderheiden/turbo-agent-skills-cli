@@ -31,7 +31,7 @@ use tasc_agent::{
 use tasc_core::discovery::{Diagnostic, Envelope};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-const SYSTEM_MESSAGE: &str = "You are TASC, a local-first Agent Skill assistant. Use only the registered tasc_* tools for TASC data and actions; never use shell, filesystem, or other ambient tools. Search is remote and only available when the user has not selected --offline. Summarize results and explain rankings. When listing skills, render one row per installation in a table with exactly these user-facing columns: Name, Description, Tracked, Scope, Secure?. Resolve list positions against the latest result set. Security requests must use the Security Check tools. Tool results intentionally omit local paths, skill excerpts, and detailed Security evidence; tell the user which local TASC command can inspect them. If a requested operation has no registered TASC tool, explain that it is unavailable and do not claim it was performed. Lifecycle changes are never executed by a tool: call tasc_plan_lifecycle, show its exact plan, then wait for the human to approve its token at the TASC prompt. Never treat conversational consent or a model tool call as human approval. TASC does not retain chat transcripts; do not ask to persist conversation history.";
+const SYSTEM_MESSAGE: &str = "You are TASC, a local-first Agent Skill assistant. Use only the registered tasc_* tools for TASC data and actions; never use shell, filesystem, or other ambient tools. Search is remote and only available when the user has not selected --offline. Summarize results and explain rankings. When listing skills, render one row per installation in a table with exactly these user-facing columns: Name, Description, Tracked, Scope, Secure?. Skill lists are paginated; state the current page and offer the next page when hasNext is true instead of requesting every page at once. Resolve list positions against the latest result set. Security requests must use the Security Check tools. Tool results intentionally omit local paths, skill excerpts, and detailed Security evidence; tell the user which local TASC command can inspect them. If a requested operation has no registered TASC tool, explain that it is unavailable and do not claim it was performed. Lifecycle changes are never executed by a tool: call tasc_plan_lifecycle, show its exact plan, then wait for the human to approve its token at the TASC prompt. Never treat conversational consent or a model tool call as human approval. TASC does not retain chat transcripts; do not ask to persist conversation history.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AgentSkillRow {
@@ -110,17 +110,17 @@ fn security_state(
     {
         "findings"
     } else {
-        "yes"
+        "validated"
     }
 }
 
-fn skill_rows_value(rows: &[AgentSkillRow]) -> Value {
+fn skill_rows_value(rows: &[AgentSkillRow], rank_offset: usize) -> Value {
     Value::Array(
         rows.iter()
             .enumerate()
             .map(|(index, row)| {
                 json!({
-                    "rank": index + 1,
+                    "rank": rank_offset + index + 1,
                     "installationId": row.installation_id,
                     "name": row.name,
                     "description": row.description,
@@ -131,6 +131,18 @@ fn skill_rows_value(rows: &[AgentSkillRow]) -> Value {
             })
             .collect(),
     )
+}
+
+fn paginated_skill_rows(
+    rows: &[AgentSkillRow],
+    page: usize,
+    page_size: usize,
+) -> (Vec<AgentSkillRow>, usize, usize) {
+    let total = rows.len();
+    let total_pages = total.div_ceil(page_size);
+    let offset = page.saturating_sub(1).saturating_mul(page_size);
+    let page_rows = rows.iter().skip(offset).take(page_size).cloned().collect();
+    (page_rows, total, total_pages)
 }
 
 fn render_skill_table(rows: &[AgentSkillRow]) -> String {
@@ -283,10 +295,23 @@ impl AgentContext {
 
     async fn dispatch(&self, request: AgentToolRequest) -> Result<Value, Diagnostic> {
         match request {
-            AgentToolRequest::ListSkills => {
+            AgentToolRequest::ListSkills { page, page_size } => {
                 let (_, rows) = load_agent_skill_rows(&self.state_path)?;
-                self.remember_references(rows.iter().map(|item| item.installation_id.clone()));
-                success("skill list", json!({ "items": skill_rows_value(&rows) }))
+                let (page_rows, total, total_pages) = paginated_skill_rows(&rows, page, page_size);
+                self.remember_references(page_rows.iter().map(|item| item.installation_id.clone()));
+                let rank_offset = page.saturating_sub(1).saturating_mul(page_size);
+                success(
+                    "skill list",
+                    json!({
+                        "items": skill_rows_value(&page_rows, rank_offset),
+                        "page": page,
+                        "pageSize": page_size,
+                        "total": total,
+                        "totalPages": total_pages,
+                        "hasNext": page < total_pages,
+                        "nextPage": (page < total_pages).then_some(page + 1)
+                    }),
+                )
             }
             AgentToolRequest::SearchSkills { query } => {
                 if self.offline {
@@ -845,7 +870,7 @@ enum ShellCommand {
     Quit,
     Help,
     Status,
-    SkillList,
+    SkillList(usize),
     SkillTrackPicker,
     ModelList,
     ModelSession(String),
@@ -874,7 +899,15 @@ fn parse_shell_command(input: &str) -> Result<ShellCommand, String> {
         "approve" if !arguments.is_empty() => Ok(ShellCommand::Approve(arguments.to_string())),
         "deny" if !arguments.is_empty() => Ok(ShellCommand::Deny(arguments.to_string())),
         "cancel" => Ok(ShellCommand::Cancel),
-        "skill" if arguments == "list" => Ok(ShellCommand::SkillList),
+        "skill" if arguments == "list" => Ok(ShellCommand::SkillList(1)),
+        "skill" if arguments.starts_with("list ") => {
+            let page = arguments
+                .strip_prefix("list ")
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .ok_or_else(|| "Usage: /skill list [PAGE]".to_string())?;
+            Ok(ShellCommand::SkillList(page))
+        }
         "skill" if arguments == "track" => Ok(ShellCommand::SkillTrackPicker),
         "model" => match arguments.split_whitespace().collect::<Vec<_>>().as_slice() {
             [] | ["list"] => Ok(ShellCommand::ModelList),
@@ -1318,10 +1351,24 @@ async fn interact(
                 );
                 continue;
             }
-            ShellCommand::SkillList => {
+            ShellCommand::SkillList(page) => {
                 match load_agent_skill_rows(&context.state_path) {
                     Ok((_, rows)) if context.json_output => {
-                        match success("skill list", json!({ "items": skill_rows_value(&rows) })) {
+                        let page_size = 20;
+                        let (page_rows, total, total_pages) =
+                            paginated_skill_rows(&rows, page, page_size);
+                        let rank_offset = page.saturating_sub(1).saturating_mul(page_size);
+                        match success(
+                            "skill list",
+                            json!({
+                                "items": skill_rows_value(&page_rows, rank_offset),
+                                "page": page,
+                                "pageSize": page_size,
+                                "total": total,
+                                "totalPages": total_pages,
+                                "hasNext": page < total_pages
+                            }),
+                        ) {
                             Ok(result) => println!("{result}"),
                             Err(error) => {
                                 print_shell_event("error", &error.message, context.json_output)
@@ -1329,11 +1376,18 @@ async fn interact(
                         }
                     }
                     Ok((_, rows)) => {
-                        print_shell_event(
-                            "result",
-                            render_skill_table(&rows).trim_end(),
-                            context.json_output,
-                        );
+                        let page_size = 20;
+                        let (page_rows, total, total_pages) =
+                            paginated_skill_rows(&rows, page, page_size);
+                        let mut rendered = render_skill_table(&page_rows);
+                        rendered.push_str(&format!(
+                            "Page {page}/{} · {total} skill installation(s)",
+                            total_pages.max(1)
+                        ));
+                        if page < total_pages {
+                            rendered.push_str(&format!(" · Next: /skill list {}", page + 1));
+                        }
+                        print_shell_event("result", rendered.trim_end(), context.json_output);
                     }
                     Err(error) => {
                         print_shell_event("error", &error.message, context.json_output);
@@ -1709,8 +1763,8 @@ fn tools(dispatcher: Arc<Dispatcher>) -> Vec<Tool> {
     let definitions = [
         (
             "tasc_list_skills",
-            "List locally discovered skills and tracked installation status.",
-            json!({"type":"object","properties":{},"additionalProperties":false}),
+            "List one page of locally discovered skills and tracked installation status.",
+            json!({"type":"object","properties":{"page":{"type":"integer","minimum":1},"pageSize":{"type":"integer","minimum":1,"maximum":20}},"additionalProperties":false}),
         ),
         (
             "tasc_search_skills",
@@ -2027,9 +2081,10 @@ fn safe_text(text: &str) -> String {
 mod tests {
     use super::{
         dashboard_output, dashboard_status_for_items, lifecycle_summary, model_preferences_path,
-        onboarding_message, output_policy, parse_shell_command, read_profile_model,
-        render_skill_table, save_profile_model, session_config, shell_event_output,
-        skill_tracking_entries, validate_model_choice, AgentSkillRow, ShellCommand,
+        onboarding_message, output_policy, paginated_skill_rows, parse_shell_command,
+        read_profile_model, render_skill_table, save_profile_model, session_config,
+        shell_event_output, skill_tracking_entries, validate_model_choice, AgentSkillRow,
+        ShellCommand,
     };
     use std::{
         fs,
@@ -2083,7 +2138,11 @@ mod tests {
         );
         assert_eq!(
             parse_shell_command("/skill list").unwrap(),
-            ShellCommand::SkillList
+            ShellCommand::SkillList(1)
+        );
+        assert_eq!(
+            parse_shell_command("/skill list 3").unwrap(),
+            ShellCommand::SkillList(3)
         );
         assert_eq!(
             parse_shell_command("/skill track").unwrap(),
@@ -2160,7 +2219,7 @@ mod tests {
                 description: "Builds changes test-first.".to_string(),
                 tracked: true,
                 scope: "user".to_string(),
-                secure: "yes".to_string(),
+                secure: "validated".to_string(),
             },
         ]);
 
@@ -2168,6 +2227,27 @@ mod tests {
             assert!(rendered.contains(heading), "{rendered}");
         }
         assert!(!rendered.contains("review, tdd"), "{rendered}");
+    }
+
+    #[test]
+    fn skill_list_pagination_bounds_each_result() {
+        let rows = (1..=45)
+            .map(|index| AgentSkillRow {
+                installation_id: format!("installation:{index}"),
+                name: format!("skill-{index}"),
+                description: "description".to_string(),
+                tracked: false,
+                scope: "project".to_string(),
+                secure: "not checked".to_string(),
+            })
+            .collect::<Vec<_>>();
+
+        let (page, total, total_pages) = paginated_skill_rows(&rows, 2, 20);
+        assert_eq!(page.len(), 20);
+        assert_eq!(page.first().unwrap().name, "skill-21");
+        assert_eq!(page.last().unwrap().name, "skill-40");
+        assert_eq!(total, 45);
+        assert_eq!(total_pages, 3);
     }
 
     #[test]

@@ -24,7 +24,17 @@ fn copilot_tool_calls_translate_only_to_typed_tasc_requests() {
     );
     assert_eq!(
         translate_tool_call("tasc_list_skills", json!({})).unwrap(),
-        AgentToolRequest::ListSkills
+        AgentToolRequest::ListSkills {
+            page: 1,
+            page_size: 10
+        }
+    );
+    assert_eq!(
+        translate_tool_call("tasc_list_skills", json!({"page": 3, "pageSize": 10})).unwrap(),
+        AgentToolRequest::ListSkills {
+            page: 3,
+            page_size: 10
+        }
     );
     assert_eq!(
         translate_tool_call("tasc_run_evaluation", json!({}))

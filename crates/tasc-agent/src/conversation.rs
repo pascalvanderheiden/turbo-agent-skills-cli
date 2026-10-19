@@ -10,7 +10,10 @@ const APPROVAL_TTL: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentToolRequest {
-    ListSkills,
+    ListSkills {
+        page: usize,
+        page_size: usize,
+    },
     SearchSkills {
         query: String,
     },
@@ -232,7 +235,14 @@ pub fn translate_tool_call(
         )
     };
     match name {
-        "tasc_list_skills" => Ok(AgentToolRequest::ListSkills),
+        "tasc_list_skills" => {
+            let page = positive_usize_argument(&arguments, "page")?.unwrap_or(1);
+            let page_size = positive_usize_argument(&arguments, "pageSize")?.unwrap_or(10);
+            if page_size > 20 {
+                return Err(invalid());
+            }
+            Ok(AgentToolRequest::ListSkills { page, page_size })
+        }
         "tasc_search_skills" => Ok(AgentToolRequest::SearchSkills {
             query: arguments
                 .get("query")
@@ -281,6 +291,7 @@ pub fn translate_tool_call(
             if !matches!(operation.as_str(), "update" | "remove") {
                 return Err(invalid());
             }
+
             Ok(AgentToolRequest::PlanLifecycle {
                 operation,
                 selector: string_argument(&arguments, "selector").ok_or_else(invalid)?,
@@ -303,6 +314,33 @@ pub fn translate_tool_call(
             "Use only TASC tools registered for this session.",
         )),
     }
+}
+
+fn positive_usize_argument(
+    arguments: &serde_json::Value,
+    name: &str,
+) -> Result<Option<usize>, Diagnostic> {
+    let Some(value) = arguments.get(name) else {
+        return Ok(None);
+    };
+    let value = value.as_u64().filter(|value| *value > 0).ok_or_else(|| {
+        Diagnostic::new(
+            "invalid_tool_arguments",
+            "usage",
+            "copilot-sdk",
+            "The requested TASC tool has invalid pagination arguments.",
+            "Use positive integer page values and a page size no greater than 20.",
+        )
+    })?;
+    usize::try_from(value).map(Some).map_err(|_| {
+        Diagnostic::new(
+            "invalid_tool_arguments",
+            "usage",
+            "copilot-sdk",
+            "The requested TASC tool pagination value is too large.",
+            "Use smaller positive integer pagination values.",
+        )
+    })
 }
 
 pub fn translate_sdk_event(name: &str, data: &serde_json::Value) -> Option<AgentEvent> {
