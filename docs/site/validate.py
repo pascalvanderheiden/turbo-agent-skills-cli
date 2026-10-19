@@ -56,6 +56,7 @@ class DocumentParser(HTMLParser):
         self.stack = []
         self.ids = set()
         self.links = []
+        self.images = []
         self.command_examples = []
         self.html_lang = False
         self.main_count = 0
@@ -81,8 +82,10 @@ class DocumentParser(HTMLParser):
             self.current_title = True
         if tag == "h1":
             self.h1_count += 1
-        if tag == "img" and "alt" not in attributes:
-            self.errors.append(f"{self.path}: img is missing alt text")
+        if tag == "img":
+            if not attributes.get("alt", "").strip():
+                self.errors.append(f"{self.path}: img is missing alt text")
+            self.images.append(attributes.get("src", ""))
         if tag == "a":
             self.links.append((attributes.get("href", ""), ""))
             self.current_link_text.append("")
@@ -252,6 +255,28 @@ def parse_page(path):
     return parser
 
 
+def check_images(page, parser):
+    errors = []
+    for src in parser.images:
+        parsed = urlparse(src)
+        if (
+            not parsed.path
+            or parsed.scheme
+            or parsed.netloc
+            or src.startswith("//")
+            or "\\" in src
+            or src != src.strip()
+            or any(ord(character) < 32 for character in src)
+        ):
+            errors.append(f"{page}: img must have a local source file: {src!r}")
+            continue
+        path_part = unquote(parsed.path)
+        target = SITE / path_part.lstrip("/") if path_part.startswith("/") else page.parent / path_part
+        if not target.resolve().is_relative_to(SITE.resolve()) or not target.is_file():
+            errors.append(f"{page}: missing local image source file: {src!r}")
+    return errors
+
+
 def validate(version, binary, check_external):
     errors = []
     metadata_path = SITE / "versions.json"
@@ -319,6 +344,7 @@ def validate(version, binary, check_external):
         parsed_pages[page] = parser
         errors.extend(parser.errors)
         errors.extend(check_links(page, parser, check_external))
+        errors.extend(check_images(page, parser))
 
     if binary:
         for page, parser in parsed_pages.items():

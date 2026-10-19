@@ -17,19 +17,33 @@ SOURCE_END = "<!-- pages-content:end -->"
 
 
 def render_inline(text):
-    token = re.compile(r"`([^`]+)`|\[([^\]]+)\]\(([^)]+)\)|\*\*(.+?)\*\*")
+    token = re.compile(r"`([^`]+)`|(!?)\[([^\]]*)\]\(([^)]+)\)|\*\*(.+?)\*\*")
     output = []
     position = 0
     for match in token.finditer(text):
         output.append(html.escape(text[position : match.start()]))
-        code, label, href, strong = match.groups()
+        code, image, label, href, strong = match.groups()
         if code is not None:
             output.append(f"<code>{html.escape(code)}</code>")
         elif label is not None:
+            href = href.strip()
             parsed = urlparse(href)
-            if parsed.scheme not in ("", "https", "http", "mailto") or href.startswith("//"):
+            if (
+                parsed.scheme not in ("", "https", "http", "mailto")
+                or href.startswith("//")
+                or "\\" in href
+                or any(ord(character) < 32 for character in href)
+            ):
                 raise ValueError(f"unsupported link in README landing content: {href}")
-            output.append(f'<a href="{html.escape(href, quote=True)}">{html.escape(label)}</a>')
+            if image:
+                if href.startswith("docs/site/assets/"):
+                    href = href.removeprefix("docs/site/")
+                output.append(
+                    f'<img class="product-shot" src="{html.escape(href, quote=True)}" '
+                    f'alt="{html.escape(label, quote=True)}">'
+                )
+            else:
+                output.append(f'<a href="{html.escape(href, quote=True)}">{html.escape(label)}</a>')
         else:
             output.append(f"<strong>{html.escape(strong)}</strong>")
         position = match.end()
