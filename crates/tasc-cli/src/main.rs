@@ -621,7 +621,8 @@ async fn main() {
     if cli.banner {
         if let Err(error) = banner::run() {
             if error.kind() != std::io::ErrorKind::BrokenPipe {
-                eprintln!("tasc: failed to render banner: {error}");
+                let _ = tasc::presentation::Event::Error
+                    .emit(&format!("failed to render banner: {error}"), false);
             }
         }
         return;
@@ -892,8 +893,24 @@ async fn main() {
             signal_cancel.cancel();
         }
     });
-    let result = run(cli, json, command_name, command, &cancel).await;
+    let mut working = if long_operation(command_name) {
+        tasc::presentation::WorkingRow::start(command_name, json)
+            .unwrap_or_else(|_| tasc::presentation::WorkingRow::disabled())
+    } else {
+        tasc::presentation::WorkingRow::disabled()
+    };
+    let result = run(cli, json, command_name, command, &cancel, &mut working).await;
     signal.abort();
+    let working_active = working.is_active();
+    match &result {
+        Ok(()) => {
+            let _ = working.finish(tasc::presentation::Event::Done, command_name);
+        }
+        Err(error) if working_active => {
+            let _ = working.finish(tasc::presentation::Event::Error, &error.message);
+        }
+        Err(_) => {}
+    }
     if let Err(error) = result {
         if json {
             eprintln!(
@@ -902,11 +919,34 @@ async fn main() {
                     "schemaVersion": 1, "command": command_name, "diagnostic": error
                 })
             );
-        } else {
-            let _ = tasc::presentation::Event::Error.emit(&error.to_string(), false);
+        } else if !working_active
+            && !matches!(
+                error.code.as_str(),
+                "audit_errors"
+                    | "projection_unavailable"
+                    | "consistency_findings"
+                    | "security_findings"
+            )
+        {
+            let _ = tasc::presentation::Event::Error.emit(&error.message, false);
+        }
+        if !json {
+            let _ = tasc::presentation::Event::Next.emit(&error.remediation, false);
         }
         std::process::exit(error.exit_code());
     }
+}
+
+fn long_operation(command: &str) -> bool {
+    matches!(
+        command,
+        "search"
+            | "skill search"
+            | "discover"
+            | "source capabilities"
+            | "skill preview"
+            | "watch check"
+    )
 }
 
 async fn run(
@@ -915,6 +955,7 @@ async fn run(
     command_name: &str,
     command: Commands,
     cancel: &Cancellation,
+    working: &mut tasc::presentation::WorkingRow,
 ) -> Result<(), Diagnostic> {
     let (state_path, _) = FsStateRepository::selected_profile_path().map_err(local_error)?;
     let discovery = DiscoveryService::new(
@@ -1074,11 +1115,18 @@ async fn run(
                 .map_err(|error| local_error(error.to_string()))?
         );
     } else {
-        println!(
-            "{} (schema version {})",
-            command_name, envelope.schema_version
-        );
-        render_fields(&envelope.result, 0);
+        let show_outcome = !working.is_active();
+        working
+            .finish(tasc::presentation::Event::Done, command_name)
+            .map_err(|error| local_error(error.to_string()))?;
+        tasc::presentation::render_human_with_outcome(
+            command_name,
+            envelope.schema_version,
+            &envelope.result,
+            0,
+            show_outcome,
+        )
+        .map_err(|error| local_error(error.to_string()))?;
     }
     Ok(())
 }
@@ -2062,8 +2110,8 @@ fn render_projection_report<T: serde::Serialize>(
             serde_json::to_string_pretty(&value).map_err(|error| local_error(error.to_string()))?
         );
     } else {
-        println!("{command} (schema version 1)");
-        render_fields(&value, 0);
+        tasc::presentation::render_human(command, 1, &value, exit_code)
+            .map_err(|error| local_error(error.to_string()))?;
     }
     match exit_code {
         0 => Ok(()),
@@ -2104,34 +2152,6 @@ fn run_stats(
     let profile = repository.profile();
     let report = stats_report(&state_path, profile, &repository, service);
     render_projection_report(&report, json, "stats", report.exit_code)
-}
-
-fn render_fields(value: &serde_json::Value, indent: usize) {
-    match value {
-        serde_json::Value::Object(fields) => {
-            for (key, value) in fields {
-                print!("{:indent$}{key}: ", "");
-                if let Some(text) = value.as_str() {
-                    println!("{}", safe_text(text));
-                } else if value.is_object() || value.is_array() {
-                    println!();
-                    render_fields(value, indent + 2);
-                } else {
-                    println!("{value}");
-                }
-            }
-        }
-        serde_json::Value::Array(items) => {
-            if items.is_empty() {
-                println!("{:indent$}(none)", "");
-            }
-            for item in items {
-                println!("{:indent$}-", "");
-                render_fields(item, indent + 2);
-            }
-        }
-        _ => println!("{:indent$}{value}", ""),
-    }
 }
 
 fn local_error(message: String) -> Diagnostic {
@@ -2346,11 +2366,12 @@ async fn run_local(
                     let has_blocking_finding = artifact.findings.iter().any(|finding| {
                         finding.severity == tasc_core::consistency::FindingSeverity::Blocking
                     });
-                    render_local_artifact(
+                    render_local_artifact_with_exit_code(
                         serde_json::to_value(&artifact)
                             .map_err(|error| local_error(error.to_string()))?,
                         "consistency check",
                         output.json || json,
+                        i32::from(has_blocking_finding),
                     )?;
                     if has_blocking_finding {
                         return Err(Diagnostic::new(
@@ -2407,11 +2428,12 @@ async fn run_local(
                                     .contains(&finding.fingerprint)
                         })
                     });
-                    render_local_artifact(
+                    render_local_artifact_with_exit_code(
                         serde_json::to_value(&artifact)
                             .map_err(|error| local_error(error.to_string()))?,
                         "security check",
                         output.json || json,
+                        i32::from(blocked),
                     )?;
                     if blocked {
                         return Err(Diagnostic::new(
@@ -2550,11 +2572,23 @@ async fn run_local(
             }
             let input = SkillDraftInput {
                 workspace,
-                name: prompt_value(name, authoring_question("name"))?,
-                purpose: prompt_value(purpose, authoring_question("purpose"))?,
-                description: prompt_value(description, authoring_question("description"))?,
-                triggers: prompt_value(triggers, authoring_question("triggers"))?,
-                non_goals: prompt_value(non_goals, authoring_question("non-goals"))?,
+                name: prompt_value(name, authoring_question("name"), output.json || json)?,
+                purpose: prompt_value(purpose, authoring_question("purpose"), output.json || json)?,
+                description: prompt_value(
+                    description,
+                    authoring_question("description"),
+                    output.json || json,
+                )?,
+                triggers: prompt_value(
+                    triggers,
+                    authoring_question("triggers"),
+                    output.json || json,
+                )?,
+                non_goals: prompt_value(
+                    non_goals,
+                    authoring_question("non-goals"),
+                    output.json || json,
+                )?,
                 categories,
             };
             let service = SkillAuthoringService::new(
@@ -2577,6 +2611,7 @@ async fn run_local(
                         plan.skill_path, plan.preview
                     ),
                     "Write this Skill Draft to the selected Workspace?",
+                    output.json || json,
                 )?;
             }
             let draft = service.create(&input, true).map_err(local_error)?;
@@ -2687,7 +2722,11 @@ async fn run_local(
                 let rendered_plan = serde_json::to_string_pretty(&plan).map_err(|error| {
                     local_error(format!("cannot render remediation plan: {error}"))
                 })?;
-                confirm_action(&rendered_plan, "Apply this Workspace remediation?")?;
+                confirm_action(
+                    &rendered_plan,
+                    "Apply this Workspace remediation?",
+                    output.json || json,
+                )?;
             }
             let draft = service
                 .apply_remediation(&plan, true)
@@ -2701,8 +2740,8 @@ async fn run_local(
         Commands::Skill {
             command: SkillCommands::List(args),
         } => {
-            if !json && !args.output.json && std::io::stdin().is_terminal() {
-                prompt_tracking_onboarding(&service)?;
+            if tasc::presentation::prompt_enabled(json || args.output.json) {
+                prompt_tracking_onboarding(&service, json || args.output.json)?;
             }
             let mut inventory = service.inventory().map_err(local_error)?;
             inventory.profile = Some(repository.profile());
@@ -2726,10 +2765,17 @@ async fn run_local(
             command: SkillCommands::Adopt { id },
         } => {
             let installation = service.adopt(&id).map_err(local_error)?;
-            println!(
-                "Adopted {} at {} ({})",
-                installation.skill_id, installation.path, installation.target_id
-            );
+            tasc::presentation::render_human(
+                "skill adopt",
+                1,
+                &serde_json::json!({
+                    "skill": installation.skill_id,
+                    "path": installation.path,
+                    "target": installation.target_id,
+                }),
+                0,
+            )
+            .map_err(|error| local_error(error.to_string()))?;
             Ok(())
         }
         Commands::Skill {
@@ -2821,7 +2867,8 @@ async fn run_local(
                 let result = preview;
                 return render_lifecycle(&result, "skill install", output.json || json);
             }
-            let approved = approve_lifecycle_plan(&preview, yes, "Install this skill?")?;
+            let approved =
+                approve_lifecycle_plan(&preview, yes, "Install this skill?", output.json || json)?;
             let result = lifecycle.apply_install(plan, approved, cancel).await?;
             render_lifecycle(&result, "skill install", output.json || json)
         }
@@ -2850,7 +2897,8 @@ async fn run_local(
                 result.dry_run = false;
                 return render_lifecycle(&result, "skill update", output.json || json);
             }
-            let approved = approve_lifecycle_plan(&preview, yes, "Apply this update?")?;
+            let approved =
+                approve_lifecycle_plan(&preview, yes, "Apply this update?", output.json || json)?;
             let result = lifecycle.apply_update(plan, approved, cancel).await?;
             render_lifecycle(&result, "skill update", output.json || json)
         }
@@ -2880,7 +2928,7 @@ async fn run_local(
             let approved = if yes {
                 true
             } else {
-                confirm_plan(&plan, "Remove this Installation?")?
+                confirm_plan(&plan, "Remove this Installation?", output.json || json)?
             };
             let result = lifecycle.remove(&selector, false, force, approved)?;
             render_lifecycle(&result, "skill remove", output.json || json)
@@ -2998,7 +3046,7 @@ fn run_command_skill_lifecycle(
         ));
     }
     if !args.yes {
-        confirm_command_skill_plan(&plan)?;
+        confirm_command_skill_plan(&plan, args.output.json || json)?;
     }
     let approval = CommandSkillApproval::approve(&plan)?;
     let result = service.apply(plan, approval)?;
@@ -3016,37 +3064,38 @@ fn install_scope_name(scope: InstallScope) -> &'static str {
     }
 }
 
-fn confirm_command_skill_plan(plan: &CommandSkillPlan) -> Result<(), Diagnostic> {
-    if !std::io::stdin().is_terminal() {
-        return Err(Diagnostic::new(
-            "command_skill_approval_required",
-            "usage",
-            "tasc",
-            "Command Skill mutation requires approval in an interactive terminal.",
-            "Review `tasc skill command <operation> --scope <scope> --adapter copilot --dry-run`, then rerun interactively or explicitly pass --yes.",
-        ));
+fn confirm_command_skill_plan(plan: &CommandSkillPlan, json: bool) -> Result<(), Diagnostic> {
+    if tasc::presentation::prompt_enabled(json) {
+        let plan =
+            serde_json::to_string_pretty(plan).map_err(|error| local_error(error.to_string()))?;
+        tasc::presentation::Event::Prompt
+            .emit(&format!("Plan: {plan}"), false)
+            .map_err(|error| local_error(format!("cannot write confirmation plan: {error}")))?;
     }
-    eprintln!(
-        "Plan: {}",
-        serde_json::to_string_pretty(plan).map_err(|error| local_error(error.to_string()))?
-    );
-    eprint!("Approve this Command Skill Installation change? [y/N] ");
-    std::io::Write::flush(&mut std::io::stderr())
-        .map_err(|error| local_error(format!("cannot write confirmation prompt: {error}")))?;
-    let mut answer = String::new();
-    std::io::stdin()
-        .read_line(&mut answer)
-        .map_err(|error| local_error(format!("cannot read confirmation: {error}")))?;
-    if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-        Ok(())
-    } else {
-        Err(Diagnostic::new(
+    match tasc::presentation::prompt(
+        "Approve this Command Skill Installation change?",
+        Some("No"),
+        json,
+    )
+    .map_err(|error| local_error(format!("cannot read confirmation: {error}")))?
+    {
+        Some(answer) if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") => {
+            Ok(())
+        }
+        Some(_) => Err(Diagnostic::new(
             "cancelled",
             "cancelled",
             "tasc",
             "Command Skill Installation change cancelled.",
             "Retry when ready.",
-        ))
+        )),
+        None => Err(Diagnostic::new(
+            "command_skill_approval_required",
+            "usage",
+            "tasc",
+            "Command Skill mutation requires approval in an interactive terminal.",
+            "Review `tasc skill command <operation> --scope <scope> --adapter copilot --dry-run`, then rerun interactively or explicitly pass --yes.",
+        )),
     }
 }
 
@@ -3063,8 +3112,8 @@ fn render_evaluation(
                 .map_err(|error| local_error(format!("cannot render Evaluation: {error}")))?
         );
     } else {
-        println!("{command} (schema version 1)");
-        render_fields(&result, 0);
+        tasc::presentation::render_human(command, 1, &result, 0)
+            .map_err(|error| local_error(format!("cannot render Evaluation: {error}")))?;
     }
     Ok(())
 }
@@ -3074,6 +3123,15 @@ fn render_local_artifact(
     command: &str,
     json: bool,
 ) -> Result<(), Diagnostic> {
+    render_local_artifact_with_exit_code(result, command, json, 0)
+}
+
+fn render_local_artifact_with_exit_code(
+    result: serde_json::Value,
+    command: &str,
+    json: bool,
+    exit_code: i32,
+) -> Result<(), Diagnostic> {
     if json {
         let envelope = Envelope::new(command, result);
         println!(
@@ -3082,30 +3140,41 @@ fn render_local_artifact(
                 .map_err(|error| local_error(format!("cannot render artifact: {error}")))?
         );
     } else {
-        println!("{command} (schema version 1)");
-        render_fields(&result, 0);
+        tasc::presentation::render_human(command, 1, &result, exit_code)
+            .map_err(|error| local_error(format!("cannot render artifact: {error}")))?;
     }
     Ok(())
 }
 
 fn prompt_tracking_onboarding(
     service: &AgentService<CopilotAdapter, FsStateRepository>,
+    json: bool,
 ) -> Result<(), Diagnostic> {
     let onboarding = service.tracking_onboarding().map_err(local_error)?;
-    if onboarding.completed || onboarding.candidates.is_empty() {
+    if onboarding.completed
+        || onboarding.candidates.is_empty()
+        || !tasc::presentation::prompt_enabled(json)
+    {
         return Ok(());
     }
-    eprintln!(
-        "TASC found {} untracked installation(s) in this Profile.",
-        onboarding.candidates.len()
-    );
-    eprint!("Track all, select installations, or not now? [a/s/n] ");
-    std::io::Write::flush(&mut std::io::stderr())
-        .map_err(|error| local_error(format!("cannot write tracking prompt: {error}")))?;
-    let mut answer = String::new();
-    std::io::stdin()
-        .read_line(&mut answer)
-        .map_err(|error| local_error(format!("cannot read tracking choice: {error}")))?;
+    tasc::presentation::Event::Working
+        .emit(
+            &format!(
+                "TASC found {} untracked installation(s) in this Profile.",
+                onboarding.candidates.len()
+            ),
+            json,
+        )
+        .map_err(|error| local_error(format!("cannot write tracking notice: {error}")))?;
+    let Some(answer) = tasc::presentation::prompt(
+        "Track all, select installations, or not now? [a/s/n]",
+        Some("Not now"),
+        json,
+    )
+    .map_err(|error| local_error(format!("cannot read tracking choice: {error}")))?
+    else {
+        return Ok(());
+    };
     let choice = answer.trim().to_ascii_lowercase();
     let (selected_ids, all, defer) = match choice.as_str() {
         "a" | "all" => (
@@ -3119,24 +3188,40 @@ fn prompt_tracking_onboarding(
         ),
         "s" | "select" | "selected" => {
             for (index, item) in onboarding.candidates.iter().enumerate() {
-                eprintln!(
-                    "  {}. {} [{}] {}",
-                    index + 1,
-                    item.identity.name,
-                    item.action_id,
-                    item.target
-                        .as_ref()
-                        .map(|target| target.assistant.as_str())
-                        .unwrap_or("unknown")
-                );
+                tasc::presentation::Event::Prompt
+                    .emit(
+                        &format!(
+                            "{}. {} [{}] {}",
+                            index + 1,
+                            item.identity.name,
+                            item.action_id,
+                            item.target
+                                .as_ref()
+                                .map(|target| target.assistant.as_str())
+                                .unwrap_or("unknown")
+                        ),
+                        json,
+                    )
+                    .map_err(|error| {
+                        local_error(format!("cannot write tracking choices: {error}"))
+                    })?;
             }
-            eprint!("Enter comma-separated installation numbers or IDs: ");
-            std::io::Write::flush(&mut std::io::stderr())
-                .map_err(|error| local_error(format!("cannot write selection prompt: {error}")))?;
-            answer.clear();
-            std::io::stdin()
-                .read_line(&mut answer)
-                .map_err(|error| local_error(format!("cannot read tracking selection: {error}")))?;
+            let answer = tasc::presentation::prompt(
+                "Enter comma-separated installation numbers or IDs",
+                Some("No selection"),
+                json,
+            )
+            .map_err(|error| local_error(format!("cannot read tracking selection: {error}")))?
+            .unwrap_or_default();
+            if answer == "No selection" {
+                return Err(Diagnostic::new(
+                    "empty_tracking_selection",
+                    "usage",
+                    "tasc",
+                    "No installations were selected.",
+                    "Select one or more installations or choose not now.",
+                ));
+            }
             let mut selected = Vec::new();
             for token in
                 answer.split(|character: char| character == ',' || character.is_whitespace())
@@ -3202,35 +3287,41 @@ fn prompt_tracking_onboarding(
         .complete_tracking_onboarding(&onboarding.installation_ids, &selected_ids, all, defer)
         .map_err(local_error)?;
     if defer {
-        eprintln!("Tracking deferred for this installation cohort.");
+        tasc::presentation::Event::Working
+            .emit("Tracking deferred for this installation cohort.", json)
+            .map_err(|error| local_error(format!("cannot write tracking status: {error}")))?;
     } else {
-        eprintln!("Tracked {} installation(s).", installations.len());
+        tasc::presentation::Event::Working
+            .emit(
+                &format!("Tracked {} installation(s).", installations.len()),
+                json,
+            )
+            .map_err(|error| local_error(format!("cannot write tracking status: {error}")))?;
     }
     Ok(())
 }
 
-fn confirm_plan(plan: &LifecycleResult, prompt: &str) -> Result<bool, Diagnostic> {
-    if !std::io::stdin().is_terminal() {
+fn confirm_plan(plan: &LifecycleResult, prompt: &str, json: bool) -> Result<bool, Diagnostic> {
+    if !tasc::presentation::prompt_enabled(json) {
         return Ok(false);
     }
-    eprintln!("Plan: {}", safe_text(&plan.plan));
-    eprint!("{prompt} [y/N] ");
-    std::io::Write::flush(&mut std::io::stderr())
-        .map_err(|error| local_error(format!("cannot write confirmation prompt: {error}")))?;
-    let mut answer = String::new();
-    std::io::stdin()
-        .read_line(&mut answer)
-        .map_err(|error| local_error(format!("cannot read confirmation: {error}")))?;
-    if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-        Ok(true)
-    } else {
-        Err(Diagnostic::new(
+    tasc::presentation::Event::Prompt
+        .emit(&format!("Plan: {}", safe_text(&plan.plan)), json)
+        .map_err(|error| local_error(format!("cannot write confirmation plan: {error}")))?;
+    match tasc::presentation::prompt(prompt, Some("No"), json)
+        .map_err(|error| local_error(format!("cannot read confirmation: {error}")))?
+    {
+        Some(answer) if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") => {
+            Ok(true)
+        }
+        Some(_) => Err(Diagnostic::new(
             "cancelled",
             "cancelled",
             "tasc",
             "Operation cancelled.",
             "Retry when ready.",
-        ))
+        )),
+        None => Ok(false),
     }
 }
 
@@ -3238,11 +3329,12 @@ fn approve_lifecycle_plan(
     preview: &LifecycleResult,
     yes: bool,
     prompt: &str,
+    json: bool,
 ) -> Result<LifecycleApproval, Diagnostic> {
     let plan = preview.lifecycle_plan.as_ref().ok_or_else(|| {
         local_error("secure lifecycle approval requires a structured plan".to_string())
     })?;
-    if !yes && !confirm_plan(preview, prompt)? {
+    if !yes && !confirm_plan(preview, prompt, json)? {
         return Err(Diagnostic::new(
             "confirmation_required",
             "usage",
@@ -3264,11 +3356,13 @@ fn authoring_question(field: &str) -> &'static str {
     }
 }
 
-fn prompt_value(value: Option<String>, prompt: &str) -> Result<String, Diagnostic> {
+fn prompt_value(value: Option<String>, prompt: &str, json: bool) -> Result<String, Diagnostic> {
     if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
         return Ok(value);
     }
-    if !std::io::stdin().is_terminal() {
+    let Some(answer) = tasc::presentation::prompt(prompt, None, json)
+        .map_err(|error| local_error(format!("cannot read authoring answer: {error}")))?
+    else {
         return Err(Diagnostic::new(
             "unresolved_product_question",
             "usage",
@@ -3276,14 +3370,7 @@ fn prompt_value(value: Option<String>, prompt: &str) -> Result<String, Diagnosti
             &format!("An answer is needed: {prompt}"),
             "Provide the corresponding authoring option, or run interactively to answer the question.",
         ));
-    }
-    eprint!("{prompt}: ");
-    std::io::Write::flush(&mut std::io::stderr())
-        .map_err(|error| local_error(format!("cannot write authoring prompt: {error}")))?;
-    let mut answer = String::new();
-    std::io::stdin()
-        .read_line(&mut answer)
-        .map_err(|error| local_error(format!("cannot read authoring answer: {error}")))?;
+    };
     if answer.trim().is_empty() {
         return Err(Diagnostic::new(
             "unresolved_product_question",
@@ -3296,8 +3383,8 @@ fn prompt_value(value: Option<String>, prompt: &str) -> Result<String, Diagnosti
     Ok(answer.trim().to_string())
 }
 
-fn confirm_action(plan: &str, prompt: &str) -> Result<bool, Diagnostic> {
-    if !std::io::stdin().is_terminal() {
+fn confirm_action(plan: &str, prompt: &str, json: bool) -> Result<bool, Diagnostic> {
+    if !tasc::presentation::prompt_enabled(json) {
         return Err(Diagnostic::new(
             "confirmation_required",
             "usage",
@@ -3306,24 +3393,29 @@ fn confirm_action(plan: &str, prompt: &str) -> Result<bool, Diagnostic> {
             "Review the plan and retry with --yes, or run interactively to approve it.",
         ));
     }
-    eprintln!("Plan: {}", safe_text(plan));
-    eprint!("{prompt} [y/N] ");
-    std::io::Write::flush(&mut std::io::stderr())
-        .map_err(|error| local_error(format!("cannot write confirmation prompt: {error}")))?;
-    let mut answer = String::new();
-    std::io::stdin()
-        .read_line(&mut answer)
-        .map_err(|error| local_error(format!("cannot read confirmation: {error}")))?;
-    if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-        Ok(true)
-    } else {
-        Err(Diagnostic::new(
+    tasc::presentation::Event::Prompt
+        .emit(&format!("Plan: {}", safe_text(plan)), json)
+        .map_err(|error| local_error(format!("cannot write confirmation plan: {error}")))?;
+    match tasc::presentation::prompt(prompt, Some("No"), json)
+        .map_err(|error| local_error(format!("cannot read confirmation: {error}")))?
+    {
+        Some(answer) if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") => {
+            Ok(true)
+        }
+        Some(_) => Err(Diagnostic::new(
             "cancelled",
             "cancelled",
             "tasc",
             "Operation cancelled.",
             "Retry when ready.",
-        ))
+        )),
+        None => Err(Diagnostic::new(
+            "confirmation_required",
+            "usage",
+            "skill authoring",
+            "This Workspace mutation requires explicit approval.",
+            "Review the plan and retry with --yes, or run interactively to approve it.",
+        )),
     }
 }
 
@@ -3342,12 +3434,10 @@ fn render_lifecycle(result: &LifecycleResult, command: &str, json: bool) -> Resu
                 .map_err(|error| local_error(format!("cannot render lifecycle result: {error}")))?
         );
     } else {
-        println!("{command} (schema version 1)");
-        render_fields(
-            &serde_json::to_value(result)
-                .map_err(|error| local_error(format!("cannot render lifecycle result: {error}")))?,
-            0,
-        );
+        let value = serde_json::to_value(result)
+            .map_err(|error| local_error(format!("cannot render lifecycle result: {error}")))?;
+        tasc::presentation::render_human(command, 1, &value, 0)
+            .map_err(|error| local_error(format!("cannot render lifecycle result: {error}")))?;
     }
     Ok(())
 }
@@ -3360,101 +3450,45 @@ fn render_inventory(inventory: &Inventory, json: bool) -> Result<(), String> {
                 .map_err(|error| format!("cannot render inventory: {error}"))?
         );
     } else {
-        println!("Inventory schema version: {}", inventory.schema_version);
-        if let Some(profile) = &inventory.profile {
-            println!("Profile: {} ({:?})", profile.id, profile.scope);
+        let mut value = serde_json::to_value(inventory)
+            .map_err(|error| format!("cannot render inventory: {error}"))?;
+        if let Some(items) = value["items"].as_array_mut() {
+            let summaries = items
+                .iter_mut()
+                .map(|item| {
+                    let name = item["identity"]["name"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string();
+                    let state = if item["kind"] == "watchlist" {
+                        "watched"
+                    } else if item["tracked"] == true {
+                        "tracked"
+                    } else {
+                        "untracked"
+                    };
+                    if let Some(fields) = item.as_object_mut() {
+                        fields.insert(
+                            "display".to_string(),
+                            serde_json::Value::String(format!("{name} [{state}]")),
+                        );
+                    }
+                    serde_json::json!({
+                        "display": format!("{name} [{state}]"),
+                        "id": item["identity"]["id"],
+                        "path": item["path"],
+                        "scope": item["scope"],
+                        "status": item["lifecycle_state"],
+                        "trackingState": item["tracking_state"],
+                    })
+                })
+                .collect::<Vec<_>>();
+            if summaries.len() > 1 {
+                value["items"] = serde_json::Value::Array(summaries);
+            }
         }
-        println!(
-            "Inventory rows: {} of {} (offset {}, limit {})",
-            inventory.items.len(),
-            inventory.total,
-            inventory.offset,
-            inventory
-                .limit
-                .map_or_else(|| "all".to_string(), |limit| limit.to_string())
-        );
-        for (index, item) in inventory.items.iter().enumerate() {
-            println!(
-                "- {} [{}] {}",
-                item.identity.name,
-                if item.kind == "watchlist" {
-                    "watched"
-                } else if item.tracked {
-                    "tracked"
-                } else {
-                    "untracked"
-                },
-                item.identity.id
-            );
-            println!("  row: {}", index + 1);
-            println!("  action ID: {}", item.action_id);
-            println!("  kind: {}", item.kind);
-            println!("  tracked: {}", item.tracked);
-            println!(
-                "  lifecycle state: {}",
-                item.lifecycle_state.map_or_else(
-                    || "none".to_string(),
-                    |state| format!("{state:?}").to_lowercase()
-                )
-            );
-            println!("  tracking state: {}", item.tracking_state);
-            println!("  watch state: {}", item.watch_state);
-            println!("  scope: {}", item.scope);
-            println!("  source: {}", item.identity.source);
-            println!("  relative path: {}", item.identity.relative_path);
-            if item.installation_id.is_empty() {
-                println!("  installation: none");
-            } else {
-                println!("  installation: {}", item.installation_id);
-            }
-            if let Some(target) = &item.target {
-                println!("  assistant: {}", target.assistant);
-                println!("  target: {}", target.id);
-                println!("  target path: {}", target.path);
-            } else {
-                println!("  assistant: none");
-                println!("  target: none");
-                println!("  target path: none");
-            }
-            println!("  path: {}", item.path);
-            if let Some(status) = item.status {
-                println!("  status: {}", format!("{status:?}").to_lowercase());
-            } else {
-                println!("  status: none");
-            }
-            if let Some(revision) = &item.source_revision {
-                println!("  source revision: {revision}");
-            } else {
-                println!("  source revision: none");
-            }
-            println!(
-                "  provenance: {}",
-                match item.provenance.kind {
-                    tasc_core::ProvenanceKind::GithubRepository => "github_repository",
-                    tasc_core::ProvenanceKind::MarketplacePlugin => "marketplace_plugin",
-                    tasc_core::ProvenanceKind::LocalWorkspace => "local_workspace",
-                    tasc_core::ProvenanceKind::BundledFirstParty => "bundled_first_party",
-                    tasc_core::ProvenanceKind::Unknown => "unknown",
-                }
-            );
-            println!(
-                "  provenance confidence: {}",
-                match item.provenance.confidence {
-                    tasc_core::ProvenanceConfidence::Verified => "verified",
-                    tasc_core::ProvenanceConfidence::Probable => "probable",
-                    tasc_core::ProvenanceConfidence::Inferred => "inferred",
-                    tasc_core::ProvenanceConfidence::Unavailable => "unavailable",
-                }
-            );
-            if let Some(evidence) = &item.provenance.raw_evidence {
-                println!("  provenance evidence: {evidence}");
-            } else {
-                println!("  provenance evidence: none");
-            }
-            println!("  provenance explanation: {}", item.provenance.explanation);
-            println!("  description excerpt: {}", item.description_excerpt);
-            println!("  description: {}", item.description);
-        }
+        tasc::presentation::render_human("skill list", inventory.schema_version, &value, 0)
+            .map_err(|error| format!("cannot render inventory: {error}"))?;
     }
     Ok(())
 }
@@ -3467,18 +3501,22 @@ fn render_status(status: &StateStatus, json: bool) -> Result<(), String> {
                 .map_err(|error| format!("cannot render Local State status: {error}"))?
         );
     } else {
-        println!("Status schema version: {}", status.schema_version);
-        println!("Local State version: {}", status.state_version);
-        println!(
-            "Profile: {} ({})",
-            status.profile.id,
-            format!("{:?}", status.profile.scope).to_lowercase()
-        );
-        println!("Identities: {}", status.identity_count);
-        println!("Adapter targets: {}", status.target_count);
-        println!("Installations: {}", status.installation_count);
-        println!("Discovered skills: {}", status.discovered_count);
-        println!("Untracked installations: {}", status.untracked_count);
+        let value = serde_json::json!({
+            "Status schema version": status.schema_version,
+            "Local State version": status.state_version,
+            "Profile": format!(
+                "{} ({})",
+                status.profile.id,
+                format!("{:?}", status.profile.scope).to_lowercase()
+            ),
+            "Identities": status.identity_count,
+            "Adapter targets": status.target_count,
+            "Installations": status.installation_count,
+            "Discovered skills": status.discovered_count,
+            "Untracked installations": status.untracked_count,
+        });
+        tasc::presentation::render_human("state status", status.schema_version, &value, 0)
+            .map_err(|error| format!("cannot render Local State status: {error}"))?;
     }
     Ok(())
 }

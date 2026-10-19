@@ -35,6 +35,107 @@ fn run_with_resolved_profile(directory: &PathBuf, home: &PathBuf, args: &[&str])
 }
 
 #[test]
+fn command_human_output_uses_events_and_missing_input_never_prompts_when_piped() {
+    let directory = test_dir();
+    let state_path = directory.join("state/state.json");
+    fs::create_dir_all(&directory).unwrap();
+
+    let human = run(&directory, &state_path, &["state", "status"]);
+    assert!(human.status.success());
+    let stdout = String::from_utf8(human.stdout).unwrap();
+    assert!(stdout.starts_with("DONE: state status completed\nTASC: state status"));
+    assert!(human.stderr.is_empty());
+    assert!(!stdout.contains('\x1b'));
+    assert!(!stdout.contains('\r'));
+
+    let local_json = run(&directory, &state_path, &["state", "status", "--json"]);
+    let global_json = run(
+        &directory,
+        &state_path,
+        &["--format", "json", "state", "status"],
+    );
+    assert!(local_json.status.success());
+    assert_eq!(local_json.stdout, global_json.stdout);
+    assert!(local_json.stderr.is_empty());
+    assert!(!String::from_utf8_lossy(&local_json.stdout).contains("DONE:"));
+
+    let workspace = directory.join("workspace");
+    let missing = run(
+        &directory,
+        &state_path,
+        &[
+            "skill",
+            "create",
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(missing.status.code(), Some(2));
+    assert!(missing.stdout.is_empty());
+    let diagnostic = String::from_utf8(missing.stderr).unwrap();
+    assert!(diagnostic.contains("ERROR: An answer is needed"));
+    assert!(diagnostic.contains("NEXT: Provide the corresponding authoring option"));
+    assert!(!diagnostic.contains("PROMPT:"));
+
+    let missing_json = run(
+        &directory,
+        &state_path,
+        &[
+            "skill",
+            "create",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(missing_json.status.code(), Some(2));
+    assert!(missing_json.stdout.is_empty());
+    let diagnostic: serde_json::Value = serde_json::from_slice(&missing_json.stderr).unwrap();
+    assert_eq!(
+        diagnostic["diagnostic"]["code"],
+        "unresolved_product_question"
+    );
+    assert!(!String::from_utf8_lossy(&missing_json.stderr).contains("PROMPT:"));
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn process_inventory_uses_an_aligned_table_for_multiple_skills() {
+    let directory = test_dir();
+    let state_path = directory.join("state/state.json");
+    for name in ["alpha", "beta"] {
+        let skill = directory.join(".github/skills").join(name);
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {name} skill.\n---\n"),
+        )
+        .unwrap();
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_tasc"))
+        .args(["skill", "list"])
+        .current_dir(&directory)
+        .env("COLUMNS", "1000")
+        .env("HOME", directory.join("home"))
+        .env("TASC_STATE_PATH", &state_path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("display"));
+    assert!(stdout.contains("alpha [untracked]"));
+    assert!(stdout.contains("beta [untracked]"));
+    assert!(stdout.contains(&directory.join(".github/skills/alpha").display().to_string()));
+    assert!(!stdout.contains('\x1b'));
+    assert!(!stdout.contains('\r'));
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn audit_and_stats_are_profile_scoped_and_report_untracked_inventory() {
     let directory = test_dir();
     let skill_dir = directory.join(".github/skills/review");
@@ -486,7 +587,7 @@ fn skill_inventory_adoption_and_state_status_share_the_same_facts() {
 
     let adopted = run(&directory, &state_path, &["skill", "adopt", skill_id]);
     assert!(adopted.status.success());
-    assert!(adopted.stdout.starts_with(b"Adopted "));
+    assert!(adopted.stdout.starts_with(b"DONE: skill adopt completed\n"));
     assert!(!fs::read_to_string(&state_path)
         .unwrap()
         .contains("secret-test-value"));
@@ -533,12 +634,12 @@ fn skill_inventory_adoption_and_state_status_share_the_same_facts() {
     let human_status = run(&directory, &state_path, &["state", "status"]);
     let human_status = String::from_utf8(human_status.stdout).unwrap();
     for fact in [
-        "Local State version: 2",
-        "Identities: 1",
-        "Adapter targets: 1",
-        "Installations: 1",
-        "Discovered skills: 1",
-        "Untracked installations: 0",
+        "local state version: 2",
+        "identities: 1",
+        "adapter targets: 1",
+        "installations: 1",
+        "discovered skills: 1",
+        "untracked installations: 0",
     ] {
         assert!(human_status.contains(fact), "missing {fact:?}");
     }
@@ -749,7 +850,7 @@ fn inventory_filters_pages_and_details_by_stable_action_id() {
         "lifecycle state: installed",
         "tracking state: untracked",
         "watch state: not_watched",
-        "provenance confidence: inferred",
+        "confidence: inferred",
         "description excerpt:",
     ] {
         assert!(human.contains(fact), "human inventory omitted {fact:?}");
@@ -1583,7 +1684,7 @@ fn lifecycle_plans_protect_modified_content_and_record_recoverable_state() {
 
     let unapproved = invoke(&["skill", "install", "review", "--source", "alpha/skills"]);
     assert_eq!(unapproved.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&unapproved.stderr).contains("confirmation_required"));
+    assert!(String::from_utf8_lossy(&unapproved.stderr).contains("requires explicit approval"));
     assert!(!directory.join(".github/skills/review").exists());
 
     let installed = invoke(&[
@@ -1648,13 +1749,14 @@ fn lifecycle_plans_protect_modified_content_and_record_recoverable_state() {
 
     let protected_remove = invoke(&["skill", "remove", &installation, "--yes"]);
     assert_eq!(protected_remove.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&protected_remove.stderr).contains("modified_installation"));
+    assert!(String::from_utf8_lossy(&protected_remove.stderr)
+        .contains("Installation contains local modifications."));
     assert!(skill_file.exists());
     let force_remove_without_confirmation = invoke(&["skill", "remove", &installation, "--force"]);
     assert_eq!(force_remove_without_confirmation.status.code(), Some(2));
     assert!(
         String::from_utf8_lossy(&force_remove_without_confirmation.stderr)
-            .contains("confirmation_required")
+            .contains("This mutation requires approval.")
     );
     assert!(skill_file.exists());
 
@@ -1671,11 +1773,11 @@ fn lifecycle_plans_protect_modified_content_and_record_recoverable_state() {
 
     let protected_update = invoke(&["skill", "update", &installation, "--yes"]);
     assert_eq!(protected_update.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&protected_update.stderr).contains("modified_installation"));
+    assert!(String::from_utf8_lossy(&protected_update.stderr)
+        .contains("Installation contains local modifications."));
     let force_without_confirmation = invoke(&["skill", "update", &installation, "--force"]);
     assert_eq!(force_without_confirmation.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&force_without_confirmation.stderr)
-        .contains("confirmation_required"));
+    assert!(String::from_utf8_lossy(&force_without_confirmation.stderr).contains("approval"));
 
     let recovered = invoke(&[
         "skill",
@@ -1706,7 +1808,7 @@ fn lifecycle_plans_protect_modified_content_and_record_recoverable_state() {
     assert!(skill_file.exists());
     let unapproved_remove = invoke(&["skill", "remove", &installation]);
     assert_eq!(unapproved_remove.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&unapproved_remove.stderr).contains("confirmation_required"));
+    assert!(String::from_utf8_lossy(&unapproved_remove.stderr).contains("approval"));
     assert!(skill_file.exists());
     let removed = invoke(&["skill", "remove", &installation, "--yes", "--json"]);
     assert!(
@@ -1739,8 +1841,7 @@ fn lifecycle_plans_protect_modified_content_and_record_recoverable_state() {
         "--force",
     ]);
     assert_eq!(force_without_confirmation.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&force_without_confirmation.stderr)
-        .contains("confirmation_required"));
+    assert!(String::from_utf8_lossy(&force_without_confirmation.stderr).contains("approval"));
 
     fs::write(directory.join("gh.mode"), "supported\n").unwrap();
     let recovered_install = invoke(&[
@@ -1837,7 +1938,7 @@ fn secure_lifecycle_plans_exact_revision_and_requires_finding_approval() {
 
     let denied = invoke(&["skill", "install", "review", "--source", "alpha/skills"]);
     assert_eq!(denied.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&denied.stderr).contains("confirmation_required"));
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("requires explicit approval"));
     assert!(!state_path.exists());
     assert!(!directory.join(".github/skills/review").exists());
 
@@ -1916,7 +2017,8 @@ fn secure_lifecycle_fails_closed_and_audits_one_operation_override() {
         "--yes",
     ]);
     assert_eq!(blocked.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&blocked.stderr).contains("security_override_required"));
+    assert!(String::from_utf8_lossy(&blocked.stderr)
+        .contains("Required Security Policy checks are incomplete"));
     assert!(!state_path.exists());
     assert!(!directory.join(".github/skills/review").exists());
 
@@ -2002,7 +2104,7 @@ fn insight_snapshots_lifecycle_suppressions_and_proposals_are_local_and_proposal
     assert!(human_show.status.success());
     let human_show = String::from_utf8(human_show.stdout).unwrap();
     assert!(human_show.contains("insight show (schema version 1)"));
-    assert!(human_show.contains("priorityRank"));
+    assert!(human_show.contains("priority rank"));
     assert!(human_show.contains("Installation"));
 
     let generated_again = run(&directory, &state_path, &["insight", "generate", "--json"]);

@@ -1,4 +1,7 @@
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::{
+    collections::BTreeMap,
+    io::{self, BufRead, IsTerminal, Write},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -75,9 +78,19 @@ pub fn render_human(
     value: &serde_json::Value,
     exit_code: i32,
 ) -> io::Result<()> {
-    if exit_code == 0 {
+    render_human_with_outcome(command, schema_version, value, exit_code, true)
+}
+
+pub fn render_human_with_outcome(
+    command: &str,
+    schema_version: u32,
+    value: &serde_json::Value,
+    exit_code: i32,
+    show_outcome: bool,
+) -> io::Result<()> {
+    if show_outcome && exit_code == 0 {
         Event::Done.emit(&format!("{command} completed"), false)?;
-    } else {
+    } else if show_outcome {
         Event::Error.emit(&format!("{command} completed with findings"), false)?;
     }
     Event::Tasc.emit(
@@ -103,7 +116,7 @@ pub fn render_table(headers: &[String], rows: &[Vec<String>], width: usize) -> S
     }
     let widths = (0..headers.len())
         .map(|column| {
-            headers[column].chars().count().max(
+            pretty_key(&headers[column]).chars().count().max(
                 rows.iter()
                     .map(|row| cell_width(&row[column]))
                     .max()
@@ -113,20 +126,22 @@ pub fn render_table(headers: &[String], rows: &[Vec<String>], width: usize) -> S
         .collect::<Vec<_>>();
     let table_width = widths.iter().sum::<usize>() + widths.len().saturating_sub(1) * 2;
     let mut output = String::new();
-    if table_width <= width {
+    let single_line_cells = rows.iter().flatten().all(|cell| !cell.contains('\n'));
+    if table_width <= width && single_line_cells {
         for (index, header) in headers.iter().enumerate() {
             if index > 0 {
                 output.push_str("  ");
             }
-            output.push_str(&safe_text(header));
+            let header = pretty_key(header);
+            output.push_str(&safe_text(&header));
             output.push_str(&" ".repeat(widths[index] - header.chars().count()));
         }
         output.push('\n');
-        for (index, header) in headers.iter().enumerate() {
+        for (index, width) in widths.iter().enumerate() {
             if index > 0 {
                 output.push_str("  ");
             }
-            output.push_str(&"-".repeat(widths[index].max(header.chars().count())));
+            output.push_str(&"-".repeat(*width));
         }
         output.push('\n');
         for row in rows {
@@ -147,7 +162,7 @@ pub fn render_table(headers: &[String], rows: &[Vec<String>], width: usize) -> S
             output.push_str(&format!("- row {}:\n", row_index + 1));
             for (header, value) in headers.iter().zip(row) {
                 output.push_str("  ");
-                output.push_str(&safe_text(header));
+                output.push_str(&safe_text(&pretty_key(header)));
                 output.push_str(": ");
                 append_indented(&mut output, &safe_text(value), "  ");
             }
@@ -164,13 +179,16 @@ pub fn terminal_width() -> usize {
         .unwrap_or(80)
 }
 
+pub fn prompt_enabled(json: bool) -> bool {
+    !json && io::stdin().is_terminal() && io::stderr().is_terminal()
+}
+
 pub fn prompt(prompt: &str, default: Option<&str>, json: bool) -> io::Result<Option<String>> {
-    if json || !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+    if !prompt_enabled(json) {
         return Ok(None);
     }
-    let default_text = default.map_or_else(String::new, |value| format!(" (default: {value})"));
     let rendered = Event::Prompt.render(
-        &format!("{prompt}{default_text}"),
+        &prompt_body(prompt, default),
         Event::Prompt.decoration(false),
     );
     write!(io::stderr().lock(), "{rendered} ")?;
@@ -185,6 +203,14 @@ pub fn prompt(prompt: &str, default: Option<&str>, json: bool) -> io::Result<Opt
     }
 }
 
+fn prompt_body(prompt: &str, default: Option<&str>) -> String {
+    let default_text = default.map_or_else(
+        || " (required)".to_string(),
+        |value| format!(" (default: {value})"),
+    );
+    format!("{prompt}{default_text}")
+}
+
 pub struct WorkingRow {
     active: bool,
     previous_width: usize,
@@ -194,7 +220,7 @@ impl WorkingRow {
     pub fn start(message: &str, json: bool) -> io::Result<Self> {
         let active = !json && io::stderr().is_terminal();
         if active {
-            let rendered = Event::Working.render(message, Event::Working.decoration(false));
+            let rendered = Event::Working.render(message, stderr_decoration());
             write!(io::stderr().lock(), "\r{rendered}")?;
             io::stderr().lock().flush()?;
             Ok(Self {
@@ -213,7 +239,7 @@ impl WorkingRow {
         if !self.active {
             return Ok(());
         }
-        let rendered = event.render(message, event.decoration(false));
+        let rendered = event.render(message, stderr_decoration());
         let padding = self.previous_width.saturating_sub(rendered.chars().count());
         let mut stderr = io::stderr().lock();
         write!(stderr, "\r{rendered}{}\n", " ".repeat(padding))?;
@@ -225,6 +251,13 @@ impl WorkingRow {
     pub fn is_active(&self) -> bool {
         self.active
     }
+
+    pub fn disabled() -> Self {
+        Self {
+            active: false,
+            previous_width: 0,
+        }
+    }
 }
 
 fn render_value(value: &serde_json::Value, indent: usize, width: usize, output: &mut String) {
@@ -232,6 +265,7 @@ fn render_value(value: &serde_json::Value, indent: usize, width: usize, output: 
     match value {
         serde_json::Value::Object(object) => {
             for (key, value) in object {
+                let key = pretty_key(key);
                 match value {
                     serde_json::Value::Object(nested) if !nested.is_empty() => {
                         output.push_str(&format!("{prefix}{key}:\n"));
@@ -261,17 +295,19 @@ fn render_array(items: &[serde_json::Value], indent: usize, width: usize, output
         output.push_str(&format!("{}(none)\n", " ".repeat(indent)));
         return;
     }
-    if let Some((headers, rows)) = comparable_rows(items) {
-        output.push_str(&indent_text(
-            &render_table(&headers, &rows, width.saturating_sub(indent)),
-            indent,
-        ));
-        return;
+    if items.len() > 1 {
+        if let Some((headers, rows)) = comparable_rows(items) {
+            output.push_str(&indent_text(
+                &render_table(&headers, &rows, width.saturating_sub(indent)),
+                indent,
+            ));
+            return;
+        }
     }
     for item in items {
         match item {
             serde_json::Value::Object(_) => {
-                output.push_str(&format!("{}-:\n", " ".repeat(indent)));
+                output.push_str(&format!("{}- item:\n", " ".repeat(indent)));
                 render_value(item, indent + 2, width, output);
             }
             _ => {
@@ -283,41 +319,55 @@ fn render_array(items: &[serde_json::Value], indent: usize, width: usize, output
 }
 
 fn comparable_rows(items: &[serde_json::Value]) -> Option<(Vec<String>, Vec<Vec<String>>)> {
-    let first = items.first()?.as_object()?;
-    if first.is_empty()
-        || !first.values().all(|value| {
-            !matches!(
-                value,
-                serde_json::Value::Object(_) | serde_json::Value::Array(_)
-            )
+    let flattened = items
+        .iter()
+        .map(|item| {
+            let mut fields = BTreeMap::new();
+            flatten_object(item, "", &mut fields);
+            fields
         })
-    {
+        .collect::<Vec<_>>();
+    if flattened.iter().any(BTreeMap::is_empty) {
         return None;
     }
-    let headers = first.keys().cloned().collect::<Vec<_>>();
+    let headers = flattened
+        .iter()
+        .flat_map(|fields| fields.keys().cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     let mut rows = Vec::with_capacity(items.len());
-    for item in items {
-        let object = item.as_object()?;
-        if object.len() != headers.len()
-            || headers.iter().any(|header| {
-                object.get(header).is_none_or(|value| {
-                    matches!(
-                        value,
-                        serde_json::Value::Object(_) | serde_json::Value::Array(_)
-                    )
-                })
-            })
-        {
-            return None;
-        }
+    for fields in flattened {
         rows.push(
             headers
                 .iter()
-                .map(|header| scalar(&object[header]))
+                .map(|header| {
+                    fields
+                        .get(header)
+                        .map_or("(none)", String::as_str)
+                        .to_string()
+                })
                 .collect(),
         );
     }
     Some((headers, rows))
+}
+
+fn flatten_object(value: &serde_json::Value, prefix: &str, fields: &mut BTreeMap<String, String>) {
+    if let Some(object) = value.as_object() {
+        for (key, value) in object {
+            let name = if prefix.is_empty() {
+                key.clone()
+            } else {
+                format!("{prefix}.{key}")
+            };
+            if value.is_object() {
+                flatten_object(value, &name, fields);
+            } else {
+                fields.insert(name, scalar(value));
+            }
+        }
+    }
 }
 
 fn scalar(value: &serde_json::Value) -> String {
@@ -326,6 +376,27 @@ fn scalar(value: &serde_json::Value) -> String {
         serde_json::Value::String(value) => safe_text(value),
         _ => safe_text(&value.to_string()),
     }
+}
+
+fn pretty_key(key: &str) -> String {
+    let mut result = String::new();
+    let mut previous = None;
+    for character in key.chars() {
+        if character == '_' || character == '.' {
+            if !result.ends_with(' ') {
+                result.push(' ');
+            }
+        } else if character.is_uppercase() {
+            if previous.is_some_and(char::is_lowercase) {
+                result.push(' ');
+            }
+            result.extend(character.to_lowercase());
+        } else {
+            result.push(character);
+        }
+        previous = Some(character);
+    }
+    result
 }
 
 fn append_indented(output: &mut String, value: &str, continuation_prefix: &str) {
@@ -356,6 +427,15 @@ fn cell_width(value: &str) -> usize {
         .unwrap_or(0)
 }
 
+fn stderr_decoration() -> bool {
+    decoration_enabled(
+        io::stderr().is_terminal(),
+        std::env::var_os("NO_COLOR").is_some(),
+        std::env::var("TERM").as_deref() == Ok("dumb"),
+        false,
+    )
+}
+
 pub fn decoration_enabled(terminal: bool, no_color: bool, dumb: bool, json: bool) -> bool {
     terminal && !no_color && !dumb && !json
 }
@@ -374,7 +454,7 @@ fn safe_text(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{decoration_enabled, render_fields, render_table, Event};
+    use super::{decoration_enabled, prompt_body, render_fields, render_table, Event};
 
     #[test]
     fn vocabulary_colors_only_the_glyph_and_label() {
@@ -438,11 +518,11 @@ mod tests {
         let wide = render_table(&headers, &rows, 100);
         assert!(wide.contains("skill:owner/repository"));
         assert!(wide.contains("/a/long/path/that/must/not/be/truncated"));
-        assert!(wide.contains("ID                      Path"));
+        assert!(wide.contains("id                      path"));
 
         let narrow = render_table(&headers, &rows, 20);
-        assert!(narrow.contains("ID: skill:owner/repository"));
-        assert!(narrow.contains("Path: /a/long/path/that/must/not/be/truncated"));
+        assert!(narrow.contains("id: skill:owner/repository"));
+        assert!(narrow.contains("path: /a/long/path/that/must/not/be/truncated"));
     }
 
     #[test]
@@ -458,5 +538,26 @@ mod tests {
             render_fields(&value, 0, 80),
             "items:\n  id   path   \n  ---  -------\n  one  /first\n  two  /second\n"
         );
+    }
+
+    #[test]
+    fn a_single_object_uses_indented_key_value_rows() {
+        let value = serde_json::json!({
+            "items": [{"id": "one", "path": "/a/path"}]
+        });
+
+        assert_eq!(
+            render_fields(&value, 0, 120),
+            "items:\n  - item:\n    id: one\n    path: /a/path\n"
+        );
+    }
+
+    #[test]
+    fn prompts_show_their_default_or_that_an_answer_is_required() {
+        assert_eq!(
+            prompt_body("Remove this Installation?", Some("No")),
+            "Remove this Installation? (default: No)"
+        );
+        assert_eq!(prompt_body("Skill name", None), "Skill name (required)");
     }
 }

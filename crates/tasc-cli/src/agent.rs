@@ -1331,7 +1331,12 @@ fn print_shell_event(kind: &str, message: &str, json_output: bool) {
         return;
     }
     let rendered = shell_event_output(kind, message, json_output);
-    if kind == "error" || kind == "warning" || kind == "activity" || kind == "plan" {
+    if kind == "error"
+        || kind == "warning"
+        || kind == "activity"
+        || kind == "plan"
+        || kind == "next"
+    {
         eprintln!("{rendered}");
     } else {
         println!("{rendered}");
