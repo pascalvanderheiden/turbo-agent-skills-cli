@@ -30,10 +30,9 @@ pub fn run() -> io::Result<()> {
         return stdout.flush();
     }
 
-    let color = std::env::var_os("NO_COLOR").is_none();
+    let color = tasc::presentation::Event::Tasc.decoration(false);
     write!(stdout, "\n{}\n", banner(color))?;
-    stdout.flush()?
-;
+    stdout.flush()?;
     Ok(())
 }
 

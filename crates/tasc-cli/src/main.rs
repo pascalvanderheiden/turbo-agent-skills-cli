@@ -903,7 +903,7 @@ async fn main() {
                 })
             );
         } else {
-            eprintln!("tasc: {}", safe_text(&error.to_string()));
+            let _ = tasc::presentation::Event::Error.emit(&error.to_string(), false);
         }
         std::process::exit(error.exit_code());
     }

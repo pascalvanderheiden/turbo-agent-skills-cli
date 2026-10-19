@@ -12,6 +12,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
+use tasc::presentation::Event as PresentationEvent;
 use tasc_agent::{
     consistency::{ConsistencyService, FsConsistencyArtifactRepository},
     conversation::{
@@ -1010,10 +1011,10 @@ fn dashboard_output(status: &Value, color: bool, json_output: bool) -> String {
     )
 }
 
-fn output_policy(interactive: bool, no_color: bool, json_output: bool) -> (bool, bool) {
+fn output_policy(interactive: bool, no_color: bool, dumb: bool, json_output: bool) -> (bool, bool) {
     (
         interactive || json_output,
-        interactive && !no_color && !json_output,
+        tasc::presentation::decoration_enabled(interactive, no_color, dumb, json_output),
     )
 }
 
@@ -1063,6 +1064,7 @@ async fn interact(
     let (show_dashboard, color) = output_policy(
         interactive,
         std::env::var_os("NO_COLOR").is_some(),
+        std::env::var("TERM").as_deref() == Ok("dumb"),
         context.json_output,
     );
     let mut model = profile_model.unwrap_or_else(|| "auto".to_string());
@@ -1093,7 +1095,11 @@ async fn interact(
     loop {
         if interactive && !context.json_output {
             stdout
-                .write_all(b"tasc> ")
+                .write_all(
+                    PresentationEvent::Input
+                        .render("", PresentationEvent::Input.decoration(false))
+                        .as_bytes(),
+                )
                 .await
                 .map_err(|error| state_error(error.to_string()))?;
             stdout
@@ -1320,6 +1326,10 @@ async fn interact(
 }
 
 fn print_shell_event(kind: &str, message: &str, json_output: bool) {
+    if !json_output {
+        let _ = presentation_event(kind).emit(message, false);
+        return;
+    }
     let rendered = shell_event_output(kind, message, json_output);
     if kind == "error" || kind == "warning" || kind == "activity" || kind == "plan" {
         eprintln!("{rendered}");
@@ -1328,11 +1338,24 @@ fn print_shell_event(kind: &str, message: &str, json_output: bool) {
     }
 }
 
+fn presentation_event(kind: &str) -> PresentationEvent {
+    match kind {
+        "error" => PresentationEvent::Error,
+        "warning" => PresentationEvent::Warning,
+        "activity" | "progress" => PresentationEvent::Working,
+        "plan" => PresentationEvent::Prompt,
+        "approved" => PresentationEvent::Done,
+        "message" | "result" => PresentationEvent::Tasc,
+        "next" => PresentationEvent::Next,
+        _ => PresentationEvent::Info,
+    }
+}
+
 fn shell_event_output(kind: &str, message: &str, json_output: bool) -> String {
     if json_output {
         json!({"schemaVersion":1,"command":"agent.event","type":kind,"message":message}).to_string()
     } else {
-        format!("{kind}: {message}")
+        presentation_event(kind).render(message, false)
     }
 }
 
@@ -1539,7 +1562,11 @@ fn render_event(name: &str, data: &Value, json_output: bool) {
             print_shell_event("activity", &safe_text(&tool), json_output)
         }
         Some(AgentEvent::ToolCompleted(tool)) => {
-            print_shell_event("progress", &safe_text(&tool), json_output)
+            if json_output {
+                print_shell_event("progress", &safe_text(&tool), true)
+            } else {
+                print_shell_event("progress", &format!("Completed {tool}"), false)
+            }
         }
         Some(AgentEvent::Warning(message)) => {
             print_shell_event("warning", &safe_text(&message), json_output)
@@ -1833,10 +1860,38 @@ mod tests {
         let cancelled: serde_json::Value =
             serde_json::from_str(&shell_event_output("cancelled", "stopped", true)).unwrap();
         assert_eq!(cancelled["type"], "cancelled");
-        assert_eq!(output_policy(false, false, false), (false, false));
-        assert_eq!(output_policy(false, false, true), (true, false));
-        assert_eq!(output_policy(true, true, false), (true, false));
-        assert_eq!(output_policy(true, false, false), (true, true));
+        assert_eq!(output_policy(false, false, false, false), (false, false));
+        assert_eq!(output_policy(false, false, false, true), (true, false));
+        assert_eq!(output_policy(true, true, false, false), (true, false));
+        assert_eq!(output_policy(true, false, true, false), (true, false));
+        assert_eq!(output_policy(true, false, false, false), (true, true));
+    }
+
+    #[test]
+    fn shell_events_use_shared_categories_without_changing_json() {
+        for (kind, expected) in [
+            ("error", "ERROR: body"),
+            ("warning", "WARNING: body"),
+            ("activity", "WORKING: body"),
+            ("progress", "WORKING: body"),
+            ("plan", "PROMPT: body"),
+            ("result", "TASC: body"),
+            ("approved", "DONE: body"),
+            ("next", "NEXT: body"),
+            ("cancelled", "INFO: body"),
+        ] {
+            assert_eq!(shell_event_output(kind, "body", false), expected);
+            assert_eq!(
+                shell_event_output(kind, "body", true),
+                serde_json::json!({
+                    "schemaVersion": 1,
+                    "command": "agent.event",
+                    "type": kind,
+                    "message": "body"
+                })
+                .to_string()
+            );
+        }
     }
 
     #[test]

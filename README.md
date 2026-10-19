@@ -34,6 +34,8 @@ tasc state status
 
 `tasc --banner` shows the static TASC terminal banner in a terminal session and prints a safe static render when output is piped.
 
+Human Presentation Events share the labels `› Input`, `◆ TASC`, `? Prompt`, `· Info`, `... Working`, `! Warning`, `× Error`, `✓ Done`, and `↳ Next` across the Agent Session, CLI diagnostics, and installers. Capable terminals color only the glyph and label, leaving body text in the terminal foreground. With `NO_COLOR` (including an empty value), piped output, or `TERM=dumb`, events use plain ASCII labels such as `INFO:`, `ERROR:`, and `DONE:` without ANSI, animation, or redraw. Prompts, progress, warnings, and errors use stderr; results use stdout. JSON output keeps its existing envelopes and exit codes without presentation labels or decoration.
+
 `tasc setup` offers the optional first-party Command Skill. It never installs it without your choice.
 
 ## Common tasks
