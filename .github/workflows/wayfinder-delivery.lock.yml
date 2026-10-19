@@ -1,5 +1,5 @@
-# gh-aw-metadata: {"schema_version":"v4","frontmatter_hash":"3af91d57cbbe3a407de6a60ea9ba71647efe6c62ccb9fe0fd493b0be8ee408e7","body_hash":"ce257cafa5c36ea487e6ece64b7b3d5d349e1616318bf72cf4ff66ae498621b9","compiler_version":"v0.89.21","strict":true,"agent_id":"copilot","engine_versions":{"copilot":"1.0.87"}}
-# gh-aw-manifest: {"version":1,"secrets":["GH_AW_AGENT_TOKEN","GH_AW_DEFAULT_OTLP_ENDPOINT","GH_AW_DEFAULT_OTLP_HEADERS","GH_AW_GITHUB_MCP_SERVER_TOKEN","GH_AW_GITHUB_TOKEN","GITHUB_TOKEN"],"actions":[{"repo":"actions/checkout","sha":"3d3c42e5aac5ba805825da76410c181273ba90b1","version":"v7.0.1"},{"repo":"actions/download-artifact","sha":"3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c","version":"v8.0.1"},{"repo":"actions/github-script","sha":"3a2844b7e9c422d3c10d287c895573f7108da1b3","version":"v9.0.0"},{"repo":"actions/setup-node","sha":"820762786026740c76f36085b0efc47a31fe5020","version":"v7.0.0"},{"repo":"actions/upload-artifact","sha":"043fb46d1a93c77aae656e7c1c64a875d1fc6a0a","version":"v7.0.1"},{"repo":"github/gh-aw-actions/setup","sha":"924af5fdc64061cfbf66fb584c8b07e2ac230c60","version":"v0.89.21"}],"containers":[{"image":"ghcr.io/github/gh-aw-firewall/agent:0.28.23","digest":"sha256:2c78aaba1c108e130e2d6d01e4f2cca334ea04c53e6f258913ac34173fe7e3b2","pinned_image":"ghcr.io/github/gh-aw-firewall/agent:0.28.23@sha256:2c78aaba1c108e130e2d6d01e4f2cca334ea04c53e6f258913ac34173fe7e3b2"},{"image":"ghcr.io/github/gh-aw-firewall/api-proxy:0.28.23","digest":"sha256:c15c3d1208df10c5b588a3657be53742aa982ae0909d1eb1812525268794ca64","pinned_image":"ghcr.io/github/gh-aw-firewall/api-proxy:0.28.23@sha256:c15c3d1208df10c5b588a3657be53742aa982ae0909d1eb1812525268794ca64"},{"image":"ghcr.io/github/gh-aw-firewall/cli-proxy:0.28.23","digest":"sha256:9e31a6e518eba44652b9ae94ce55c3b6958e06290c3b81b08de4174751bb439a","pinned_image":"ghcr.io/github/gh-aw-firewall/cli-proxy:0.28.23@sha256:9e31a6e518eba44652b9ae94ce55c3b6958e06290c3b81b08de4174751bb439a"},{"image":"ghcr.io/github/gh-aw-firewall/squid:0.28.23","digest":"sha256:02ffc56dd40158223064ef03a78c2d9717473c93723b4e403d455ea6f0b09ae0","pinned_image":"ghcr.io/github/gh-aw-firewall/squid:0.28.23@sha256:02ffc56dd40158223064ef03a78c2d9717473c93723b4e403d455ea6f0b09ae0"},{"image":"ghcr.io/github/gh-aw-mcpg:v0.4.25","digest":"sha256:9be0a86220e807a0ecc89e53d7453468f7a53fbc6b3d1efd2299025ffe01d086","pinned_image":"ghcr.io/github/gh-aw-mcpg:v0.4.25@sha256:9be0a86220e807a0ecc89e53d7453468f7a53fbc6b3d1efd2299025ffe01d086"},{"image":"ghcr.io/github/gh-aw-node","digest":"sha256:11c2c544876cdbaffefe0f7f1283b74838c209654b4934a78e23ed11f750490f","pinned_image":"ghcr.io/github/gh-aw-node@sha256:11c2c544876cdbaffefe0f7f1283b74838c209654b4934a78e23ed11f750490f"},{"image":"ghcr.io/github/github-mcp-server:v1.12.2","digest":"sha256:508a0857ec762b1ab1cece29193345b501fab1dd9d1228a7b617062954cecac6","pinned_image":"ghcr.io/github/github-mcp-server:v1.12.2@sha256:508a0857ec762b1ab1cece29193345b501fab1dd9d1228a7b617062954cecac6"}],"mcp_servers":[{"name":"safeoutputs","tools":["add_comment","assign_to_agent","close_issue","merge_pull_request","missing_data","missing_tool","noop"]}]}
+# gh-aw-metadata: {"schema_version":"v4","frontmatter_hash":"37b2221211c26708ab4ca7af5bbe6b6baebe4506fac19670f536b1f5b8f40381","body_hash":"051602d86b3c75bf4e99e034a5188d5e8c4e4af36717c9aa82e6247cb89123fe","compiler_version":"v0.89.21","strict":true,"agent_id":"copilot","engine_versions":{"copilot":"1.0.87"}}
+# gh-aw-manifest: {"version":1,"secrets":["GH_AW_AGENT_TOKEN","GH_AW_DEFAULT_OTLP_ENDPOINT","GH_AW_DEFAULT_OTLP_HEADERS","GH_AW_GITHUB_MCP_SERVER_TOKEN","GH_AW_GITHUB_TOKEN","GITHUB_TOKEN"],"actions":[{"repo":"actions/checkout","sha":"3d3c42e5aac5ba805825da76410c181273ba90b1","version":"v7.0.1"},{"repo":"actions/download-artifact","sha":"3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c","version":"v8.0.1"},{"repo":"actions/github-script","sha":"3a2844b7e9c422d3c10d287c895573f7108da1b3","version":"v9.0.0"},{"repo":"actions/setup-node","sha":"820762786026740c76f36085b0efc47a31fe5020","version":"v7.0.0"},{"repo":"actions/upload-artifact","sha":"043fb46d1a93c77aae656e7c1c64a875d1fc6a0a","version":"v7.0.1"},{"repo":"github/gh-aw-actions/setup","sha":"924af5fdc64061cfbf66fb584c8b07e2ac230c60","version":"v0.89.21"}],"containers":[{"image":"ghcr.io/github/gh-aw-firewall/agent:0.28.23","digest":"sha256:2c78aaba1c108e130e2d6d01e4f2cca334ea04c53e6f258913ac34173fe7e3b2","pinned_image":"ghcr.io/github/gh-aw-firewall/agent:0.28.23@sha256:2c78aaba1c108e130e2d6d01e4f2cca334ea04c53e6f258913ac34173fe7e3b2"},{"image":"ghcr.io/github/gh-aw-firewall/api-proxy:0.28.23","digest":"sha256:c15c3d1208df10c5b588a3657be53742aa982ae0909d1eb1812525268794ca64","pinned_image":"ghcr.io/github/gh-aw-firewall/api-proxy:0.28.23@sha256:c15c3d1208df10c5b588a3657be53742aa982ae0909d1eb1812525268794ca64"},{"image":"ghcr.io/github/gh-aw-firewall/cli-proxy:0.28.23","digest":"sha256:9e31a6e518eba44652b9ae94ce55c3b6958e06290c3b81b08de4174751bb439a","pinned_image":"ghcr.io/github/gh-aw-firewall/cli-proxy:0.28.23@sha256:9e31a6e518eba44652b9ae94ce55c3b6958e06290c3b81b08de4174751bb439a"},{"image":"ghcr.io/github/gh-aw-firewall/squid:0.28.23","digest":"sha256:02ffc56dd40158223064ef03a78c2d9717473c93723b4e403d455ea6f0b09ae0","pinned_image":"ghcr.io/github/gh-aw-firewall/squid:0.28.23@sha256:02ffc56dd40158223064ef03a78c2d9717473c93723b4e403d455ea6f0b09ae0"},{"image":"ghcr.io/github/gh-aw-mcpg:v0.4.25","digest":"sha256:9be0a86220e807a0ecc89e53d7453468f7a53fbc6b3d1efd2299025ffe01d086","pinned_image":"ghcr.io/github/gh-aw-mcpg:v0.4.25@sha256:9be0a86220e807a0ecc89e53d7453468f7a53fbc6b3d1efd2299025ffe01d086"},{"image":"ghcr.io/github/gh-aw-node","digest":"sha256:11c2c544876cdbaffefe0f7f1283b74838c209654b4934a78e23ed11f750490f","pinned_image":"ghcr.io/github/gh-aw-node@sha256:11c2c544876cdbaffefe0f7f1283b74838c209654b4934a78e23ed11f750490f"},{"image":"ghcr.io/github/github-mcp-server:v1.12.2","digest":"sha256:508a0857ec762b1ab1cece29193345b501fab1dd9d1228a7b617062954cecac6","pinned_image":"ghcr.io/github/github-mcp-server:v1.12.2@sha256:508a0857ec762b1ab1cece29193345b501fab1dd9d1228a7b617062954cecac6"}],"has_pull_request":true,"mcp_servers":[{"name":"safeoutputs","tools":["add_comment","assign_to_agent","close_issue","mark_pull_request_as_ready_for_review","merge_pull_request","missing_data","missing_tool","noop"]}]}
 # This file was automatically generated by gh-aw (v0.89.21). DO NOT EDIT. To debug this workflow, load the skill at https://github.com/github/gh-aw/blob/main/debug.md
 #
 #    ___                   _   _
@@ -66,6 +66,9 @@ on:
       - unlabeled
       - assigned
       - unassigned
+  pull_request:
+    types:
+      - ready_for_review
   schedule:
     - cron: "0/30 * * * *"  # Friendly format: every 30 minutes (scattered)
   workflow_dispatch:
@@ -75,12 +78,20 @@ on:
         description: "Agent caller context (used internally by Agentic Workflows)."
         required: false
         type: string
+  workflow_run:
+    # zizmor: ignore[dangerous-triggers] - workflow_run trigger is secured with role and fork validation
+    branches:
+      - copilot/**
+    types:
+      - completed
+    workflows:
+      - Running Copilot cloud agent
 
 permissions: {}
 
 concurrency:
-  group: "gh-aw-${{ github.workflow }}-${{ github.event.issue.number || github.run_id }}"
-  queue: max
+  group: "gh-aw-${{ github.workflow }}-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}"
+  cancel-in-progress: true
 
 run-name: "Deliver planned wayfinder maps"
 
@@ -95,7 +106,12 @@ env:
 jobs:
   activation:
     needs: pre_activation
-    if: needs.pre_activation.outputs.activated == 'true'
+    # zizmor: ignore[dangerous-triggers] - workflow_run trigger is secured with role and fork validation
+    if: >
+      (needs.pre_activation.outputs.activated == 'true' && ((github.event_name != 'pull_request' || github.event.pull_request.head.repo.id == github.repository_id) &&
+      ((github.event_name != 'pull_request' && github.event_name != 'pull_request_review') || github.event.pull_request.stack == null ||
+      github.event.pull_request.stack.position == github.event.pull_request.stack.size))) && (github.event_name != 'workflow_run' ||
+      github.event.workflow_run.repository.id == github.repository_id && (!(github.event.workflow_run.repository.fork)))
     runs-on: ubuntu-slim
     permissions:
       actions: read
@@ -303,7 +319,7 @@ jobs:
           GH_AW_GITHUB_WORKSPACE: ${{ github.workspace }}
           GH_AW_INCLUDE_PR_CONTEXT: ${{ (github.event_name == 'issue_comment' && github.event.issue.pull_request != null) || github.event_name == 'pull_request_review_comment' || github.event_name == 'pull_request_review' }}
           GH_AW_PROMPT_CONTENT_0000: "<system>\n"
-          GH_AW_PROMPT_CONTENT_0001: "<safe-output-tools>\nTools: add_comment, close_issue, assign_to_agent, missing_tool, missing_data, noop\n"
+          GH_AW_PROMPT_CONTENT_0001: "<safe-output-tools>\nTools: add_comment, close_issue, mark_pull_request_as_ready_for_review, assign_to_agent, missing_tool, missing_data, noop\n"
           GH_AW_PROMPT_CONTENT_0002: "</safe-output-tools>\n"
           GH_AW_PROMPT_CONTENT_0003: "<github-context>\nThe following GitHub context information is available for this workflow:\n{{#if github.actor}}\n- **actor**: __GH_AW_GITHUB_ACTOR__\n{{/if}}\n{{#if github.repository}}\n- **repository**: __GH_AW_GITHUB_REPOSITORY__\n{{/if}}\n{{#if github.workspace}}\n- **workspace**: __GH_AW_GITHUB_WORKSPACE__\n{{/if}}\n{{#if github.event.issue.number || (github.aw.context.item_type == 'issue' && github.aw.context.item_number)}}\n- **issue-number**: #__GH_AW_EXPR_802A9F6A__\n{{/if}}\n{{#if github.event.discussion.number || (github.aw.context.item_type == 'discussion' && github.aw.context.item_number)}}\n- **discussion-number**: #__GH_AW_EXPR_1A3A194A__\n{{/if}}\n{{#if github.event.pull_request.number || (github.aw.context.item_type == 'pull_request' && github.aw.context.item_number)}}\n- **pull-request-number**: #__GH_AW_EXPR_463A214A__\n{{/if}}\n{{#if github.event.comment.id || github.aw.context.comment_id}}\n- **comment-id**: __GH_AW_EXPR_FF1D34CE__\n{{/if}}\n{{#if github.run_id}}\n- **workflow-run-id**: __GH_AW_GITHUB_RUN_ID__\n{{/if}}\n</github-context>\n\n"
           GH_AW_PROMPT_CONTENT_0004: "</system>\n"
@@ -578,7 +594,7 @@ jobs:
         env:
           GH_AW_FILE_ROOT: "${{ runner.temp }}/gh-aw"
           GH_AW_FILE_CONFIG: "{\"files\":[{\"path\":\"safeoutputs/config.json\",\"content_env\":\"GH_AW_SAFE_OUTPUTS_CONFIG\"}]}"
-          GH_AW_SAFE_OUTPUTS_CONFIG: "{\"add_comment\":{\"hide_older_comments\":false,\"max\":1,\"target\":\"*\"},\"assign_to_agent\":{\"allowed\":[\"copilot\"],\"max\":1,\"target\":\"*\"},\"close_issue\":{\"max\":1,\"state_reason\":\"completed\",\"target\":\"*\"},\"create_report_incomplete_issue\":{},\"merge_pull_request\":{\"allowed_branches\":[\"copilot/*\",\"copilot/**\"],\"max\":1,\"target\":\"*\"},\"missing_data\":{},\"missing_tool\":{},\"noop\":{\"max\":1,\"report-as-issue\":\"false\"},\"report_incomplete\":{}}"
+          GH_AW_SAFE_OUTPUTS_CONFIG: "{\"add_comment\":{\"hide_older_comments\":false,\"max\":1,\"target\":\"*\"},\"assign_to_agent\":{\"allowed\":[\"copilot\"],\"max\":1,\"target\":\"*\"},\"close_issue\":{\"max\":1,\"state_reason\":\"completed\",\"target\":\"*\"},\"create_report_incomplete_issue\":{},\"mark_pull_request_as_ready_for_review\":{\"max\":1,\"target\":\"*\"},\"merge_pull_request\":{\"allowed_branches\":[\"copilot/*\",\"copilot/**\"],\"max\":1,\"target\":\"*\"},\"missing_data\":{},\"missing_tool\":{},\"noop\":{\"max\":1,\"report-as-issue\":\"false\"},\"report_incomplete\":{}}"
         with:
           script: |
             const path = require('path');
@@ -594,7 +610,8 @@ jobs:
               "description_suffixes": {
                 "add_comment": " CONSTRAINTS: Maximum 1 comment(s) can be added. Target: *. Supports reply_to_id for discussion threading.",
                 "assign_to_agent": " CONSTRAINTS: Maximum 1 issue(s) can be assigned to agent.",
-                "close_issue": " CONSTRAINTS: Maximum 1 issue(s) can be closed. Target: *."
+                "close_issue": " CONSTRAINTS: Maximum 1 issue(s) can be closed. Target: *.",
+                "mark_pull_request_as_ready_for_review": " CONSTRAINTS: Maximum 1 pull request(s) can be marked as ready for review."
               },
               "repo_params": {},
               "dynamic_tools": []
@@ -720,6 +737,24 @@ jobs:
                   },
                   "suggest": {
                     "type": "boolean"
+                  }
+                }
+              },
+              "mark_pull_request_as_ready_for_review": {
+                "defaultMax": 1,
+                "fields": {
+                  "pull_request_number": {
+                    "issueOrPRNumber": true
+                  },
+                  "reason": {
+                    "required": true,
+                    "type": "string",
+                    "sanitize": true,
+                    "maxLength": 65000
+                  },
+                  "repo": {
+                    "type": "string",
+                    "maxLength": 256
                   }
                 }
               },
@@ -1848,7 +1883,10 @@ jobs:
 
   pre_activation:
     if: >
-      github.event_name != 'issue_comment' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+      (github.event_name != 'issue_comment' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) &&
+      ((github.event_name != 'pull_request' || github.event.pull_request.head.repo.id == github.repository_id) &&
+      ((github.event_name != 'pull_request' && github.event_name != 'pull_request_review') || github.event.pull_request.stack == null ||
+      github.event.pull_request.stack.position == github.event.pull_request.stack.size))
     runs-on: ubuntu-slim
     env:
       GH_AW_RUNTIME_FEATURES: ${{ vars.GH_AW_RUNTIME_FEATURES }}
@@ -1907,6 +1945,7 @@ jobs:
       GH_AW_DETECTION_REASON: ${{ needs.detection.outputs.detection_reason }}
       GH_AW_ENGINE_ID: "copilot"
       GH_AW_ENGINE_MODEL: ${{ needs.agent.outputs.model }}
+      GH_AW_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
       GH_AW_RUNTIME_FEATURES: ${{ vars.GH_AW_RUNTIME_FEATURES }}
       GH_AW_THREAT_DETECTION_AIC: ${{ needs.detection.outputs.aic }}
       GH_AW_WORKFLOW_ID: "wayfinder-delivery"
@@ -1982,7 +2021,7 @@ jobs:
           GH_AW_COMMENT_ID: ${{ needs.activation.outputs.comment_id }}
           GITHUB_SERVER_URL: ${{ github.server_url }}
           GITHUB_API_URL: ${{ github.api_url }}
-          GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG: "{\"add_comment\":{\"hide_older_comments\":false,\"max\":1,\"target\":\"*\"},\"assign_to_agent\":{\"allowed\":[\"copilot\"],\"max\":1,\"target\":\"*\"},\"close_issue\":{\"max\":1,\"state_reason\":\"completed\",\"target\":\"*\"},\"create_report_incomplete_issue\":{},\"merge_pull_request\":{\"allowed_branches\":[\"copilot/*\",\"copilot/**\"],\"max\":1,\"target\":\"*\"},\"missing_data\":{},\"missing_tool\":{},\"noop\":{\"max\":1,\"report-as-issue\":\"false\"},\"report_incomplete\":{}}"
+          GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG: "{\"add_comment\":{\"hide_older_comments\":false,\"max\":1,\"target\":\"*\"},\"assign_to_agent\":{\"allowed\":[\"copilot\"],\"max\":1,\"target\":\"*\"},\"close_issue\":{\"max\":1,\"state_reason\":\"completed\",\"target\":\"*\"},\"create_report_incomplete_issue\":{},\"mark_pull_request_as_ready_for_review\":{\"max\":1,\"target\":\"*\"},\"merge_pull_request\":{\"allowed_branches\":[\"copilot/*\",\"copilot/**\"],\"max\":1,\"target\":\"*\"},\"missing_data\":{},\"missing_tool\":{},\"noop\":{\"max\":1,\"report-as-issue\":\"false\"},\"report_incomplete\":{}}"
           GH_AW_ASSIGN_TO_AGENT_TOKEN: ${{ secrets.GH_AW_AGENT_TOKEN || secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
         with:
           github-token: ${{ secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}

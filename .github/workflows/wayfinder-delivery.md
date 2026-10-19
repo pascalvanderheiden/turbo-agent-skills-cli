@@ -6,6 +6,12 @@ on:
     types: [closed, reopened, labeled, unlabeled, assigned, unassigned]
   issue_comment:
     types: [created]
+  pull_request:
+    types: [ready_for_review]
+  workflow_run:
+    workflows: ["Running Copilot cloud agent"]
+    types: [completed]
+    branches: ["copilot/**"]
   schedule: every 30 minutes
   workflow_dispatch:
 permissions:
@@ -28,6 +34,9 @@ safe-outputs:
     target: "*"
     max: 1
     hide-older-comments: false
+  mark-pull-request-as-ready-for-review:
+    target: "*"
+    max: 1
   merge-pull-request:
     target: "*"
     allowed-branches: ["copilot/*", "copilot/**"]
@@ -83,10 +92,25 @@ other work in that run.
 
 For the active ticket, identify a pull request authored by Copilot or from a
 `copilot/` branch that explicitly closes the ticket and references the parent
-map. Merge at most one pull request per run, without requesting or performing a
-code review. A pending review, review decision, review thread, or reviewer
-assignment is never a blocker and must not be requested or awaited. Merge
-directly once all of these are true:
+map.
+
+If that pull request is still a draft, treat either of these as proof that
+Copilot has finished:
+
+- its matching `Running Copilot cloud agent` workflow run completed
+  successfully; or
+- its timeline contains `copilot_work_finished` or a review request created by
+  Copilot after the latest commit.
+
+When Copilot has finished, mark the pull request ready for review with
+`mark-pull-request-as-ready-for-review` and stop that run. Do not request,
+perform, or wait for a review. The resulting `ready_for_review` event starts the
+next delivery run.
+
+For a non-draft pull request, merge at most one pull request per run, without
+requesting or performing a code review. A pending review, review decision,
+review thread, or reviewer assignment is never a blocker and must not be
+requested or awaited. Merge directly once all of these are true:
 
 - it is open, non-draft, and GitHub reports it mergeable;
 - all required checks have completed successfully;
