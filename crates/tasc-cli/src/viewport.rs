@@ -67,11 +67,13 @@ struct PickerItem {
     value: String,
     session: bool,
     profile: bool,
+    label: String,
 }
 
 enum PickerKind {
     Model,
     Scope(String),
+    Inventory { command: String, multi: bool },
 }
 
 struct PickerLevel {
@@ -80,6 +82,7 @@ struct PickerLevel {
     filter: String,
     selected: usize,
     status: Option<String>,
+    chosen: Vec<String>,
 }
 
 struct Picker {
@@ -93,7 +96,10 @@ impl PickerLevel {
         let filter = self.filter.to_lowercase();
         self.items
             .iter()
-            .filter(|item| item.value.to_lowercase().contains(&filter))
+            .filter(|item| {
+                item.value.to_lowercase().contains(&filter)
+                    || item.label.to_lowercase().contains(&filter)
+            })
             .collect()
     }
 }
@@ -180,6 +186,47 @@ impl Viewport {
                 filter: String::new(),
                 selected: 0,
                 status: Some("Loading models…".into()),
+                chosen: Vec::new(),
+            }],
+        });
+    }
+
+    /// Opens an Inventory Projection Picker over `(stable id, label)` entries.
+    /// Completing it only yields a slash command line; mutating commands still
+    /// go through the plan and approval flow.
+    pub fn open_inventory_picker(
+        &mut self,
+        command: &str,
+        multi: bool,
+        entries: &[(String, String)],
+    ) {
+        self.palette = None;
+        let (original_composer, original_cursor) = self
+            .picker
+            .take()
+            .map(|picker| (picker.original_composer, picker.original_cursor))
+            .unwrap_or_else(|| (self.composer.clone(), self.cursor));
+        self.picker = Some(Picker {
+            original_composer,
+            original_cursor,
+            levels: vec![PickerLevel {
+                kind: PickerKind::Inventory {
+                    command: command.trim_start_matches('/').to_string(),
+                    multi,
+                },
+                items: entries
+                    .iter()
+                    .map(|(id, label)| PickerItem {
+                        value: id.clone(),
+                        session: false,
+                        profile: false,
+                        label: label.clone(),
+                    })
+                    .collect(),
+                filter: String::new(),
+                selected: 0,
+                status: None,
+                chosen: Vec::new(),
             }],
         });
     }
@@ -198,6 +245,7 @@ impl Viewport {
                     value: id.to_string(),
                     session: id == session,
                     profile: Some(id) == profile,
+                    label: String::new(),
                 })
                 .collect();
         }
@@ -579,7 +627,41 @@ impl Viewport {
         let picker = self.picker.as_mut()?;
         let level = picker.levels.last_mut()?;
         let count = level.matches().len();
+        let multi = matches!(level.kind, PickerKind::Inventory { multi: true, .. });
         match key {
+            Key::Text(text) if multi && text == " " => {
+                if count > 0 {
+                    let id = level.matches()[level.selected.min(count - 1)].value.clone();
+                    match level.chosen.iter().position(|chosen| *chosen == id) {
+                        Some(position) => {
+                            level.chosen.remove(position);
+                        }
+                        None => level.chosen.push(id),
+                    }
+                }
+                level.status = None;
+            }
+            Key::Delete if multi => level.chosen.clear(),
+            Key::Enter if enabled && multi => {
+                if level.chosen.is_empty() {
+                    level.status = Some("Select at least one with Space".into());
+                } else if let PickerKind::Inventory { command, .. } = &level.kind {
+                    let ordered = level
+                        .items
+                        .iter()
+                        .filter(|item| level.chosen.contains(&item.value))
+                        .map(|item| item.value.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let line = format!("/{command} {ordered}");
+                    if let Some(picker) = self.picker.take() {
+                        self.composer = picker.original_composer;
+                        self.cursor = picker.original_cursor.min(self.composer.len());
+                    }
+                    self.clamp_scroll();
+                    return Some(line);
+                }
+            }
             Key::Text(text) | Key::Paste(text) => {
                 let text = safe_text(&text).replace('\n', "");
                 level.filter.push_str(&text);
@@ -619,12 +701,23 @@ impl Viewport {
                                     value: scope.into(),
                                     session: false,
                                     profile: false,
+                                    label: String::new(),
                                 })
                                 .collect(),
                             filter: String::new(),
                             selected: 0,
                             status: None,
+                            chosen: Vec::new(),
                         });
+                    }
+                    PickerKind::Inventory { command, .. } => {
+                        let line = format!("/{command} {value}");
+                        if let Some(picker) = self.picker.take() {
+                            self.composer = picker.original_composer;
+                            self.cursor = picker.original_cursor.min(self.composer.len());
+                        }
+                        self.clamp_scroll();
+                        return Some(line);
                     }
                     PickerKind::Scope(model) => {
                         let command = if value == "profile" {
@@ -663,7 +756,11 @@ impl Viewport {
         let title = match &level.kind {
             PickerKind::Model => "Model Picker".to_string(),
             PickerKind::Scope(model) => format!("Scope Picker · {}", safe_text(model)),
+            PickerKind::Inventory { command, .. } => {
+                format!("Inventory Picker · /{}", safe_text(command))
+            }
         };
+        let multi = matches!(level.kind, PickerKind::Inventory { multi: true, .. });
         let header = if level.filter.is_empty() {
             format!("{title} · type to filter")
         } else {
@@ -671,7 +768,11 @@ impl Viewport {
         };
         let mut rows = vec![header];
         let matches = level.matches();
-        if let Some(status) = &level.status {
+        if let Some(status) = level
+            .status
+            .as_ref()
+            .filter(|_| !multi || matches.is_empty())
+        {
             rows.push(status.clone());
         } else if matches.is_empty() {
             rows.push("No matches · Esc clears the filter".into());
@@ -695,7 +796,19 @@ impl Viewport {
                     (PickerKind::Scope(_), "profile") => "Profile default".to_string(),
                     _ => item.value.clone(),
                 };
-                let mut row = format!("{marker} {}", safe_text(&label));
+                let mut row = if multi {
+                    let check = if level.chosen.contains(&item.value) {
+                        "[x]"
+                    } else {
+                        "[ ]"
+                    };
+                    format!("{marker} {check} {}", safe_text(&label))
+                } else {
+                    format!("{marker} {}", safe_text(&label))
+                };
+                if matches!(level.kind, PickerKind::Inventory { .. }) && !item.label.is_empty() {
+                    row = format!("{row} · {}", safe_text(&item.label));
+                }
                 if item.session {
                     row.push_str(" · active session");
                 }
@@ -704,11 +817,31 @@ impl Viewport {
                 }
                 rows.push(row);
             }
-            rows.push(format!(
-                "Selection {}/{} · Enter select · Esc back",
-                selected + 1,
-                matches.len()
-            ));
+            if multi {
+                if let Some(status) = &level.status {
+                    rows.push(status.clone());
+                }
+                rows.push(format!(
+                    "Showing {}-{} of {} · {} selected · Space toggle · Enter confirm · Del clear · Esc back",
+                    start + 1,
+                    start + visible,
+                    matches.len(),
+                    level.chosen.len()
+                ));
+            } else if matches!(level.kind, PickerKind::Inventory { .. }) {
+                rows.push(format!(
+                    "Showing {}-{} of {} · Enter select · Esc back",
+                    start + 1,
+                    start + visible,
+                    matches.len()
+                ));
+            } else {
+                rows.push(format!(
+                    "Selection {}/{} · Enter select · Esc back",
+                    selected + 1,
+                    matches.len()
+                ));
+            }
         }
         rows.truncate(available);
         rows
@@ -1428,6 +1561,77 @@ mod tests {
         view.key(Key::PageUp);
         assert!(view.render().rows.join("\n").contains("Selection 5/21"));
         assert_grid(&view.render(), 60, 16);
+    }
+
+    fn inventory_entries(count: usize) -> Vec<(String, String)> {
+        (1..=count)
+            .map(|n| (format!("owner/skill-{n}"), format!("Skill {n}")))
+            .collect()
+    }
+
+    fn inventory_view(count: usize, multi: bool) -> Viewport {
+        let mut view = viewport();
+        view.open_inventory_picker("skill remove", multi, &inventory_entries(count));
+        view
+    }
+
+    #[test]
+    fn inventory_picker_renders_only_visible_window_with_range_and_total() {
+        let mut view = inventory_view(500, true);
+        let rendered = view.render().rows.join("\n");
+        assert!(rendered.contains("Showing 1-8 of 500"));
+        assert!(rendered.contains("0 selected"));
+        assert!(rendered.contains("owner/skill-8"));
+        assert!(!rendered.contains("owner/skill-9 "));
+        for _ in 0..10 {
+            view.key(Key::Down);
+        }
+        let rendered = view.render().rows.join("\n");
+        assert!(rendered.contains("Showing 4-11 of 500"));
+    }
+
+    #[test]
+    fn inventory_selection_survives_filtering_and_scrolling_by_stable_id() {
+        let mut view = inventory_view(30, true);
+        view.key(Key::Text(" ".into()));
+        for _ in 0..19 {
+            view.key(Key::Down);
+        }
+        view.key(Key::Text(" ".into()));
+        view.key(Key::Text("skill-2".into()));
+        view.key(Key::Text(" ".into()));
+        view.key(Key::Escape);
+        let rendered = view.render().rows.join("\n");
+        assert!(rendered.contains("3 selected"), "{rendered}");
+        let command = view.key(Key::Enter).unwrap();
+        assert_eq!(
+            command,
+            "/skill remove owner/skill-1 owner/skill-2 owner/skill-20"
+        );
+        assert!(!view.picker_open());
+    }
+
+    #[test]
+    fn inventory_clear_and_empty_confirm_do_not_submit() {
+        let mut view = inventory_view(3, true);
+        view.key(Key::Text(" ".into()));
+        view.key(Key::Delete);
+        assert!(view.render().rows.join("\n").contains("0 selected"));
+        assert!(view.key(Key::Enter).is_none());
+        assert!(view.picker_open());
+        assert!(view
+            .render()
+            .rows
+            .join("\n")
+            .contains("Select at least one"));
+    }
+
+    #[test]
+    fn inventory_single_select_returns_command_line_only() {
+        let mut view = inventory_view(3, false);
+        view.key(Key::Down);
+        assert_eq!(view.key(Key::Enter).unwrap(), "/skill remove owner/skill-2");
+        assert!(!view.picker_open());
     }
 
     #[test]
