@@ -1,4 +1,10 @@
-use crate::presentation::{safe_text, Event};
+use crate::{
+    commands::{
+        alias_target, available_during_operation, canonical_command_input, is_complete_command,
+        ranked_commands, CommandSafety, SLASH_COMMANDS,
+    },
+    presentation::{safe_text, Event},
+};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -14,6 +20,9 @@ pub enum Key {
     Right,
     Home,
     End,
+    Up,
+    Down,
+    Escape,
     PageUp,
     PageDown,
 }
@@ -46,7 +55,15 @@ pub struct Viewport {
     cursor: usize,
     scroll: usize,
     new_output: bool,
+    palette: Option<Palette>,
+    active_operation: bool,
     pub footer: Footer,
+}
+
+struct Palette {
+    original_composer: String,
+    original_cursor: usize,
+    selected: Option<usize>,
 }
 
 impl Viewport {
@@ -60,6 +77,8 @@ impl Viewport {
             cursor: 0,
             scroll: 0,
             new_output: false,
+            palette: None,
+            active_operation: false,
             footer: Footer {
                 state: "Idle".into(),
                 profile,
@@ -73,6 +92,37 @@ impl Viewport {
         self.width = width;
         self.height = height;
         self.clamp_scroll();
+    }
+
+    pub fn set_operation_active(&mut self, active: bool) {
+        self.active_operation = active;
+        self.refresh_palette_selection();
+    }
+
+    pub fn open_palette_browse(&mut self) {
+        let original_composer = self
+            .palette
+            .as_ref()
+            .map(|palette| palette.original_composer.clone())
+            .unwrap_or_else(|| self.composer.clone());
+        let original_cursor = self
+            .palette
+            .as_ref()
+            .map(|palette| palette.original_cursor)
+            .unwrap_or(self.cursor);
+        let prefix = self
+            .composer
+            .char_indices()
+            .find(|(_, character)| !character.is_whitespace())
+            .map_or(self.composer.as_str(), |(index, _)| &self.composer[..index]);
+        self.composer = format!("{prefix}/");
+        self.cursor = self.composer.len();
+        self.palette = Some(Palette {
+            original_composer,
+            original_cursor,
+            selected: None,
+        });
+        self.refresh_palette_selection();
     }
 
     pub fn content(&mut self, body: &str) {
@@ -132,12 +182,11 @@ impl Viewport {
     }
 
     fn transcript_height(&self) -> usize {
-        self.height.saturating_sub(
-            wrap(&self.composer, self.width.saturating_sub(2).max(1))
-                .len()
-                .clamp(1, 5)
-                + 1,
-        )
+        let composer_height = wrap(&self.composer, self.width.saturating_sub(2).max(1))
+            .len()
+            .clamp(1, 5);
+        self.height
+            .saturating_sub(composer_height + 1 + self.palette_rows(composer_height).len())
     }
 
     fn max_scroll(&self) -> usize {
@@ -168,6 +217,8 @@ impl Viewport {
     }
 
     pub fn key(&mut self, key: Key) -> Option<String> {
+        let previous_composer = self.composer.clone();
+        let previous_cursor = self.cursor;
         match key {
             Key::Text(text) | Key::Paste(text) => {
                 let text = text.replace("\r\n", "\n").replace('\r', "\n");
@@ -180,10 +231,10 @@ impl Viewport {
                 self.cursor += 1;
             }
             Key::Enter if self.width >= 60 && self.height >= 16 => {
-                self.cursor = 0;
-                let input = std::mem::take(&mut self.composer);
-                self.clamp_scroll();
-                return Some(input);
+                if self.palette.is_some() {
+                    return self.select_palette_command();
+                }
+                return self.submit_composer();
             }
             Key::Backspace if self.cursor > 0 => {
                 let previous = self.composer[..self.cursor]
@@ -222,6 +273,9 @@ impl Viewport {
                 self.scroll = 0;
                 self.new_output = false;
             }
+            Key::Up if self.palette.is_some() => self.move_palette_selection(false),
+            Key::Down if self.palette.is_some() => self.move_palette_selection(true),
+            Key::Escape if self.palette.is_some() => self.escape_palette(),
             Key::PageUp => {
                 self.scroll = self
                     .scroll
@@ -233,8 +287,264 @@ impl Viewport {
             }
             _ => {}
         }
+        if self.palette.is_none() {
+            if self.palette_query().is_some() {
+                self.palette = Some(Palette {
+                    original_composer: previous_composer,
+                    original_cursor: previous_cursor,
+                    selected: None,
+                });
+                self.refresh_palette_selection();
+            }
+        } else if self.palette_query().is_none() {
+            self.palette = None;
+        } else {
+            self.refresh_palette_selection();
+        }
         self.clamp_scroll();
         None
+    }
+
+    fn submit_composer(&mut self) -> Option<String> {
+        self.cursor = 0;
+        self.palette = None;
+        let input = std::mem::take(&mut self.composer);
+        self.clamp_scroll();
+        Some(input)
+    }
+
+    fn select_palette_command(&mut self) -> Option<String> {
+        let input = self.composer.trim();
+        let canonical_input = canonical_command_input(input);
+        if is_complete_command(input) {
+            if self.active_operation && !available_during_operation(&canonical_input) {
+                return None;
+            }
+            return self.submit_palette_input(canonical_input);
+        }
+        if input
+            .strip_prefix('/')
+            .and_then(|command| command.split_once(char::is_whitespace))
+            .is_some_and(|(_, arguments)| !arguments.trim().is_empty())
+        {
+            return None;
+        }
+        let Some(index) = self.selected_palette_command() else {
+            return None;
+        };
+        let command = &SLASH_COMMANDS[index];
+        if command.name == "help" {
+            self.open_palette_browse();
+            return None;
+        }
+        let prefix = self
+            .composer
+            .char_indices()
+            .find(|(_, character)| !character.is_whitespace())
+            .map_or(self.composer.as_str(), |(index, _)| &self.composer[..index]);
+        let canonical = canonical_command_input(&format!("/{0}", command.syntax));
+        if command.required_arguments {
+            self.composer = format!("{prefix}/{0} ", command.name);
+            self.cursor = self.composer.len();
+            self.palette = None;
+            self.clamp_scroll();
+            None
+        } else {
+            self.submit_palette_input(canonical)
+        }
+    }
+
+    fn submit_palette_input(&mut self, input: String) -> Option<String> {
+        self.palette = None;
+        self.composer.clear();
+        self.cursor = 0;
+        self.clamp_scroll();
+        Some(input)
+    }
+
+    fn escape_palette(&mut self) {
+        let query = self.palette_query().unwrap_or_default().trim();
+        if !query.is_empty() {
+            if let Some(palette) = self.palette.as_ref() {
+                self.composer = palette.original_composer.clone();
+                self.composer.insert(palette.original_cursor, '/');
+                self.cursor = palette.original_cursor + 1;
+            }
+            if let Some(palette) = self.palette.as_mut() {
+                palette.selected = None;
+            }
+            self.refresh_palette_selection();
+            return;
+        }
+        if let Some(palette) = self.palette.take() {
+            self.composer = palette.original_composer;
+            self.cursor = palette.original_cursor.min(self.composer.len());
+        }
+        self.clamp_scroll();
+    }
+
+    fn palette_query(&self) -> Option<&str> {
+        let (index, character) = self
+            .composer
+            .char_indices()
+            .find(|(_, character)| !character.is_whitespace())?;
+        if character == '/' {
+            Some(&self.composer[index + 1..])
+        } else {
+            None
+        }
+    }
+
+    fn palette_matches(&self) -> Vec<usize> {
+        ranked_commands(
+            self.palette_query().unwrap_or_default(),
+            self.active_operation,
+        )
+    }
+
+    fn palette_enabled(&self, index: usize) -> bool {
+        !self.active_operation || SLASH_COMMANDS[index].active_allowed
+    }
+
+    fn selected_palette_command(&self) -> Option<usize> {
+        let matches = self.palette_matches();
+        self.palette
+            .as_ref()
+            .and_then(|palette| palette.selected)
+            .filter(|index| matches.contains(index) && self.palette_enabled(*index))
+            .or_else(|| {
+                matches
+                    .into_iter()
+                    .find(|index| self.palette_enabled(*index))
+            })
+    }
+
+    fn refresh_palette_selection(&mut self) {
+        let matches = self.palette_matches();
+        let current = self
+            .palette
+            .as_ref()
+            .and_then(|palette| palette.selected)
+            .filter(|index| matches.contains(index) && self.palette_enabled(*index));
+        let selected = current.or_else(|| {
+            matches
+                .into_iter()
+                .find(|index| self.palette_enabled(*index))
+        });
+        if let Some(palette) = self.palette.as_mut() {
+            palette.selected = selected;
+        }
+    }
+
+    fn move_palette_selection(&mut self, down: bool) {
+        let choices = self
+            .palette_matches()
+            .into_iter()
+            .filter(|index| self.palette_enabled(*index))
+            .collect::<Vec<_>>();
+        if choices.is_empty() {
+            if let Some(palette) = self.palette.as_mut() {
+                palette.selected = None;
+            }
+            return;
+        }
+        let selected = self.selected_palette_command();
+        let current = selected
+            .and_then(|selected| choices.iter().position(|index| *index == selected))
+            .unwrap_or(0);
+        let next = if down {
+            (current + 1) % choices.len()
+        } else {
+            (current + choices.len() - 1) % choices.len()
+        };
+        if let Some(palette) = self.palette.as_mut() {
+            palette.selected = Some(choices[next]);
+        }
+    }
+
+    fn palette_rows(&self, composer_height: usize) -> Vec<String> {
+        if self.palette.is_none() {
+            return Vec::new();
+        }
+        let available = self.height.saturating_sub(composer_height + 2);
+        if available == 0 {
+            return Vec::new();
+        }
+        let matches = self.palette_matches();
+        let selected = self.selected_palette_command();
+        let query = self.palette_query().unwrap_or_default().trim();
+        let header = alias_target(query).map_or_else(
+            || {
+                if query.is_empty() {
+                    "Command Palette · Browse all commands".into()
+                } else {
+                    format!("Command Palette · /{query}")
+                }
+            },
+            |canonical| format!("Command Palette · /{query} → /{canonical}"),
+        );
+        let details = selected.map(|index| {
+            let command = &SLASH_COMMANDS[index];
+            let arguments = if command.arguments.is_empty() {
+                "none"
+            } else {
+                command.arguments
+            };
+            let safety = match command.safety {
+                CommandSafety::ReadOnly => "Read-only",
+                CommandSafety::PlanAndApproval => "Plan + approval",
+            };
+            (
+                command,
+                arguments.to_string(),
+                format!(
+                    "{safety} · {}",
+                    if self.active_operation {
+                        "Allowed now"
+                    } else {
+                        "Available when idle"
+                    }
+                ),
+            )
+        });
+        let details_rows = if details.is_some() { 4 } else { 0 };
+        let list_room = available.saturating_sub(1 + details_rows);
+        let mut rows = vec![header];
+        if matches.is_empty() {
+            rows.push("No matching Slash Commands · input remains editable".into());
+        } else {
+            let selected_position =
+                selected.and_then(|selected| matches.iter().position(|index| *index == selected));
+            let visible = list_room.min(8).min(matches.len());
+            let start = selected_position
+                .map(|position| position.saturating_sub(visible.saturating_sub(1)))
+                .unwrap_or(0)
+                .min(matches.len().saturating_sub(visible));
+            for index in matches.iter().skip(start).take(visible) {
+                let command = &SLASH_COMMANDS[*index];
+                let marker = if Some(*index) == selected { "›" } else { " " };
+                let availability = if self.active_operation && !command.active_allowed {
+                    " · Available when idle"
+                } else {
+                    ""
+                };
+                rows.push(format!("{marker} /{}{}", command.syntax, availability));
+            }
+        }
+        if let Some((command, arguments, safety)) = details {
+            rows.push(command.description.into());
+            rows.push(format!("Arguments: {arguments}"));
+            rows.push(format!(
+                "Selection {}/{}",
+                selected
+                    .and_then(|index| matches.iter().position(|candidate| *candidate == index))
+                    .map_or(0, |position| position + 1),
+                matches.len(),
+            ));
+            rows.push(safety);
+        }
+        rows.truncate(available);
+        rows
     }
 
     pub fn render(&self) -> Grid {
@@ -252,7 +562,8 @@ impl Viewport {
         let cursor_row = before_cursor.len() - 1;
         let composer_height = composer.len().clamp(1, 5);
         let composer_start = cursor_row.saturating_sub(composer_height - 1);
-        let transcript_height = self.height - composer_height - 1;
+        let palette = self.palette_rows(composer_height);
+        let transcript_height = self.height - composer_height - 1 - palette.len();
         let transcript = self
             .blocks
             .iter()
@@ -275,13 +586,17 @@ impl Viewport {
                 );
             }
         }
+        for (index, line) in palette.iter().enumerate() {
+            rows[transcript_height + index] = fit(line, self.width);
+        }
+        let composer_row_start = transcript_height + palette.len();
         for (index, line) in composer
             .iter()
             .skip(composer_start)
             .take(composer_height)
             .enumerate()
         {
-            rows[transcript_height + index] = fit(
+            rows[composer_row_start + index] = fit(
                 &format!("{}{}", if index == 0 { "› " } else { "  " }, line),
                 self.width,
             );
@@ -300,7 +615,7 @@ impl Viewport {
             rows,
             cursor: Some((
                 2 + UnicodeWidthStr::width(before_cursor.last().unwrap().as_str()),
-                transcript_height + cursor_row - composer_start,
+                composer_row_start + cursor_row - composer_start,
             )),
         }
     }
@@ -415,6 +730,129 @@ mod tests {
             .rows
             .iter()
             .all(|row| UnicodeWidthStr::width(row.as_str()) == width));
+    }
+
+    #[test]
+    fn palette_ranks_aliases_and_previews_the_canonical_command() {
+        let mut view = viewport();
+        view.key(Key::Text("/eval".into()));
+        let grid = view.render();
+        let rendered = grid.rows.join("\n");
+        assert!(rendered.contains("Command Palette · /eval → /evaluation"));
+        assert!(rendered.contains("› /evaluation"));
+        assert!(rendered.contains("Run or inspect skill evaluations."));
+        assert!(rendered.contains("Arguments: OPERATION [ARGUMENTS]"));
+        assert!(rendered.contains("Read-only"), "{rendered}");
+        assert_eq!(
+            rendered.matches("› /evaluation").count(),
+            1,
+            "the compatibility alias must not create a second row"
+        );
+        assert_grid(&grid, 60, 16);
+
+        let mut view = viewport();
+        view.key(Key::Text("/skill".into()));
+        assert!(view.render().rows.join("\n").contains("Plan + approval"));
+    }
+
+    #[test]
+    fn help_opens_the_unfiltered_palette_and_argument_commands_complete_in_place() {
+        let mut view = viewport();
+        view.key(Key::Text("/help".into()));
+        assert_eq!(view.key(Key::Enter).as_deref(), Some("/help"));
+        view.open_palette_browse();
+        let rendered = view.render().rows.join("\n");
+        assert!(rendered.contains("Command Palette · Browse all commands"));
+        assert!(rendered.contains("/cancel"));
+        for _ in 0..14 {
+            view.key(Key::Down);
+        }
+        let rendered = view.render().rows.join("\n");
+        assert!(rendered.contains("/command-skill"));
+
+        let mut view = viewport();
+        view.key(Key::Text("/eval".into()));
+        assert_eq!(view.key(Key::Enter), None);
+        let grid = view.render();
+        assert!(grid
+            .rows
+            .iter()
+            .any(|row| row.starts_with("› /evaluation ")));
+        assert_eq!(grid.cursor, Some((14, 14)));
+    }
+
+    #[test]
+    fn unmatched_slash_input_stays_editable_and_is_not_submitted() {
+        let mut view = viewport();
+        view.key(Key::Text("/no-such-command".into()));
+        let before = view.render().rows.join("\n");
+        assert!(before.contains("No matching Slash Commands"));
+        assert_eq!(view.key(Key::Enter), None);
+        assert!(view.render().rows.join("\n").contains("/no-such-command"));
+    }
+
+    #[test]
+    fn incomplete_command_arguments_stay_editable_instead_of_running_another_command() {
+        for input in ["/model profile", "/profile status extra"] {
+            let mut view = viewport();
+            view.key(Key::Text(input.into()));
+            assert_eq!(view.key(Key::Enter), None);
+            assert_eq!(view.composer, input);
+        }
+    }
+
+    #[test]
+    fn a_fully_typed_compatibility_alias_submits_its_canonical_command() {
+        let mut view = viewport();
+        view.key(Key::Text("/eval run skill:example".into()));
+        assert_eq!(
+            view.key(Key::Enter).as_deref(),
+            Some("/evaluation run skill:example")
+        );
+    }
+
+    #[test]
+    fn active_operation_disables_unsafe_commands_but_keeps_safe_commands_selectable() {
+        let mut view = viewport();
+        view.key(Key::Text("/".into()));
+        view.set_operation_active(true);
+        let rendered = view.render().rows.join("\n");
+        assert!(rendered.contains("/status"));
+        assert!(rendered.contains("/cancel"));
+        assert!(rendered.contains("/help"));
+        assert!(rendered.contains("/skill · Available when idle"));
+
+        let mut view = viewport();
+        view.set_operation_active(true);
+        view.key(Key::Text("/st".into()));
+        assert_eq!(view.key(Key::Enter).as_deref(), Some("/status"));
+
+        let mut view = viewport();
+        view.set_operation_active(true);
+        view.key(Key::Text("/skill remove example".into()));
+        assert_eq!(view.key(Key::Enter), None);
+        assert!(view
+            .render()
+            .rows
+            .join("\n")
+            .contains("/skill remove example"));
+    }
+
+    #[test]
+    fn escape_clears_the_filter_then_restores_exact_composer_and_cursor() {
+        let mut view = viewport();
+        view.key(Key::Text("    ".into()));
+        view.key(Key::Left);
+        view.key(Key::Left);
+        view.key(Key::Text("/eval".into()));
+        view.key(Key::Escape);
+        assert_eq!(view.composer, "  /  ");
+        assert_eq!(view.cursor, 3);
+        view.key(Key::Escape);
+        let grid = view.render();
+        assert_eq!(view.composer, "    ");
+        assert_eq!(view.cursor, 2);
+        assert_eq!(grid.cursor, Some((4, 14)));
     }
 
     #[test]

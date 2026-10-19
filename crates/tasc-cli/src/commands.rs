@@ -232,7 +232,28 @@ pub fn is_complete_command(input: &str) -> bool {
     if spec.name == "bundle" {
         return arguments == "validate" || arguments.starts_with("validate ");
     }
+    if spec.name == "model" {
+        return match arguments.split_whitespace().collect::<Vec<_>>().as_slice() {
+            [] | ["list"] | ["profile", _] | ["save", _] => true,
+            [model] => !matches!(*model, "profile" | "save"),
+            _ => false,
+        };
+    }
     !spec.required_arguments || !arguments.is_empty()
+}
+
+pub fn available_during_operation(input: &str) -> bool {
+    let normalized = canonical_command_input(input);
+    let Some(command) = normalized.strip_prefix('/') else {
+        return false;
+    };
+    let name = command
+        .split_once(char::is_whitespace)
+        .map_or(command, |(name, _)| name);
+    SLASH_COMMANDS
+        .iter()
+        .find(|spec| spec.name == name)
+        .is_some_and(|spec| spec.active_allowed)
 }
 
 pub fn ranked_commands(query: &str, active: bool) -> Vec<usize> {
@@ -297,9 +318,19 @@ fn command_score(spec: &SlashCommand, query: &str) -> Option<usize> {
     let description = spec.description.to_ascii_lowercase();
     let query = query.to_ascii_lowercase();
     description
-        .contains(&query)
-        .then_some(60)
-        .or_else(|| subsequence_score(&query, &description).map(|score| 70 + score))
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter_map(|word| {
+            if word == query {
+                Some(60)
+            } else if word.starts_with(&query) {
+                Some(65 + word.len() - query.len())
+            } else if word.contains(&query) {
+                Some(70 + word.find(&query).unwrap_or_default())
+            } else {
+                subsequence_score(&query, word).map(|score| 80 + score)
+            }
+        })
+        .min()
 }
 
 fn subsequence_score(query: &str, text: &str) -> Option<usize> {
@@ -318,7 +349,10 @@ fn subsequence_score(query: &str, text: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{alias_target, canonical_command_input, ranked_commands, SLASH_COMMANDS};
+    use super::{
+        alias_target, available_during_operation, canonical_command_input, ranked_commands,
+        SLASH_COMMANDS,
+    };
 
     #[test]
     fn aliases_normalize_to_canonical_commands_without_duplicate_results() {
@@ -332,6 +366,9 @@ mod tests {
         );
         assert_eq!(canonical_command_input("/profiles"), "/profile status");
         assert_eq!(alias_target(":/eval"), Some("evaluation"));
+        assert!(available_during_operation("/status"));
+        assert!(available_during_operation(":cancel"));
+        assert!(!available_during_operation("/model"));
         let results = ranked_commands("/eval", false);
         assert_eq!(results[0], 7);
         assert_eq!(results.iter().filter(|index| **index == 7).count(), 1);
