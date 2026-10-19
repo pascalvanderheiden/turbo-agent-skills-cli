@@ -35,6 +35,52 @@ fn run_with_resolved_profile(directory: &PathBuf, home: &PathBuf, args: &[&str])
 }
 
 #[test]
+fn explicit_banner_is_static_and_plain_when_piped() {
+    let directory = test_dir();
+    let state_path = directory.join("state/state.json");
+    fs::create_dir_all(&directory).unwrap();
+    let expected = concat!(
+        "______________________________\n",
+        "___  __/__    |_  ___/_  ____/\n",
+        "__  /  __  /| |____ \\_  /\n",
+        "_  /   _  ___ |___/ // /___\n",
+        "/_/    /_/  |_/____/ \\____/\n",
+    );
+    for (no_color, term) in [
+        (None, "xterm-256color"),
+        (Some(""), "xterm-256color"),
+        (None, "dumb"),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_tasc"));
+        command
+            .arg("--banner")
+            .current_dir(&directory)
+            .env("TERM", term)
+            .env_remove("NO_COLOR");
+        if let Some(value) = no_color {
+            command.env("NO_COLOR", value);
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+    }
+    for args in [
+        vec!["--help"],
+        vec!["--version"],
+        vec!["state", "status"],
+        vec!["state", "status", "--json"],
+    ] {
+        let output = run(&directory, &state_path, &args);
+        assert!(output.status.success());
+        for stream in [&output.stdout, &output.stderr] {
+            assert!(!String::from_utf8_lossy(stream).contains("______________________________"));
+        }
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn command_human_output_uses_events_and_missing_input_never_prompts_when_piped() {
     let directory = test_dir();
     let state_path = directory.join("state/state.json");

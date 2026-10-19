@@ -962,37 +962,13 @@ fn display_count(status: &Value, key: &str) -> String {
         .unwrap_or_else(|| "unavailable".to_string())
 }
 
-const TURBO_BANNER_LINES: [&str; 5] = [
-    "______________________________",
-    "___  __/__    |_  ___/_  ____/",
-    "__  /  __  /| |____ \\_  /",
-    "_  /   _  ___ |___/ // /___",
-    "/_/    /_/  |_/____/ \\____/",
-];
-const RAINBOW_ANSI: [&str; 5] = ["91", "93", "92", "96", "94"];
-
-fn turbo_banner(color: bool) -> String {
-    TURBO_BANNER_LINES
-        .iter()
-        .enumerate()
-        .map(|(index, line)| {
-            if color {
-                format!("\x1b[1;{}m{line}\x1b[0m", RAINBOW_ANSI[index])
-            } else {
-                (*line).to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn dashboard_output(status: &Value, color: bool, json_output: bool) -> String {
     if json_output {
         return json!({"schemaVersion":1,"command":"agent.dashboard","result":status}).to_string();
     }
-    let banner = turbo_banner(color);
+    let banner = crate::banner::render(color);
     format!(
-        "{banner}\nGitHub CLI: {} · Model: {} · Tokens: {} · Skills: {} ({} tracked, {} watched)\n{}",
+        "{banner}GitHub CLI: {} · Model: {} · Tokens: {} · Skills: {} ({} tracked, {} watched)\n{}",
         if status["githubCliAuthenticated"] == true {
             "authenticated"
         } else {
@@ -1708,7 +1684,7 @@ mod tests {
         dashboard_output, dashboard_status_for_items, lifecycle_summary, model_preferences_path,
         onboarding_message, output_policy, parse_shell_command, read_profile_model,
         save_profile_model, session_config, shell_event_output, validate_model_choice,
-        ShellCommand, RAINBOW_ANSI,
+        ShellCommand,
     };
     use std::{
         fs,
@@ -1851,13 +1827,7 @@ mod tests {
         let rendered = dashboard_output(&status, false, true);
         assert!(!rendered.contains("\u{1b}["));
         assert!(rendered.contains("\"command\":\"agent.dashboard\""));
-        let plain_dashboard = dashboard_output(&status, false, false);
-        assert!(!plain_dashboard.contains("\u{1b}["));
-        assert!(plain_dashboard.contains("___  __/__    |_  ___/_  ____/"));
-        let rainbow_dashboard = dashboard_output(&status, true, false);
-        for color in RAINBOW_ANSI {
-            assert!(rainbow_dashboard.contains(&format!("\x1b[1;{color}m")));
-        }
+        assert!(!rendered.contains("______________________________"));
         let onboarding = serde_json::json!({"untrackedCount":2});
         assert!(onboarding_message(&onboarding).contains("2 untracked installation(s)"));
         let with_usage = dashboard_status_for_items(false, "auto", Some((11, 7)), Some(&[]));
@@ -1870,6 +1840,21 @@ mod tests {
         assert_eq!(output_policy(true, true, false, false), (true, false));
         assert_eq!(output_policy(true, false, true, false), (true, false));
         assert_eq!(output_policy(true, false, false, false), (true, true));
+    }
+
+    #[test]
+    fn dashboard_prints_the_shared_static_banner_once_before_the_summary() {
+        let status = dashboard_status_for_items(false, "auto", None, Some(&[]));
+        for color in [false, true] {
+            let rendered = dashboard_output(&status, color, false);
+            let banner = crate::banner::render(color);
+            assert!(rendered.starts_with(&format!("{banner}GitHub CLI:")));
+            assert_eq!(rendered.matches(&banner).count(), 1);
+            assert!(!rendered.contains('\r'));
+            if !color {
+                assert!(!rendered.contains('\x1b'));
+            }
+        }
     }
 
     #[test]
