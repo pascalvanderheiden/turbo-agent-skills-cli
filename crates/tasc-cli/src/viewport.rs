@@ -72,6 +72,7 @@ impl Viewport {
     pub fn resize(&mut self, width: usize, height: usize) {
         self.width = width;
         self.height = height;
+        self.clamp_scroll();
     }
 
     pub fn content(&mut self, body: &str) {
@@ -127,6 +128,7 @@ impl Viewport {
             event: Some(event),
             body: safe_text(body),
         };
+        self.clamp_scroll();
     }
 
     fn transcript_height(&self) -> usize {
@@ -136,6 +138,21 @@ impl Viewport {
                 .clamp(1, 5)
                 + 1,
         )
+    }
+
+    fn max_scroll(&self) -> usize {
+        self.blocks
+            .iter()
+            .map(|block| block_lines(block.event, &block.body, self.width.saturating_sub(1)).len())
+            .sum::<usize>()
+            .saturating_sub(self.transcript_height())
+    }
+
+    fn clamp_scroll(&mut self) {
+        self.scroll = self.scroll.min(self.max_scroll());
+        if self.scroll == 0 {
+            self.new_output = false;
+        }
     }
 
     fn append(&mut self, event: Option<Event>, body: &str) {
@@ -164,7 +181,9 @@ impl Viewport {
             }
             Key::Enter if self.width >= 60 && self.height >= 16 => {
                 self.cursor = 0;
-                return Some(std::mem::take(&mut self.composer));
+                let input = std::mem::take(&mut self.composer);
+                self.clamp_scroll();
+                return Some(input);
             }
             Key::Backspace if self.cursor > 0 => {
                 let previous = self.composer[..self.cursor]
@@ -204,29 +223,17 @@ impl Viewport {
                 self.new_output = false;
             }
             Key::PageUp => {
-                let max_scroll = self
-                    .blocks
-                    .iter()
-                    .map(|block| {
-                        block_lines(block.event, &block.body, self.width.saturating_sub(1)).len()
-                    })
-                    .sum::<usize>()
-                    .saturating_sub(self.transcript_height());
                 self.scroll = self
                     .scroll
-                    .saturating_add(self.height.saturating_sub(7).max(1))
-                    .min(max_scroll);
+                    .saturating_add(self.transcript_height().max(1))
+                    .min(self.max_scroll());
             }
             Key::PageDown => {
-                self.scroll = self
-                    .scroll
-                    .saturating_sub(self.height.saturating_sub(7).max(1));
-                if self.scroll == 0 {
-                    self.new_output = false;
-                }
+                self.scroll = self.scroll.saturating_sub(self.transcript_height().max(1));
             }
             _ => {}
         }
+        self.clamp_scroll();
         None
     }
 
@@ -531,6 +538,94 @@ mod tests {
         view.present(Event::Info, "new output");
         view.key(Key::PageDown);
         assert!(!view.render().rows[0].starts_with("short transcript"));
+    }
+
+    #[test]
+    fn pages_use_the_visible_transcript_height_and_resume_at_the_bottom() {
+        let mut view = viewport();
+        for index in 0..50 {
+            view.content(&format!("row {index}"));
+        }
+        assert!(view.render().rows[13].starts_with("row 49"));
+        view.key(Key::PageUp);
+        let grid = view.render();
+        assert!(grid.rows[0].starts_with("row 22"));
+        assert!(grid.rows[15].starts_with("Paused ·"));
+        view.content("row 50");
+        assert!(view.render().rows[0].starts_with("row 22"));
+        assert!(view.render().rows[15].starts_with("Paused · new output"));
+        view.key(Key::PageDown);
+        assert!(view.render().rows[15].starts_with("Paused · new output"));
+        view.key(Key::PageDown);
+        assert!(view.render().rows[15].starts_with("Idle ·"));
+        view.content("row 51");
+        assert!(view.render().rows[13].starts_with("row 51"));
+    }
+
+    #[test]
+    fn position_indicator_only_appears_when_scrollable_and_tracks_position() {
+        let mut view = viewport();
+        for index in 0..14 {
+            view.content(&format!("row {index}"));
+        }
+        assert!(view.render().rows[..14]
+            .iter()
+            .all(|row| row.ends_with(' ')));
+        view.content("row 14");
+        let grid = view.render();
+        assert!(grid.rows[..13].iter().all(|row| row.ends_with('│')));
+        assert!(grid.rows[13].ends_with('█'));
+        view.key(Key::PageUp);
+        assert!(view.render().rows[0].ends_with('█'));
+        view.key(Key::End);
+        assert!(view.render().rows[13].ends_with('█'));
+        assert!(view.render().rows[15].starts_with("Idle ·"));
+        assert_grid(&view.render(), 60, 16);
+    }
+
+    #[test]
+    fn resizing_to_fit_the_transcript_resumes_live_output() {
+        let mut view = viewport();
+        for index in 0..20 {
+            view.content(&format!("row {index}"));
+        }
+        view.key(Key::PageUp);
+        view.content("new output");
+        view.resize(60, 30);
+        let grid = view.render();
+        assert!(grid.rows[29].starts_with("Idle ·"));
+        assert!(grid.rows.iter().all(|row| !row.ends_with('█')));
+        view.resize(60, 16);
+        view.content("live output");
+        assert!(view.render().rows[13].starts_with("live output"));
+        assert!(view.render().rows[15].starts_with("Idle ·"));
+    }
+
+    #[test]
+    fn submitting_a_multiline_composer_resumes_when_the_transcript_fits() {
+        let mut view = viewport();
+        for index in 0..14 {
+            view.content(&format!("row {index}"));
+        }
+        view.key(Key::Paste("one\ntwo\nthree\nfour\nfive".into()));
+        view.key(Key::PageUp);
+        assert!(view.render().rows[15].starts_with("Paused ·"));
+        view.key(Key::Enter);
+        assert!(view.render().rows[15].starts_with("Idle ·"));
+        view.content("live output");
+        assert!(view.render().rows[13].starts_with("live output"));
+    }
+
+    #[test]
+    fn shrinking_working_output_to_fit_resumes_live_output() {
+        let mut view = viewport();
+        view.present(Event::Working, &"progress\n".repeat(20));
+        view.key(Key::PageUp);
+        view.present(Event::Done, "finished");
+        assert!(view.render().rows[15].starts_with("Idle ·"));
+        view.content("live output");
+        assert!(view.render().rows[1].starts_with("live output"));
+        assert!(view.render().rows[15].starts_with("Idle ·"));
     }
 
     #[test]
