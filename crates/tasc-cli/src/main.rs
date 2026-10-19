@@ -893,7 +893,8 @@ async fn main() {
             signal_cancel.cancel();
         }
     });
-    let mut working = if long_operation(command_name) {
+    let offline_remote = cli.offline && remote_command(command_name);
+    let mut working = if long_operation(command_name) && !offline_remote {
         tasc::presentation::WorkingRow::start(command_name, json)
             .unwrap_or_else(|_| tasc::presentation::WorkingRow::disabled())
     } else {
@@ -907,7 +908,7 @@ async fn main() {
             let _ = working.finish(tasc::presentation::Event::Done, command_name);
         }
         Err(error) if working_active => {
-            let _ = working.finish(tasc::presentation::Event::Error, &error.message);
+            let _ = working.finish(tasc::presentation::Event::Error, &human_error(error));
         }
         Err(_) => {}
     }
@@ -928,12 +929,20 @@ async fn main() {
                     | "security_findings"
             )
         {
-            let _ = tasc::presentation::Event::Error.emit(&error.message, false);
+            let _ = tasc::presentation::Event::Error.emit(&human_error(&error), false);
         }
-        if !json {
+        if !json && error.code != "offline" {
             let _ = tasc::presentation::Event::Next.emit(&error.remediation, false);
         }
         std::process::exit(error.exit_code());
+    }
+}
+
+fn human_error(error: &Diagnostic) -> String {
+    if error.code == "offline" {
+        format!("{}: {} {}", error.code, error.message, error.remediation)
+    } else {
+        error.message.to_string()
     }
 }
 
@@ -945,6 +954,20 @@ fn long_operation(command: &str) -> bool {
             | "discover"
             | "source capabilities"
             | "skill preview"
+            | "watch check"
+    )
+}
+
+fn remote_command(command: &str) -> bool {
+    matches!(
+        command,
+        "search"
+            | "skill search"
+            | "discover"
+            | "skill preview"
+            | "skill install"
+            | "skill update"
+            | "source capabilities"
             | "watch check"
     )
 }
