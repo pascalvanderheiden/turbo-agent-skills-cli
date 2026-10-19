@@ -165,9 +165,24 @@ impl Viewport {
                 self.new_output = false;
             }
             Key::PageUp => {
+                let transcript_height = self.height.saturating_sub(
+                    wrap(&self.composer, self.width.saturating_sub(2).max(1))
+                        .len()
+                        .clamp(1, 5)
+                        + 1,
+                );
+                let max_scroll = self
+                    .blocks
+                    .iter()
+                    .map(|block| {
+                        block_lines(block.event, &block.body, self.width.saturating_sub(1)).len()
+                    })
+                    .sum::<usize>()
+                    .saturating_sub(transcript_height);
                 self.scroll = self
                     .scroll
-                    .saturating_add(self.height.saturating_sub(7).max(1));
+                    .saturating_add(self.height.saturating_sub(7).max(1))
+                    .min(max_scroll);
             }
             Key::PageDown => {
                 self.scroll = self
@@ -253,9 +268,9 @@ impl Viewport {
 
 impl Footer {
     fn render(&self, state: &str, width: usize) -> String {
-        let state = safe_text(state);
-        let profile = safe_text(&self.profile);
-        let model = safe_text(&self.model);
+        let state = safe_text(state).replace(['\n', '\t'], " ");
+        let profile = safe_text(&self.profile).replace(['\n', '\t'], " ");
+        let model = safe_text(&self.model).replace(['\n', '\t'], " ");
         let tokens = self
             .tokens
             .map(|(input, output)| input.saturating_add(output));
@@ -471,6 +486,26 @@ mod tests {
     }
 
     #[test]
+    fn scrolling_is_bounded_and_never_pauses_a_short_transcript() {
+        let mut view = viewport();
+        view.content("short transcript");
+        view.key(Key::PageUp);
+        assert!(!view.render().rows[15].contains("Paused"));
+        for index in 0..30 {
+            view.content(&format!("row {index}"));
+        }
+        for _ in 0..100 {
+            view.key(Key::PageUp);
+        }
+        let scroll = view.scroll;
+        view.key(Key::PageUp);
+        assert_eq!(view.scroll, scroll);
+        view.present(Event::Info, "new output");
+        view.key(Key::PageDown);
+        assert!(!view.render().rows[0].starts_with("short transcript"));
+    }
+
+    #[test]
     fn working_rows_update_and_settle_at_their_original_position() {
         for outcome in [Event::Done, Event::Error] {
             let mut view = viewport();
@@ -492,6 +527,7 @@ mod tests {
         let mut view = viewport();
         view.present(Event::Tasc, &format!("{}\x1b[2J\r", "界é".repeat(100)));
         view.key(Key::Paste("界".repeat(100)));
+        view.footer.model = "model\n\t\x1b[2J".into();
         assert_grid(&view.render(), 60, 16);
         assert!(!view.render().rows.join("").contains('\x1b'));
         let (column, row) = view.render().cursor.unwrap();
