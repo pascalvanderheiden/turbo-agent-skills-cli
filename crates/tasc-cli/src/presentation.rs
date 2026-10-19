@@ -17,7 +17,7 @@ pub enum Event {
 }
 
 impl Event {
-    fn style(self) -> (&'static str, &'static str, &'static str, &'static str) {
+    pub(crate) fn style(self) -> (&'static str, &'static str, &'static str, &'static str) {
         match self {
             Self::Input => ("›", "Input", "INPUT", "36"),
             Self::Tasc => ("◆", "TASC", "TASC", "35"),
@@ -63,6 +63,11 @@ impl Event {
     }
 
     pub fn emit(self, body: &str, json: bool) -> io::Result<()> {
+        if !json {
+            if let Some(result) = crate::terminal::emit(self, body) {
+                return result;
+            }
+        }
         let rendered = self.render(body, self.decoration(json));
         if self.is_stderr() {
             writeln!(io::stderr().lock(), "{rendered}")
@@ -440,7 +445,7 @@ pub fn decoration_enabled(terminal: bool, no_color: bool, dumb: bool, json: bool
     terminal && !no_color && !dumb && !json
 }
 
-fn safe_text(text: &str) -> String {
+pub(crate) fn safe_text(text: &str) -> String {
     text.chars()
         .flat_map(|character| {
             if character.is_control() && character != '\n' && character != '\t' {
