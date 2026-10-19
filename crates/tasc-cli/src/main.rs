@@ -41,7 +41,7 @@ mod banner;
 struct Cli {
     #[arg(long, global = true, value_enum, default_value = "human")]
     format: OutputFormat,
-    /// Play the opt-in Turbo Agent Skills CLI animated banner and exit.
+    /// Show the static TASC terminal banner and exit.
     #[arg(long, global = true)]
     banner: bool,
     /// Reject operations requiring GitHub access before starting gh.
