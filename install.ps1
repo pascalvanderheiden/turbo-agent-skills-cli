@@ -3,6 +3,40 @@ $Repository = "pascalvanderheiden/turbo-agent-skills-cli"
 
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$PresentationOutputPiped = $MyInvocation.PipelinePosition -lt $MyInvocation.PipelineLength
+
+function Write-PresentationEvent {
+    param(
+        [ValidateSet("Input", "TASC", "Prompt", "Info", "Working", "Warning", "Error", "Done", "Next")]
+        [string]$Category,
+        [string]$Body
+    )
+    $styles = @{
+        Input = @([char]0x203A, "36"); TASC = @([char]0x25C6, "35"); Prompt = @("?", "36")
+        Info = @([char]0x00B7, "34"); Working = @("...", "36"); Warning = @("!", "33")
+        Error = @([char]0x00D7, "31"); Done = @([char]0x2713, "32"); Next = @([char]0x21B3, "2;36")
+    }
+    $isError = $Category -in @("Prompt", "Working", "Warning", "Error")
+    $redirected = if ($isError) { [Console]::IsErrorRedirected } else { [Console]::IsOutputRedirected }
+    $label = "$($Category.ToUpperInvariant()):"
+    if (-not $redirected -and ($isError -or -not $PresentationOutputPiped) -and
+        -not (Test-Path Env:NO_COLOR) -and $env:TERM -ne "dumb") {
+        $escape = [char]27
+        $style = $styles[$Category]
+        $label = "$escape[$($style[1])m$($style[0]) $Category$escape[0m"
+    }
+    $Body = $Body.Replace([string][char]27, '\e').Replace("`r", '\r')
+    if ($isError) {
+        [Console]::Error.WriteLine("$label $Body")
+    } else {
+        Write-Output "$label $Body"
+    }
+}
+
+trap {
+    Write-PresentationEvent Error $_.Exception.Message
+    exit 1
+}
 
 if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
     [System.Runtime.InteropServices.OSPlatform]::Windows
@@ -50,9 +84,9 @@ try {
     }
     New-Item -ItemType Directory -Force -Path $installDirectory | Out-Null
     Copy-Item (Join-Path $temporary "tasc.exe") (Join-Path $installDirectory "tasc.exe") -Force
-    Write-Output "Installed TASC v$Version to $installDirectory"
+    Write-PresentationEvent Done "Installed TASC v$Version to $installDirectory"
     if (($env:PATH -split [IO.Path]::PathSeparator) -notcontains $installDirectory) {
-        Write-Output "Add $installDirectory to your PATH to run tasc."
+        Write-PresentationEvent Next "Add $installDirectory to your PATH to run tasc."
     }
 } finally {
     Remove-Item -Recurse -Force $temporary -ErrorAction SilentlyContinue

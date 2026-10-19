@@ -4,6 +4,29 @@ VERSION="0.1.0"
 REPOSITORY="pascalvanderheiden/turbo-agent-skills-cli"
 TASC_TEMP_DIR=""
 
+presentation_event() {
+  local category="$1" body="$2" glyph label color fd=1
+  case "$category" in
+    Input) glyph="›"; color="36" ;;
+    TASC) glyph="◆"; color="35" ;;
+    Prompt) glyph="?"; color="36"; fd=2 ;;
+    Info) glyph="·"; color="34" ;;
+    Working) glyph="..."; color="36"; fd=2 ;;
+    Warning) glyph="!"; color="33"; fd=2 ;;
+    Error) glyph="×"; color="31"; fd=2 ;;
+    Done) glyph="✓"; color="32" ;;
+    Next) glyph="↳"; color="2;36" ;;
+    *) return 1 ;;
+  esac
+  label="${category^^}:"
+  if [[ -t "$fd" && ! ${NO_COLOR+x} && "${TERM:-}" != "dumb" ]]; then
+    label="$(printf '\033[%sm%s %s\033[0m' "$color" "$glyph" "$category")"
+  fi
+  body="${body//$'\033'/\\e}"
+  body="${body//$'\r'/\\r}"
+  printf '%s %s\n' "$label" "$body" >&"$fd"
+}
+
 detect_target() {
   local operating_system architecture target=""
   operating_system="$(uname -s)"
@@ -34,7 +57,7 @@ detect_target() {
   esac
 
   if [[ -z "$target" ]]; then
-    printf 'Unsupported operating system or CPU: %s %s\n' "$operating_system" "$architecture" >&2
+    presentation_event Error "Unsupported operating system or CPU: $operating_system $architecture"
     return 1
   fi
   printf '%s\n' "$target"
@@ -47,7 +70,7 @@ main() {
   target="$(detect_target)" || return 1
   version="${TASC_VERSION:-$VERSION}"
   if [[ ! "$version" =~ ^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-    printf 'Invalid TASC version: %s\n' "$version" >&2
+    presentation_event Error "Invalid TASC version: $version"
     return 1
   fi
   version="v${version#v}"
@@ -57,16 +80,16 @@ main() {
   base_url="https://github.com/${REPOSITORY}/releases/download/${version}"
 
   if ! command -v curl >/dev/null 2>&1; then
-    printf 'curl is required to download TASC.\n' >&2
+    presentation_event Error "curl is required to download TASC."
     return 1
   fi
   if [[ -z "${HOME:-}" ]]; then
-    printf 'HOME must be set to choose a user-writable install directory.\n' >&2
+    presentation_event Error "HOME must be set to choose a user-writable install directory."
     return 1
   fi
 
   TASC_TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tasc-install.XXXXXX")" || {
-    printf 'Could not create a temporary directory for the download.\n' >&2
+    presentation_event Error "Could not create a temporary directory for the download."
     return 1
   }
   trap 'rm -rf "$TASC_TEMP_DIR"' EXIT
@@ -79,11 +102,11 @@ main() {
   expected="$(awk -v filename="$archive_name" \
     '$2 == filename { print $1; count++ } END { if (count != 1) exit 1 }' \
     "${TASC_TEMP_DIR}/SHA256SUMS.txt")" || {
-    printf 'SHA256SUMS.txt has no unique checksum for %s.\n' "$archive_name" >&2
+    presentation_event Error "SHA256SUMS.txt has no unique checksum for $archive_name."
     return 1
   }
   if [[ ! "$expected" =~ ^[[:xdigit:]]{64}$ ]]; then
-    printf 'SHA256SUMS.txt contains an invalid checksum for %s.\n' "$archive_name" >&2
+    presentation_event Error "SHA256SUMS.txt contains an invalid checksum for $archive_name."
     return 1
   fi
   if command -v sha256sum >/dev/null 2>&1; then
@@ -91,32 +114,32 @@ main() {
   elif command -v shasum >/dev/null 2>&1; then
     actual="$(shasum -a 256 "${TASC_TEMP_DIR}/${archive_name}" | awk '{print $1}')"
   else
-    printf 'sha256sum or shasum is required to verify the TASC download.\n' >&2
+    presentation_event Error "sha256sum or shasum is required to verify the TASC download."
     return 1
   fi
   if [[ "${actual,,}" != "${expected,,}" ]]; then
-    printf 'SHA-256 verification failed for %s.\n' "$archive_name" >&2
+    presentation_event Error "SHA-256 verification failed for $archive_name."
     return 1
   fi
 
   if ! tar -tzf "${TASC_TEMP_DIR}/${archive_name}" | grep -Fxq "$binary_name"; then
-    printf 'The verified archive does not contain the expected %s executable.\n' "$binary_name" >&2
+    presentation_event Error "The verified archive does not contain the expected $binary_name executable."
     return 1
   fi
   tar -xzf "${TASC_TEMP_DIR}/${archive_name}" -C "$TASC_TEMP_DIR" "$binary_name"
   install_dir="${TASC_INSTALL_DIR:-${HOME}/.local/bin}"
   if ! mkdir -p "$install_dir" || [[ ! -d "$install_dir" || ! -w "$install_dir" ]]; then
-    printf 'Install directory is not writable: %s\n' "$install_dir" >&2
+    presentation_event Error "Install directory is not writable: $install_dir"
     return 1
   fi
   if ! install -m 755 "${TASC_TEMP_DIR}/${binary_name}" "${install_dir}/${binary_name}"; then
-    printf 'Could not install TASC into %s.\n' "$install_dir" >&2
+    presentation_event Error "Could not install TASC into $install_dir."
     return 1
   fi
-  printf 'Installed TASC %s to %s/%s\n' "$version" "$install_dir" "$binary_name"
+  presentation_event Done "Installed TASC $version to $install_dir/$binary_name"
   case ":${PATH}:" in
     *":${install_dir}:"*) ;;
-    *) printf 'Add %s to your PATH to run tasc.\n' "$install_dir" ;;
+    *) presentation_event Next "Add $install_dir to your PATH to run tasc." ;;
   esac
 }
 
