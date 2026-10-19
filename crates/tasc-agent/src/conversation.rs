@@ -154,6 +154,12 @@ impl AgentSession {
             .map(|pending| pending.plan.clone())
     }
 
+    pub fn has_pending_approval(&self) -> bool {
+        self.approvals
+            .values()
+            .any(|pending| pending.expires_at > Instant::now())
+    }
+
     pub fn deny_approval(&mut self, token: &str) -> Result<(), Diagnostic> {
         self.approvals.remove(token).map(|_| ()).ok_or_else(|| {
             approval_error("stale_approval", "Approval token is unknown or expired.")
@@ -416,7 +422,15 @@ mod tests {
             state_fingerprint: "current".to_string(),
         };
         let mut session = AgentSession::default();
+        assert!(!session.has_pending_approval());
         let approval = session.prepare_approval(plan.clone());
+        assert!(session.has_pending_approval());
+        session
+            .approvals
+            .get_mut(&approval.token)
+            .unwrap()
+            .expires_at = Instant::now();
+        assert!(!session.has_pending_approval());
 
         assert_eq!(
             session
@@ -442,6 +456,7 @@ mod tests {
         changed.revision = Some("commit-b".to_string());
         let mut session = AgentSession::default();
         let mismatch = session.prepare_approval(plan.clone());
+        assert!(session.has_pending_approval());
         assert_eq!(
             session
                 .consume_approval(&mismatch.token, &changed)
@@ -449,12 +464,14 @@ mod tests {
                 .code,
             "stale_approval"
         );
+        assert!(!session.has_pending_approval());
 
         let approval = session.prepare_approval(plan.clone());
         assert_eq!(
             session.consume_approval(&approval.token, &plan).unwrap(),
             plan
         );
+        assert!(!session.has_pending_approval());
         assert_eq!(
             session
                 .consume_approval(&approval.token, &plan)

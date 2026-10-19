@@ -13,6 +13,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tasc::presentation::Event as PresentationEvent;
+use tasc::terminal::{self, ManagedTerminal};
 use tasc_agent::{
     consistency::{ConsistencyService, FsConsistencyArtifactRepository},
     conversation::{
@@ -342,7 +343,7 @@ impl AgentContext {
                         json!({"schemaVersion":1,"command":"agent.plan","result":plan})
                     );
                 } else {
-                    eprintln!(
+                    let message = format!(
                         "PLAN: {}\nScope: {}\nTarget: {}\nRevision: {}\nApproval token: {} ({} seconds)",
                         result.plan,
                         approval.plan.scope,
@@ -351,6 +352,9 @@ impl AgentContext {
                         approval.token,
                         approval.expires_in_seconds
                     );
+                    if terminal::emit(PresentationEvent::Prompt, &message).is_none() {
+                        eprintln!("{message}");
+                    }
                 }
                 success(
                     &format!("skill {operation}"),
@@ -886,8 +890,12 @@ fn run_cli_command(args: &[String], offline: bool, json_output: bool) -> Result<
         print!("{stdout}");
         eprint!("{stderr}");
     } else {
-        print!("{}", safe_text(&stdout));
-        eprint!("{}", safe_text(&stderr));
+        if terminal::content(&safe_text(&stdout)).is_none() {
+            print!("{}", safe_text(&stdout));
+        }
+        if terminal::content(&safe_text(&stderr)).is_none() {
+            eprint!("{}", safe_text(&stderr));
+        }
     }
     if !output.status.success() && output.stdout.is_empty() && output.stderr.is_empty() {
         return Err(selection_error(
@@ -995,7 +1003,42 @@ fn output_policy(interactive: bool, no_color: bool, dumb: bool, json_output: boo
 }
 
 fn render_dashboard(status: &Value, color: bool, json_output: bool) {
+    if !json_output && terminal::content(&dashboard_output(status, false, false)).is_some() {
+        return;
+    }
     println!("{}", dashboard_output(status, color, json_output));
+}
+
+async fn read_session_line(
+    input: &mut BufReader<tokio::io::Stdin>,
+    terminal: &mut Option<ManagedTerminal>,
+    line: &mut String,
+) -> std::io::Result<usize> {
+    if let Some(terminal) = terminal {
+        terminal.read_line(line).await
+    } else {
+        input.read_line(line).await
+    }
+}
+
+async fn token_usage(session: &Session) -> Option<(i64, i64)> {
+    session
+        .rpc()
+        .usage()
+        .get_metrics()
+        .await
+        .ok()
+        .map(|metrics| {
+            metrics
+                .model_metrics
+                .values()
+                .fold((0_i64, 0_i64), |(input, output), metric| {
+                    (
+                        input.saturating_add(metric.usage.input_tokens),
+                        output.saturating_add(metric.usage.output_tokens),
+                    )
+                })
+        })
 }
 
 async fn list_models(client: &Client) -> Result<Vec<String>, Diagnostic> {
@@ -1037,6 +1080,13 @@ async fn interact(
     let mut events = session.subscribe();
     let mut stdout = tokio::io::stdout();
     let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let mut managed = ManagedTerminal::open(
+        context.json_output,
+        FsStateRepository::new(context.state_path.clone())
+            .profile()
+            .id,
+    )
+    .map_err(|error| state_error(error.to_string()))?;
     let (show_dashboard, color) = output_policy(
         interactive,
         std::env::var_os("NO_COLOR").is_some(),
@@ -1069,7 +1119,22 @@ async fn interact(
         );
     }
     loop {
-        if interactive && !context.json_output {
+        if managed.is_some() {
+            let usage = token_usage(session).await;
+            let pending = context
+                .session
+                .lock()
+                .ok()
+                .is_some_and(|session| session.has_pending_approval());
+            if let Some(result) = terminal::update(|view| {
+                view.footer.model = model.clone();
+                view.footer.tokens = usage;
+                view.footer.state = if pending { "Approval required" } else { "Idle" }.into();
+            }) {
+                result.map_err(|error| state_error(error.to_string()))?;
+            }
+        }
+        if interactive && !context.json_output && managed.is_none() {
             stdout
                 .write_all(
                     PresentationEvent::Input
@@ -1085,7 +1150,11 @@ async fn interact(
         }
         let mut line = String::new();
         let count = tokio::select! {
-            result = input.read_line(&mut line) => result.map_err(|error| state_error(error.to_string()))?,
+            result = read_session_line(&mut input, &mut managed, &mut line) => {
+                result.map_err(|error| if error.kind() == std::io::ErrorKind::Interrupted {
+                    cancelled_error()
+                } else { state_error(error.to_string()) })?
+            },
             _ = tokio::signal::ctrl_c() => {
                 context.cancel();
                 return Err(cancelled_error());
@@ -1098,6 +1167,7 @@ async fn interact(
         if shell_input.is_empty() {
             continue;
         }
+        let _ = terminal::emit(PresentationEvent::Input, shell_input);
         let command = match parse_shell_command(shell_input) {
             Ok(command) => command,
             Err(error) => {
@@ -1105,6 +1175,7 @@ async fn interact(
                 continue;
             }
         };
+        let _ = terminal::update(|view| view.footer.state = "Working".into());
         match command {
             ShellCommand::Quit => break,
             ShellCommand::Help => {
@@ -1153,8 +1224,14 @@ async fn interact(
                                 })
                             );
                         } else {
-                            println!("Models: auto (default), {}", safe_text(&models.join(", ")));
-                            println!("Current session model: {}", safe_text(&model));
+                            let message = format!(
+                                "Models: auto (default), {}\nCurrent session model: {}",
+                                safe_text(&models.join(", ")),
+                                safe_text(&model)
+                            );
+                            if terminal::emit(PresentationEvent::Info, &message).is_none() {
+                                println!("{message}");
+                            }
                         }
                     }
                     Err(error) => print_shell_event("error", &error.message, context.json_output),
@@ -1199,14 +1276,34 @@ async fn interact(
             ShellCommand::Approve(token) => {
                 let approval = context.approve(&token);
                 tokio::pin!(approval);
-                tokio::select! {
-                    result = &mut approval => match result {
-                        Ok(result) => print_shell_event("result", &result.to_string(), context.json_output),
-                        Err(error) => print_shell_event("error", &error.message, context.json_output),
-                    },
-                    _ = tokio::signal::ctrl_c() => {
-                        context.cancel();
-                        return Err(cancelled_error());
+                let mut control_line = String::new();
+                loop {
+                    tokio::select! {
+                        result = &mut approval => {
+                            match result {
+                                Ok(result) => print_shell_event("result", &result.to_string(), context.json_output),
+                                Err(error) => print_shell_event("error", &error.message, context.json_output),
+                            }
+                            break;
+                        },
+                        result = read_session_line(&mut input, &mut managed, &mut control_line), if managed.is_some() => {
+                            let interrupted = result.as_ref().is_err_and(|error| error.kind() == std::io::ErrorKind::Interrupted);
+                            if interrupted || control_line.trim() == "/cancel" {
+                                context.cancel();
+                                print_shell_event("cancelled", "The active approval was cancelled.", context.json_output);
+                                break;
+                            }
+                            if result.map_err(|error| state_error(error.to_string()))? == 0 {
+                                context.cancel();
+                                return Err(cancelled_error());
+                            }
+                            print_shell_event("warning", "Only /cancel or Ctrl-C is accepted while an operation is running.", context.json_output);
+                            control_line.clear();
+                        },
+                        _ = tokio::signal::ctrl_c() => {
+                            context.cancel();
+                            return Err(cancelled_error());
+                        }
                     }
                 }
                 continue;
@@ -1238,6 +1335,10 @@ async fn interact(
             }
             ShellCommand::Request(prompt) => {
                 context.reset_cancellation();
+                let _ = terminal::update(|view| {
+                    view.footer.state = "Working".into();
+                    view.present(PresentationEvent::Working, "Agent request");
+                });
                 let turn = session.send_and_wait(prompt);
                 tokio::pin!(turn);
                 let mut events_open = true;
@@ -1249,17 +1350,21 @@ async fn interact(
                             match result {
                                 Ok(Some(response)) => {
                                     let message = response.data.get("content").and_then(Value::as_str).unwrap_or_default();
+                                    let _ = terminal::update(|view| view.settle(PresentationEvent::Done, "Agent request completed"));
                                     print_shell_event("result", &safe_text(message), context.json_output);
                                 }
                                 Ok(None) => return Err(selection_error(
                                     "empty_agent_response",
                                     "Copilot completed the turn without an assistant message.",
                                 )),
-                                Err(error) => return Err(sdk_error(error)),
+                                Err(error) => {
+                                    let _ = terminal::update(|view| view.settle(PresentationEvent::Error, "Agent request failed"));
+                                    return Err(sdk_error(error));
+                                }
                             }
                             break;
                         }
-                        result = input.read_line(&mut control_line), if control_input_open => {
+                        result = read_session_line(&mut input, &mut managed, &mut control_line), if control_input_open => {
                             match result {
                                 Ok(0) => control_input_open = false,
                                 Ok(_) => {
@@ -1274,6 +1379,12 @@ async fn interact(
                                         print_shell_event("warning", "Only /cancel or Ctrl-C is accepted while an operation is running.", context.json_output);
                                     }
                                     control_line.clear();
+                                }
+                                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                                    context.cancel();
+                                    let _ = session.abort().await;
+                                    print_shell_event("cancelled", "The active request was cancelled.", context.json_output);
+                                    break;
                                 }
                                 Err(error) => return Err(state_error(error.to_string())),
                             }
@@ -1303,6 +1414,9 @@ async fn interact(
 
 fn print_shell_event(kind: &str, message: &str, json_output: bool) {
     if !json_output {
+        if kind == "cancelled" && terminal::emit(PresentationEvent::Error, message).is_some() {
+            return;
+        }
         let _ = presentation_event(kind).emit(message, false);
         return;
     }
@@ -1362,8 +1476,13 @@ fn print_help(json_output: bool) {
             json!({"schemaVersion":1,"command":"agent.help","result":{"commands":commands}})
         );
     } else {
-        println!("TASC commands: {}", commands.join("; "));
-        println!("Natural-language requests use the same registered TASC tools.");
+        let message = format!(
+            "TASC commands: {}\nNatural-language requests use the same registered TASC tools.",
+            commands.join("; ")
+        );
+        if terminal::emit(PresentationEvent::Info, &message).is_none() {
+            println!("{message}");
+        }
     }
 }
 
@@ -1546,7 +1665,14 @@ fn render_event(name: &str, data: &Value, json_output: bool) {
             if json_output {
                 print_shell_event("progress", &safe_text(&tool), true)
             } else {
-                print_shell_event("progress", &format!("Completed {tool}"), false)
+                let (event, message) = if data["success"] == false {
+                    (PresentationEvent::Error, format!("Failed {tool}"))
+                } else {
+                    (PresentationEvent::Done, format!("Completed {tool}"))
+                };
+                if terminal::emit(event, &message).is_none() {
+                    print_shell_event("progress", &format!("Completed {tool}"), false)
+                }
             }
         }
         Some(AgentEvent::Warning(message)) => {
