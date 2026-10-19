@@ -84,7 +84,9 @@ other work in that run.
 For the active ticket, identify a pull request authored by Copilot or from a
 `copilot/` branch that explicitly closes the ticket and references the parent
 map. Merge at most one pull request per run, without requesting or performing a
-code review, only when all of these are true:
+code review. A pending review, review decision, review thread, or reviewer
+assignment is never a blocker and must not be requested or awaited. Merge
+directly once all of these are true:
 
 - it is open, non-draft, and GitHub reports it mergeable;
 - all required checks have completed successfully;
