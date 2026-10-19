@@ -13,7 +13,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tasc::commands::{canonical_command_input, SLASH_COMMANDS};
-use tasc::presentation::Event as PresentationEvent;
+use tasc::presentation::{self, Event as PresentationEvent};
 use tasc::terminal::{self, ManagedTerminal};
 use tasc_agent::{
     consistency::{ConsistencyService, FsConsistencyArtifactRepository},
@@ -31,7 +31,143 @@ use tasc_agent::{
 use tasc_core::discovery::{Diagnostic, Envelope};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-const SYSTEM_MESSAGE: &str = "You are TASC, a local-first Agent Skill assistant. Use only the registered tasc_* tools for TASC data and actions; never use shell, filesystem, or other ambient tools. Search is remote and only available when the user has not selected --offline. Summarize results and explain rankings. Resolve list positions against the latest result set. Security requests must use the Security Check tools. Tool results intentionally omit local paths, skill excerpts, and detailed Security evidence; tell the user which local TASC command can inspect them. If a requested operation has no registered TASC tool, explain that it is unavailable and do not claim it was performed. Lifecycle changes are never executed by a tool: call tasc_plan_lifecycle, show its exact plan, then wait for the human to approve its token at the TASC prompt. Never treat conversational consent or a model tool call as human approval. TASC does not retain chat transcripts; do not ask to persist conversation history.";
+const SYSTEM_MESSAGE: &str = "You are TASC, a local-first Agent Skill assistant. Use only the registered tasc_* tools for TASC data and actions; never use shell, filesystem, or other ambient tools. Search is remote and only available when the user has not selected --offline. Summarize results and explain rankings. When listing skills, render one row per installation in a table with exactly these user-facing columns: Name, Description, Tracked, Scope, Secure?. Resolve list positions against the latest result set. Security requests must use the Security Check tools. Tool results intentionally omit local paths, skill excerpts, and detailed Security evidence; tell the user which local TASC command can inspect them. If a requested operation has no registered TASC tool, explain that it is unavailable and do not claim it was performed. Lifecycle changes are never executed by a tool: call tasc_plan_lifecycle, show its exact plan, then wait for the human to approve its token at the TASC prompt. Never treat conversational consent or a model tool call as human approval. TASC does not retain chat transcripts; do not ask to persist conversation history.";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentSkillRow {
+    installation_id: String,
+    name: String,
+    description: String,
+    tracked: bool,
+    scope: String,
+    secure: String,
+}
+
+fn load_agent_skill_rows(
+    state_path: &Path,
+) -> Result<(tasc_core::Inventory, Vec<AgentSkillRow>), Diagnostic> {
+    let inventory = AgentService::new(
+        CopilotAdapter::local(),
+        FsStateRepository::new(state_path.to_path_buf()),
+    )
+    .inventory()
+    .map_err(state_error)?;
+    let artifacts = security_service(state_path).list()?;
+    let rows = agent_skill_rows(&inventory.items, &artifacts);
+    Ok((inventory, rows))
+}
+
+fn agent_skill_rows(
+    items: &[tasc_core::InventoryItem],
+    artifacts: &[tasc_core::security::SecurityArtifact],
+) -> Vec<AgentSkillRow> {
+    items
+        .iter()
+        .filter(|item| item.kind == "installation")
+        .map(|item| AgentSkillRow {
+            installation_id: item.installation_id.clone(),
+            name: item.identity.name.clone(),
+            description: item.description_excerpt.clone(),
+            tracked: item.tracked,
+            scope: item.scope.clone(),
+            secure: security_state(item, artifacts).to_string(),
+        })
+        .collect()
+}
+
+fn security_state(
+    item: &tasc_core::InventoryItem,
+    artifacts: &[tasc_core::security::SecurityArtifact],
+) -> &'static str {
+    let latest = artifacts
+        .iter()
+        .filter_map(|artifact| {
+            artifact
+                .skills
+                .iter()
+                .find(|skill| skill.identity.id == item.identity.id)
+                .map(|skill| (artifact, skill))
+        })
+        .max_by_key(|(artifact, _)| artifact.completed_at_unix_ms);
+    let Some((artifact, skill)) = latest else {
+        return "not checked";
+    };
+    if item.source_revision.as_ref()
+        != skill
+            .source_revision
+            .as_ref()
+            .map(|revision| &revision.value)
+    {
+        return "stale";
+    }
+    if artifact.status == tasc_core::security::SecurityCheckStatus::Partial {
+        return "inconclusive";
+    }
+    if artifact
+        .findings
+        .iter()
+        .any(|finding| finding.skill_id == item.identity.id)
+    {
+        "findings"
+    } else {
+        "yes"
+    }
+}
+
+fn skill_rows_value(rows: &[AgentSkillRow]) -> Value {
+    Value::Array(
+        rows.iter()
+            .enumerate()
+            .map(|(index, row)| {
+                json!({
+                    "rank": index + 1,
+                    "installationId": row.installation_id,
+                    "name": row.name,
+                    "description": row.description,
+                    "tracked": row.tracked,
+                    "scope": row.scope,
+                    "secure": row.secure
+                })
+            })
+            .collect(),
+    )
+}
+
+fn render_skill_table(rows: &[AgentSkillRow]) -> String {
+    let headers = ["name", "description", "tracked", "scope", "secure?"]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let rows = rows
+        .iter()
+        .map(|row| {
+            vec![
+                row.name.clone(),
+                row.description.clone(),
+                if row.tracked { "yes" } else { "no" }.to_string(),
+                row.scope.clone(),
+                row.secure.clone(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    presentation::render_table(&headers, &rows, presentation::terminal_width())
+}
+
+fn skill_tracking_entries(items: &[tasc_core::InventoryItem]) -> Vec<(String, String)> {
+    items
+        .iter()
+        .filter(|item| item.kind == "installation" && !item.tracked)
+        .map(|item| {
+            (
+                item.installation_id.clone(),
+                format!(
+                    "{} · {} · {}",
+                    item.identity.name, item.description_excerpt, item.scope
+                ),
+            )
+        })
+        .collect()
+}
 
 struct AgentContext {
     state_path: PathBuf,
@@ -148,30 +284,9 @@ impl AgentContext {
     async fn dispatch(&self, request: AgentToolRequest) -> Result<Value, Diagnostic> {
         match request {
             AgentToolRequest::ListSkills => {
-                let inventory = AgentService::new(
-                    CopilotAdapter::local(),
-                    FsStateRepository::new(self.state_path.clone()),
-                )
-                .inventory()
-                .map_err(state_error)?;
-                self.remember_references(
-                    inventory
-                        .items
-                        .iter()
-                        .map(|item| item.installation_id.clone()),
-                );
-                success(
-                    "skill list",
-                    json!({
-                        "items": inventory.items.iter().enumerate().map(|(index, item)| json!({
-                            "rank": index + 1,
-                            "name": item.identity.name,
-                            "assistant": item.target.as_ref().map(|target| target.assistant.clone()),
-                            "tracked": item.tracked,
-                            "status": item.status
-                        })).collect::<Vec<_>>()
-                    }),
-                )
+                let (_, rows) = load_agent_skill_rows(&self.state_path)?;
+                self.remember_references(rows.iter().map(|item| item.installation_id.clone()));
+                success("skill list", json!({ "items": skill_rows_value(&rows) }))
             }
             AgentToolRequest::SearchSkills { query } => {
                 if self.offline {
@@ -730,6 +845,8 @@ enum ShellCommand {
     Quit,
     Help,
     Status,
+    SkillList,
+    SkillTrackPicker,
     ModelList,
     ModelSession(String),
     ModelProfile(String),
@@ -757,6 +874,8 @@ fn parse_shell_command(input: &str) -> Result<ShellCommand, String> {
         "approve" if !arguments.is_empty() => Ok(ShellCommand::Approve(arguments.to_string())),
         "deny" if !arguments.is_empty() => Ok(ShellCommand::Deny(arguments.to_string())),
         "cancel" => Ok(ShellCommand::Cancel),
+        "skill" if arguments == "list" => Ok(ShellCommand::SkillList),
+        "skill" if arguments == "track" => Ok(ShellCommand::SkillTrackPicker),
         "model" => match arguments.split_whitespace().collect::<Vec<_>>().as_slice() {
             [] | ["list"] => Ok(ShellCommand::ModelList),
             ["profile", model] | ["save", model] => {
@@ -1197,6 +1316,59 @@ async fn interact(
                     false,
                     context.json_output,
                 );
+                continue;
+            }
+            ShellCommand::SkillList => {
+                match load_agent_skill_rows(&context.state_path) {
+                    Ok((_, rows)) if context.json_output => {
+                        match success("skill list", json!({ "items": skill_rows_value(&rows) })) {
+                            Ok(result) => println!("{result}"),
+                            Err(error) => {
+                                print_shell_event("error", &error.message, context.json_output)
+                            }
+                        }
+                    }
+                    Ok((_, rows)) => {
+                        print_shell_event(
+                            "result",
+                            render_skill_table(&rows).trim_end(),
+                            context.json_output,
+                        );
+                    }
+                    Err(error) => {
+                        print_shell_event("error", &error.message, context.json_output);
+                    }
+                }
+                continue;
+            }
+            ShellCommand::SkillTrackPicker => {
+                if managed.is_none() || context.json_output {
+                    print_shell_event(
+                        "error",
+                        "Use /skill track <installation-id> or /skill track all.",
+                        context.json_output,
+                    );
+                    continue;
+                }
+                match load_agent_skill_rows(&context.state_path) {
+                    Ok((inventory, _)) => {
+                        let entries = skill_tracking_entries(&inventory.items);
+                        if entries.is_empty() {
+                            print_shell_event(
+                                "result",
+                                "All discovered skill installations are already tracked.",
+                                context.json_output,
+                            );
+                        } else {
+                            let _ = terminal::update(|view| {
+                                view.open_inventory_picker("skill track", true, &entries)
+                            });
+                        }
+                    }
+                    Err(error) => {
+                        print_shell_event("error", &error.message, context.json_output);
+                    }
+                }
                 continue;
             }
             ShellCommand::ModelList => {
@@ -1856,8 +2028,8 @@ mod tests {
     use super::{
         dashboard_output, dashboard_status_for_items, lifecycle_summary, model_preferences_path,
         onboarding_message, output_policy, parse_shell_command, read_profile_model,
-        save_profile_model, session_config, shell_event_output, validate_model_choice,
-        ShellCommand,
+        render_skill_table, save_profile_model, session_config, shell_event_output,
+        skill_tracking_entries, validate_model_choice, AgentSkillRow, ShellCommand,
     };
     use std::{
         fs,
@@ -1865,7 +2037,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
     use tasc_agent::lifecycle::LifecycleResult;
-    use tasc_core::{Installation, InstallationStatus};
+    use tasc_core::{Installation, InstallationStatus, InventoryItem};
 
     fn test_path() -> PathBuf {
         let time = SystemTime::now()
@@ -1908,6 +2080,14 @@ mod tests {
         assert_eq!(
             parse_shell_command("/model").unwrap(),
             ShellCommand::ModelList
+        );
+        assert_eq!(
+            parse_shell_command("/skill list").unwrap(),
+            ShellCommand::SkillList
+        );
+        assert_eq!(
+            parse_shell_command("/skill track").unwrap(),
+            ShellCommand::SkillTrackPicker
         );
         assert_eq!(
             parse_shell_command("/evaluation run skill:example")
@@ -1961,6 +2141,81 @@ mod tests {
             ShellCommand::Cli(args) if args == ["state", "status"]
         ));
         assert!(parse_shell_command("/unknown").is_err());
+    }
+
+    #[test]
+    fn skill_table_uses_requested_columns_instead_of_a_comma_list() {
+        let rendered = render_skill_table(&[
+            AgentSkillRow {
+                installation_id: "installation:one".to_string(),
+                name: "review".to_string(),
+                description: "Reviews code changes.".to_string(),
+                tracked: false,
+                scope: "project".to_string(),
+                secure: "not checked".to_string(),
+            },
+            AgentSkillRow {
+                installation_id: "installation:two".to_string(),
+                name: "tdd".to_string(),
+                description: "Builds changes test-first.".to_string(),
+                tracked: true,
+                scope: "user".to_string(),
+                secure: "yes".to_string(),
+            },
+        ]);
+
+        for heading in ["name", "description", "tracked", "scope", "secure?"] {
+            assert!(rendered.contains(heading), "{rendered}");
+        }
+        assert!(!rendered.contains("review, tdd"), "{rendered}");
+    }
+
+    #[test]
+    fn tracking_picker_contains_only_untracked_installations() {
+        let tracked = inventory_item("tracked", true);
+        let untracked = inventory_item("untracked", false);
+
+        let entries = skill_tracking_entries(&[tracked, untracked]);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, "installation:untracked");
+        assert!(entries[0].1.contains("untracked"));
+        assert!(entries[0].1.contains("project"));
+    }
+
+    fn inventory_item(name: &str, tracked: bool) -> InventoryItem {
+        serde_json::from_value(serde_json::json!({
+            "action_id": format!("installation:{name}"),
+            "kind": "installation",
+            "identity": {
+                "id": format!("skill:{name}"),
+                "name": name,
+                "source": "file:///skills",
+                "relative_path": name
+            },
+            "target": {
+                "id": "copilot-project",
+                "assistant": "copilot",
+                "path": "/skills"
+            },
+            "installation_id": format!("installation:{name}"),
+            "path": format!("/skills/{name}"),
+            "scope": "project",
+            "tracked": tracked,
+            "tracking_state": if tracked { "tracked" } else { "untracked" },
+            "watch_state": "not_watched",
+            "lifecycle_state": "installed",
+            "status": "installed",
+            "source_revision": null,
+            "provenance": {
+                "kind": "local_workspace",
+                "confidence": "verified",
+                "explanation": "test"
+            },
+            "description": format!("{name} description"),
+            "description_excerpt": format!("{name} description")
+        }))
+        .unwrap()
     }
 
     #[test]

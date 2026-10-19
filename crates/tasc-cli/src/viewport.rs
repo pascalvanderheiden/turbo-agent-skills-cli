@@ -53,6 +53,9 @@ pub struct Viewport {
     working: Option<usize>,
     composer: String,
     cursor: usize,
+    history: Vec<String>,
+    history_index: Option<usize>,
+    history_draft: String,
     scroll: usize,
     new_output: bool,
     palette: Option<Palette>,
@@ -119,6 +122,9 @@ impl Viewport {
             working: None,
             composer: String::new(),
             cursor: 0,
+            history: Vec::new(),
+            history_index: None,
+            history_draft: String::new(),
             scroll: 0,
             new_output: false,
             palette: None,
@@ -367,12 +373,14 @@ impl Viewport {
         let previous_cursor = self.cursor;
         match key {
             Key::Text(text) | Key::Paste(text) => {
+                self.leave_history_navigation();
                 let text = text.replace("\r\n", "\n").replace('\r', "\n");
                 let text = safe_text(&text);
                 self.composer.insert_str(self.cursor, &text);
                 self.cursor += text.len();
             }
             Key::AltEnter => {
+                self.leave_history_navigation();
                 self.composer.insert(self.cursor, '\n');
                 self.cursor += 1;
             }
@@ -383,6 +391,7 @@ impl Viewport {
                 return self.submit_composer();
             }
             Key::Backspace if self.cursor > 0 => {
+                self.leave_history_navigation();
                 let previous = self.composer[..self.cursor]
                     .grapheme_indices(true)
                     .last()
@@ -392,6 +401,7 @@ impl Viewport {
                 self.cursor = previous;
             }
             Key::Delete if self.cursor < self.composer.len() => {
+                self.leave_history_navigation();
                 let length = self.composer[self.cursor..]
                     .graphemes(true)
                     .next()
@@ -421,6 +431,8 @@ impl Viewport {
             }
             Key::Up if self.palette.is_some() => self.move_palette_selection(false),
             Key::Down if self.palette.is_some() => self.move_palette_selection(true),
+            Key::Up => self.move_history(false),
+            Key::Down => self.move_history(true),
             Key::Escape if self.palette.is_some() => self.escape_palette(),
             Key::PageUp => {
                 self.scroll = self
@@ -455,6 +467,7 @@ impl Viewport {
         self.cursor = 0;
         self.palette = None;
         let input = std::mem::take(&mut self.composer);
+        self.record_submission(&input);
         self.clamp_scroll();
         Some(input)
     }
@@ -504,8 +517,55 @@ impl Viewport {
         self.palette = None;
         self.composer.clear();
         self.cursor = 0;
+        self.record_submission(&input);
         self.clamp_scroll();
         Some(input)
+    }
+
+    fn record_submission(&mut self, input: &str) {
+        if !input.trim().is_empty() && self.history.last().is_none_or(|previous| previous != input)
+        {
+            self.history.push(input.to_string());
+        }
+        self.history_index = None;
+        self.history_draft.clear();
+    }
+
+    fn leave_history_navigation(&mut self) {
+        if self.history_index.take().is_some() {
+            self.history_draft.clear();
+        }
+    }
+
+    fn move_history(&mut self, down: bool) {
+        if self.history.is_empty() {
+            return;
+        }
+        if down {
+            let Some(index) = self.history_index else {
+                return;
+            };
+            if index + 1 < self.history.len() {
+                let next = index + 1;
+                self.history_index = Some(next);
+                self.composer = self.history[next].clone();
+            } else {
+                self.history_index = None;
+                self.composer = std::mem::take(&mut self.history_draft);
+            }
+        } else {
+            let index = match self.history_index {
+                Some(index) => index.saturating_sub(1),
+                None => {
+                    self.history_draft = self.composer.clone();
+                    self.history.len() - 1
+                }
+            };
+            self.history_index = Some(index);
+            self.composer = self.history[index].clone();
+        }
+        self.cursor = self.composer.len();
+        self.palette = None;
     }
 
     fn escape_palette(&mut self) {
@@ -658,6 +718,7 @@ impl Viewport {
                         self.composer = picker.original_composer;
                         self.cursor = picker.original_cursor.min(self.composer.len());
                     }
+                    self.record_submission(&line);
                     self.clamp_scroll();
                     return Some(line);
                 }
@@ -716,6 +777,7 @@ impl Viewport {
                             self.composer = picker.original_composer;
                             self.cursor = picker.original_cursor.min(self.composer.len());
                         }
+                        self.record_submission(&line);
                         self.clamp_scroll();
                         return Some(line);
                     }
@@ -729,6 +791,7 @@ impl Viewport {
                             self.composer = picker.original_composer;
                             self.cursor = picker.original_cursor.min(self.composer.len());
                         }
+                        self.record_submission(&command);
                         self.clamp_scroll();
                         return Some(command);
                     }
@@ -913,7 +976,10 @@ impl Viewport {
                 } else {
                     ""
                 };
-                rows.push(format!("{marker} /{}{}", command.syntax, availability));
+                rows.push(format!(
+                    "{marker} /{}{availability} · {}",
+                    command.syntax, command.description
+                ));
             }
         }
         if let Some((command, arguments, safety)) = details {
@@ -1138,6 +1204,34 @@ mod tests {
         let mut view = viewport();
         view.key(Key::Text("/skill".into()));
         assert!(view.render().rows.join("\n").contains("Plan + approval"));
+    }
+
+    #[test]
+    fn command_palette_shows_descriptions_next_to_commands() {
+        let mut view = Viewport::new(120, 24, "user".into());
+        view.open_palette_browse();
+        let rendered = view.render().rows.join("\n");
+        assert!(rendered.contains("/status · Show the current Agent Session"));
+        assert!(rendered.contains("/skill · Browse or manage skills"));
+    }
+
+    #[test]
+    fn arrow_keys_recall_command_history_and_restore_the_draft() {
+        let mut view = viewport();
+        view.key(Key::Text("first command".into()));
+        assert_eq!(view.key(Key::Enter).as_deref(), Some("first command"));
+        view.key(Key::Text("second command".into()));
+        assert_eq!(view.key(Key::Enter).as_deref(), Some("second command"));
+        view.key(Key::Text("draft".into()));
+
+        view.key(Key::Up);
+        assert_eq!(view.composer, "second command");
+        view.key(Key::Up);
+        assert_eq!(view.composer, "first command");
+        view.key(Key::Down);
+        assert_eq!(view.composer, "second command");
+        view.key(Key::Down);
+        assert_eq!(view.composer, "draft");
     }
 
     #[test]
