@@ -7,16 +7,20 @@ $PresentationOutputPiped = $MyInvocation.PipelinePosition -lt $MyInvocation.Pipe
 
 function Write-PresentationEvent {
     param(
-        [ValidateSet("Input", "TASC", "Prompt", "Info", "Working", "Warning", "Error", "Done", "Next")]
+        [ValidateSet("Input", "TASC", "Prompt", "Info", "Working", "Detecting", "Downloading", "Verifying", "Installing", "Warning", "Error", "Done", "Installed", "Next")]
         [string]$Category,
         [string]$Body
     )
     $styles = @{
         Input = @([char]0x203A, "36"); TASC = @([char]0x25C6, "35"); Prompt = @("?", "36")
-        Info = @([char]0x00B7, "34"); Working = @("...", "36"); Warning = @("!", "33")
-        Error = @([char]0x00D7, "31"); Done = @([char]0x2713, "32"); Next = @([char]0x21B3, "2;36")
+        Info = @([char]0x00B7, "34"); Working = @("...", "36")
+        Detecting = @("...", "36"); Downloading = @("...", "36")
+        Verifying = @("...", "36"); Installing = @("...", "36")
+        Warning = @("!", "33"); Error = @([char]0x00D7, "31")
+        Done = @([char]0x2713, "32"); Installed = @([char]0x2713, "32")
+        Next = @([char]0x21B3, "2;36")
     }
-    $isError = $Category -in @("Prompt", "Working", "Warning", "Error")
+    $isError = $Category -in @("Prompt", "Working", "Detecting", "Downloading", "Verifying", "Installing", "Warning", "Error")
     $redirected = if ($isError) { [Console]::IsErrorRedirected } else { [Console]::IsOutputRedirected }
     $label = "$($Category.ToUpperInvariant()):"
     if (-not $redirected -and ($isError -or -not $PresentationOutputPiped) -and
@@ -38,6 +42,7 @@ trap {
     exit 1
 }
 
+Write-PresentationEvent Detecting "platform"
 if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
     [System.Runtime.InteropServices.OSPlatform]::Windows
 )) {
@@ -61,9 +66,11 @@ try {
     New-Item -ItemType Directory -Path $temporary | Out-Null
     $archivePath = Join-Path $temporary $archiveName
     $checksumsPath = Join-Path $temporary "SHA256SUMS.txt"
+    Write-PresentationEvent Downloading $archiveName
     Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/$archiveName" -OutFile $archivePath
     Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/SHA256SUMS.txt" -OutFile $checksumsPath
 
+    Write-PresentationEvent Verifying "checksum and archive"
     $escapedName = [regex]::Escape($archiveName)
     $matches = [regex]::Matches(
         (Get-Content -Raw $checksumsPath),
@@ -82,9 +89,10 @@ try {
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $temporary "tasc.exe"))) {
         throw "The verified archive does not contain the expected tasc.exe executable."
     }
+    Write-PresentationEvent Installing $installDirectory
     New-Item -ItemType Directory -Force -Path $installDirectory | Out-Null
     Copy-Item (Join-Path $temporary "tasc.exe") (Join-Path $installDirectory "tasc.exe") -Force
-    Write-PresentationEvent Done "Installed TASC v$Version to $installDirectory"
+    Write-PresentationEvent Installed "TASC v$Version to $installDirectory"
     if (($env:PATH -split [IO.Path]::PathSeparator) -notcontains $installDirectory) {
         Write-PresentationEvent Next "Add $installDirectory to your PATH to run tasc."
     }

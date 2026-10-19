@@ -15,6 +15,8 @@ presentation_event() {
     Warning) glyph="!"; color="33"; fd=2 ;;
     Error) glyph="×"; color="31"; fd=2 ;;
     Done) glyph="✓"; color="32" ;;
+    Detecting|Downloading|Verifying|Installing) glyph="..."; color="36"; fd=2 ;;
+    Installed) glyph="✓"; color="32" ;;
     Next) glyph="↳"; color="2;36" ;;
     *) return 1 ;;
   esac
@@ -67,6 +69,7 @@ main() {
   set -euo pipefail
 
   local target binary_name version archive_name base_url expected actual install_dir
+  presentation_event Detecting "platform"
   target="$(detect_target)" || return 1
   version="${TASC_VERSION:-$VERSION}"
   if [[ ! "$version" =~ ^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
@@ -94,11 +97,16 @@ main() {
   }
   trap 'rm -rf "$TASC_TEMP_DIR"' EXIT
 
-  curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
-    "${base_url}/${archive_name}" --output "${TASC_TEMP_DIR}/${archive_name}"
-  curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
-    "${base_url}/SHA256SUMS.txt" --output "${TASC_TEMP_DIR}/SHA256SUMS.txt"
+  presentation_event Downloading "$archive_name"
+  if ! curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+    "${base_url}/${archive_name}" --output "${TASC_TEMP_DIR}/${archive_name}" ||
+    ! curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+      "${base_url}/SHA256SUMS.txt" --output "${TASC_TEMP_DIR}/SHA256SUMS.txt"; then
+    presentation_event Error "Download failed for $archive_name."
+    return 1
+  fi
 
+  presentation_event Verifying "checksum and archive"
   expected="$(awk -v filename="$archive_name" \
     '$2 == filename { print $1; count++ } END { if (count != 1) exit 1 }' \
     "${TASC_TEMP_DIR}/SHA256SUMS.txt")" || {
@@ -110,9 +118,15 @@ main() {
     return 1
   fi
   if command -v sha256sum >/dev/null 2>&1; then
-    actual="$(sha256sum "${TASC_TEMP_DIR}/${archive_name}" | awk '{print $1}')"
+    actual="$(sha256sum "${TASC_TEMP_DIR}/${archive_name}" | awk '{print $1}')" || {
+      presentation_event Error "Could not calculate the SHA-256 checksum for $archive_name."
+      return 1
+    }
   elif command -v shasum >/dev/null 2>&1; then
-    actual="$(shasum -a 256 "${TASC_TEMP_DIR}/${archive_name}" | awk '{print $1}')"
+    actual="$(shasum -a 256 "${TASC_TEMP_DIR}/${archive_name}" | awk '{print $1}')" || {
+      presentation_event Error "Could not calculate the SHA-256 checksum for $archive_name."
+      return 1
+    }
   else
     presentation_event Error "sha256sum or shasum is required to verify the TASC download."
     return 1
@@ -126,8 +140,12 @@ main() {
     presentation_event Error "The verified archive does not contain the expected $binary_name executable."
     return 1
   fi
-  tar -xzf "${TASC_TEMP_DIR}/${archive_name}" -C "$TASC_TEMP_DIR" "$binary_name"
+  if ! tar -xzf "${TASC_TEMP_DIR}/${archive_name}" -C "$TASC_TEMP_DIR" "$binary_name"; then
+    presentation_event Error "Could not extract $binary_name from the verified archive."
+    return 1
+  fi
   install_dir="${TASC_INSTALL_DIR:-${HOME}/.local/bin}"
+  presentation_event Installing "$install_dir"
   if ! mkdir -p "$install_dir" || [[ ! -d "$install_dir" || ! -w "$install_dir" ]]; then
     presentation_event Error "Install directory is not writable: $install_dir"
     return 1
@@ -136,7 +154,7 @@ main() {
     presentation_event Error "Could not install TASC into $install_dir."
     return 1
   fi
-  presentation_event Done "Installed TASC $version to $install_dir/$binary_name"
+  presentation_event Installed "TASC $version to $install_dir/$binary_name"
   case ":${PATH}:" in
     *":${install_dir}:"*) ;;
     *) presentation_event Next "Add $install_dir to your PATH to run tasc." ;;
