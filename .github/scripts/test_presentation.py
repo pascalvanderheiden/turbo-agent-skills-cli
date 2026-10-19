@@ -29,9 +29,14 @@ EVENTS = (
     ("Prompt", "?", "36"),
     ("Info", "·", "34"),
     ("Working", "...", "36"),
+    ("Detecting", "...", "36"),
+    ("Downloading", "...", "36"),
+    ("Verifying", "...", "36"),
+    ("Installing", "...", "36"),
     ("Warning", "!", "33"),
     ("Error", "×", "31"),
     ("Done", "✓", "32"),
+    ("Installed", "✓", "32"),
     ("Next", "↳", "2;36"),
 )
 
@@ -145,7 +150,14 @@ class InstallerPresentationTests(unittest.TestCase):
 
     def test_bash_vocabulary_routing_and_capability_gates(self):
         for category, glyph, color in EVENTS:
-            stream = "stderr" if category in ("Prompt", "Working", "Error", "Warning") else "stdout"
+            stream = (
+                "stderr"
+                if category in (
+                    "Prompt", "Working", "Detecting", "Downloading", "Verifying",
+                    "Installing", "Error", "Warning",
+                )
+                else "stdout"
+            )
             command = [
                 "bash", "-c", 'source "$1"; presentation_event "$2" body',
                 "_", str(ROOT / "install.sh"), category,
@@ -182,7 +194,10 @@ class InstallerPresentationTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 1)
             self.assertEqual(result.stdout, b"")
-            self.assertEqual(result.stderr, b"ERROR: This installer supports Windows x64 only.\n")
+            self.assertEqual(
+                result.stderr,
+                b"DETECTING: platform\nERROR: This installer supports Windows x64 only.\n",
+            )
 
 
 @unittest.skipUnless(os.name == "posix" and shutil.which("pwsh"), "requires PowerShell and a PTY")
@@ -215,7 +230,14 @@ class PowerShellPresentationTests(unittest.TestCase):
 
     def test_vocabulary_and_pipeline_gating(self):
         for category, glyph, color in EVENTS:
-            stream = "stderr" if category in ("Prompt", "Working", "Warning", "Error") else "stdout"
+            stream = (
+                "stderr"
+                if category in (
+                    "Prompt", "Working", "Detecting", "Downloading", "Verifying",
+                    "Installing", "Warning", "Error",
+                )
+                else "stdout"
+            )
             for gate in ({}, {"NO_COLOR": ""}, {"NO_COLOR": "1"}, {"TERM": "dumb"}):
                 with self.subTest(category=category, gate=gate):
                     env = environment(

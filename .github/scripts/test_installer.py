@@ -102,6 +102,22 @@ class InstallerTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                result.stderr.splitlines(),
+                [
+                    "DETECTING: platform",
+                    "DOWNLOADING: tasc-v0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+                    "VERIFYING: checksum and archive",
+                    f"INSTALLING: {install_dir}",
+                ],
+            )
+            self.assertEqual(
+                result.stdout.splitlines(),
+                [
+                    f"INSTALLED: TASC v0.1.0 to {install_dir}/tasc",
+                    f"NEXT: Add {install_dir} to your PATH to run tasc.",
+                ],
+            )
             installed = install_dir / "tasc"
             self.assertTrue(installed.is_file())
             self.assertTrue(os.access(installed, os.X_OK))
@@ -119,7 +135,17 @@ class InstallerTests(unittest.TestCase):
                 check=False,
             )
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("SHA-256 verification failed", result.stderr)
+            self.assertEqual(
+                result.stderr.splitlines(),
+                [
+                    "DETECTING: platform",
+                    "DOWNLOADING: tasc-v0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+                    "VERIFYING: checksum and archive",
+                    "ERROR: SHA-256 verification failed for "
+                    "tasc-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.",
+                ],
+            )
+            self.assertEqual(result.stdout, "")
             self.assertFalse(install_dir2.exists())
 
 
