@@ -12,6 +12,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
+use tasc::commands::{canonical_command_input, SLASH_COMMANDS};
 use tasc::presentation::Event as PresentationEvent;
 use tasc::terminal::{self, ManagedTerminal};
 use tasc_agent::{
@@ -740,19 +741,17 @@ enum ShellCommand {
 }
 
 fn parse_shell_command(input: &str) -> Result<ShellCommand, String> {
-    let input = input.trim();
+    let normalized = canonical_command_input(input);
+    let input = normalized.trim();
     if !input.starts_with('/') && !input.starts_with(':') {
         return Ok(ShellCommand::Request(input.to_string()));
     }
-    let command = input
-        .strip_prefix('/')
-        .or_else(|| input.strip_prefix(':'))
-        .unwrap_or_default();
+    let command = input.strip_prefix('/').unwrap_or_default();
     let (name, arguments) = command
         .split_once(char::is_whitespace)
         .map_or((command, ""), |(name, rest)| (name, rest.trim()));
     match name {
-        "quit" | "exit" => Ok(ShellCommand::Quit),
+        "quit" => Ok(ShellCommand::Quit),
         "help" => Ok(ShellCommand::Help),
         "status" => Ok(ShellCommand::Status),
         "approve" if !arguments.is_empty() => Ok(ShellCommand::Approve(arguments.to_string())),
@@ -775,37 +774,22 @@ fn parse_shell_command(input: &str) -> Result<ShellCommand, String> {
             "state".to_string(),
             "status".to_string(),
         ])),
-        "profiles" if arguments.is_empty() => Ok(ShellCommand::Cli(vec![
-            "state".to_string(),
-            "status".to_string(),
-        ])),
         "bundle" if arguments == "validate" || arguments.starts_with("validate ") => {
             let mut args = vec!["bundle".to_string(), "validate".to_string()];
             args.extend(arguments.split_whitespace().skip(1).map(str::to_string));
             Ok(ShellCommand::Cli(args))
         }
-        "command-skill" | "command-skills" if !arguments.is_empty() => {
+        "command-skill" if !arguments.is_empty() => {
             let mut args = vec!["skill".to_string(), "command".to_string()];
             args.extend(arguments.split_whitespace().map(str::to_string));
             Ok(ShellCommand::Cli(args))
         }
-        "skill" | "evaluation" | "eval" | "consistency" | "security" | "profile" | "profiles"
-        | "bundle" | "bundles" | "command-skill" | "command-skills" => {
-            if arguments.is_empty() && !matches!(name, "profiles") {
+        "skill" | "evaluation" | "consistency" | "security" | "profile" | "bundle"
+        | "command-skill" => {
+            if arguments.is_empty() {
                 return Err(format!("Usage: /{name} OPERATION [ARGUMENTS]"));
             }
-            let noun = match name {
-                "eval" => "evaluation",
-                "profiles" => "profile",
-                "bundles" => "bundle",
-                "command-skills" => "command-skill",
-                _ => name,
-            };
-            let request = if arguments.is_empty() {
-                noun.to_string()
-            } else {
-                format!("{noun} {arguments}")
-            };
+            let request = format!("{name} {arguments}");
             Ok(ShellCommand::Request(format!(
                 "Run the TASC {request} operation using its registered TASC tools only."
             )))
@@ -1167,8 +1151,9 @@ async fn interact(
         if shell_input.is_empty() {
             continue;
         }
-        let _ = terminal::emit(PresentationEvent::Input, shell_input);
-        let command = match parse_shell_command(shell_input) {
+        let canonical_input = canonical_command_input(shell_input);
+        let _ = terminal::emit(PresentationEvent::Input, &canonical_input);
+        let command = match parse_shell_command(&canonical_input) {
             Ok(command) => command,
             Err(error) => {
                 print_shell_event("error", &error, context.json_output);
@@ -1179,7 +1164,11 @@ async fn interact(
         match command {
             ShellCommand::Quit => break,
             ShellCommand::Help => {
-                print_help(context.json_output);
+                if managed.is_some() && !context.json_output {
+                    let _ = terminal::update(|view| view.open_palette_browse());
+                } else {
+                    print_help(context.json_output);
+                }
                 continue;
             }
             ShellCommand::Status => {
@@ -1277,9 +1266,11 @@ async fn interact(
                 let approval = context.approve(&token);
                 tokio::pin!(approval);
                 let mut control_line = String::new();
+                let _ = terminal::update(|view| view.set_operation_active(true));
                 loop {
                     tokio::select! {
                         result = &mut approval => {
+                            let _ = terminal::update(|view| view.set_operation_active(false));
                             match result {
                                 Ok(result) => print_shell_event("result", &result.to_string(), context.json_output),
                                 Err(error) => print_shell_event("error", &error.message, context.json_output),
@@ -1288,8 +1279,9 @@ async fn interact(
                         },
                         result = read_session_line(&mut input, &mut managed, &mut control_line), if managed.is_some() => {
                             let interrupted = result.as_ref().is_err_and(|error| error.kind() == std::io::ErrorKind::Interrupted);
-                            if interrupted || control_line.trim() == "/cancel" {
+                            if interrupted || matches!(parse_shell_command(control_line.trim()), Ok(ShellCommand::Cancel)) {
                                 context.cancel();
+                                let _ = terminal::update(|view| view.set_operation_active(false));
                                 print_shell_event("cancelled", "The active approval was cancelled.", context.json_output);
                                 break;
                             }
@@ -1297,11 +1289,25 @@ async fn interact(
                                 context.cancel();
                                 return Err(cancelled_error());
                             }
-                            print_shell_event("warning", "Only /cancel or Ctrl-C is accepted while an operation is running.", context.json_output);
+                            let control_command = parse_shell_command(control_line.trim());
+                            match control_command {
+                                Ok(ShellCommand::Status) => {
+                                    render_dashboard(&dashboard_status(
+                                        &context.state_path,
+                                        &model,
+                                        token_usage(session).await,
+                                    ), false, context.json_output);
+                                }
+                                Ok(ShellCommand::Help) => {
+                                    let _ = terminal::update(|view| view.open_palette_browse());
+                                }
+                                _ => print_shell_event("warning", "Only /cancel, /status, or /help is accepted while an operation is running.", context.json_output),
+                            }
                             control_line.clear();
                         },
                         _ = tokio::signal::ctrl_c() => {
                             context.cancel();
+                            let _ = terminal::update(|view| view.set_operation_active(false));
                             return Err(cancelled_error());
                         }
                     }
@@ -1336,6 +1342,7 @@ async fn interact(
             ShellCommand::Request(prompt) => {
                 context.reset_cancellation();
                 let _ = terminal::update(|view| {
+                    view.set_operation_active(true);
                     view.footer.state = "Working".into();
                     view.present(PresentationEvent::Working, "Agent request");
                 });
@@ -1347,6 +1354,7 @@ async fn interact(
                 loop {
                     tokio::select! {
                         result = &mut turn => {
+                            let _ = terminal::update(|view| view.set_operation_active(false));
                             match result {
                                 Ok(Some(response)) => {
                                     let message = response.data.get("content").and_then(Value::as_str).unwrap_or_default();
@@ -1372,17 +1380,36 @@ async fn interact(
                                     if matches!(parse_shell_command(command), Ok(ShellCommand::Cancel)) {
                                         context.cancel();
                                         let _ = session.abort().await;
+                                        let _ = terminal::update(|view| view.set_operation_active(false));
                                         print_shell_event("cancelled", "The active request was cancelled.", context.json_output);
                                         break;
                                     }
+                                    match parse_shell_command(command) {
+                                        Ok(ShellCommand::Status) => {
+                                            render_dashboard(&dashboard_status(
+                                                &context.state_path,
+                                                &model,
+                                                token_usage(session).await,
+                                            ), false, context.json_output);
+                                            control_line.clear();
+                                            continue;
+                                        }
+                                        Ok(ShellCommand::Help) => {
+                                            let _ = terminal::update(|view| view.open_palette_browse());
+                                            control_line.clear();
+                                            continue;
+                                        }
+                                        _ => {}
+                                    }
                                     if !command.is_empty() {
-                                        print_shell_event("warning", "Only /cancel or Ctrl-C is accepted while an operation is running.", context.json_output);
+                                        print_shell_event("warning", "Only /cancel, /status, or /help is accepted while an operation is running.", context.json_output);
                                     }
                                     control_line.clear();
                                 }
                                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
                                     context.cancel();
                                     let _ = session.abort().await;
+                                    let _ = terminal::update(|view| view.set_operation_active(false));
                                     print_shell_event("cancelled", "The active request was cancelled.", context.json_output);
                                     break;
                                 }
@@ -1392,6 +1419,7 @@ async fn interact(
                         _ = tokio::signal::ctrl_c() => {
                             context.cancel();
                             let _ = session.abort().await;
+                            let _ = terminal::update(|view| view.set_operation_active(false));
                             print_shell_event("cancelled", "The active request was cancelled.", context.json_output);
                             break;
                         }
@@ -1455,21 +1483,16 @@ fn shell_event_output(kind: &str, message: &str, json_output: bool) -> String {
 }
 
 fn print_help(json_output: bool) {
-    let commands = [
-        "/quit",
-        "/skill list|search|...",
-        "/evaluation run|list|show ...",
-        "/consistency check|list|show ...",
-        "/security check|list|show ...",
-        "/audit",
-        "/stats",
-        "/profile status",
-        "/bundle validate ...",
-        "/command-skill adapters|capabilities|list|install|update|repair|uninstall ...",
-        "/model [list|MODEL|profile MODEL]",
-        "/status",
-        "/help",
-    ];
+    let commands = SLASH_COMMANDS
+        .iter()
+        .map(|command| {
+            if command.arguments.is_empty() {
+                format!("/{}", command.syntax)
+            } else {
+                format!("/{} {}", command.syntax, command.arguments)
+            }
+        })
+        .collect::<Vec<_>>();
     if json_output {
         println!(
             "{}",
@@ -1898,6 +1921,21 @@ mod tests {
             parse_shell_command(":approve tasc-approve-token").unwrap(),
             ShellCommand::Approve("tasc-approve-token".to_string())
         );
+        assert_eq!(
+            parse_shell_command(":eval run skill:example").unwrap(),
+            ShellCommand::Request(
+                "Run the TASC evaluation run skill:example operation using its registered TASC tools only."
+                    .to_string()
+            )
+        );
+        assert!(matches!(
+            parse_shell_command("/command-skills list").unwrap(),
+            ShellCommand::Cli(args) if args == ["skill", "command", "list"]
+        ));
+        assert!(matches!(
+            parse_shell_command("/profiles").unwrap(),
+            ShellCommand::Cli(args) if args == ["state", "status"]
+        ));
         assert!(parse_shell_command("/unknown").is_err());
     }
 
