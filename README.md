@@ -11,6 +11,8 @@ TASC helps you discover, install, create, evaluate, and safely manage coding-age
 
 Local-first tools to discover, install, create, evaluate, and safely manage coding-agent skills.
 
+![TASC Agent Session showing a scrollable transcript, Slash Command palette, composer, and model and token status footer.](docs/site/assets/agent-session.png)
+
 ## Start here
 
 Install TASC 0.1.0 on Linux, macOS, or Windows x64. The installers verify the selected release archive against its published SHA-256 checksum before installing it in a user-writable directory.

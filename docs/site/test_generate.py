@@ -15,6 +15,18 @@ class LandingPageTests(unittest.TestCase):
         self.assertIn("tasc discover", content)
         self.assertIn("v0.1.0/index.html", content)
 
+    def test_agent_session_screenshot_precedes_start_here_with_exact_alt_text(self):
+        content = generated_content()
+        image = (
+            '<img class="product-shot" src="assets/agent-session.png" '
+            'alt="TASC Agent Session showing a scrollable transcript, Slash Command palette, '
+            'composer, and model and token status footer.">'
+        )
+
+        self.assertIn(image, content)
+        self.assertLess(content.index(image), content.index('<h2 id="start-here">'))
+        self.assertTrue((SITE / "assets" / "agent-session.png").is_file())
+
     def test_markdown_rendering_escapes_html_and_assigns_unique_headings(self):
         content = render_markdown("# Hello\n\n# Hello\n\n<script>alert(1)</script>")
         self.assertIn('id="hello-2"', content)
