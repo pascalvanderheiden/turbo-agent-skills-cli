@@ -62,23 +62,25 @@ instead of guessing.
 Create tracer-bullet implementation tickets in dependency order. Every ticket
 must:
 
-- use a unique temporary ID;
+- use a unique temporary ID matching `aw_[A-Za-z0-9_]{3,12}`;
 - set `parent` to the triggering wayfinder map so GitHub records a native
   sub-issue relationship;
 - include `## Parent`, `## What to build`, and `## Acceptance criteria`;
 - be small enough for one fresh coding-agent context;
 - carry the fixed `ready-for-agent` label;
-- use `blocked_by` with temporary IDs or existing issue numbers for every true
-  predecessor, so GitHub records native dependency edges; and
+- use `blocked_by` with exact temporary IDs (for example `aw_shell`, never
+  `#aw_shell`) or existing issue numbers for every true predecessor, so GitHub
+  records native dependency edges; and
 - avoid implementation file paths unless a prototype made one an explicit
   decision.
 
 Search existing sub-issues before creating anything. If an equivalent ticket
 already exists, reuse it and never create a duplicate.
 
-After all missing tickets have been created, add one concise plan-index comment
-to the map, listing tickets in execution order with their blockers. Then
-atomically replace `to-plan` with `planned`.
+Emit every `create-issue` output first. Then emit one concise plan-index comment
+to the map, listing tickets in execution order with their blockers. Emit the
+`replace-label` output last, replacing `to-plan` with `planned`. Never emit that
+label transition if any ticket or dependency edge is omitted from the outputs.
 
 Do not assign Copilot, merge pull requests, or close the map in this workflow.
 If no ticket needs creation and the existing plan is complete, only post the

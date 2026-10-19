@@ -68,7 +68,8 @@ specification format, with this workflow-specific publishing override:
 - publish the complete spec as one comment on the wayfinder map;
 - begin the comment with `<!-- wayfinder-spec:v1 -->`;
 - include the chosen testing seams in `## Testing Decisions`; and
-- after publishing, add both `specced` and `to-plan` to the map.
+- after publishing, use one `add-labels` operation to add both `specced` and
+  `to-plan` to the map; never add `specced` without `to-plan`.
 
 If the map has `ready-for-agent`, remove it because only implementation tickets,
 not wayfinder decision maps, use that label.
