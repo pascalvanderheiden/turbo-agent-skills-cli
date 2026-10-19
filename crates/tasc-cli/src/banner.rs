@@ -1,4 +1,4 @@
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
 
 const LOGO_LINES: [&str; 5] = [
     "______________________________",
@@ -8,7 +8,7 @@ const LOGO_LINES: [&str; 5] = [
     "/_/    /_/  |_/____/ \\____/",
 ];
 
-fn banner(color: bool) -> String {
+pub(crate) fn render(color: bool) -> String {
     let mut output = String::new();
     for (index, line) in LOGO_LINES.iter().enumerate() {
         if color {
@@ -24,27 +24,38 @@ fn banner(color: bool) -> String {
 
 pub fn run() -> io::Result<()> {
     let mut stdout = io::stdout().lock();
-    if !stdout.is_terminal() {
-        stdout.write_all(b"TASC\n")?;
-        stdout.write_all(banner(false).as_bytes())?;
-        return stdout.flush();
-    }
-
     let color = tasc::presentation::Event::Tasc.decoration(false);
-    write!(stdout, "\n{}\n", banner(color))?;
-    stdout.flush()?;
-    Ok(())
+    stdout.write_all(render(color).as_bytes())?;
+    stdout.flush()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::banner;
+    use super::render;
 
     #[test]
-    fn banner_is_static_and_brand_compatible() {
-        let rendered = banner(false);
-        assert!(rendered.contains("______________________________"));
-        assert!(rendered.contains("___  __/__    |_  ___/_  ____/"));
-        assert!(!rendered.contains("\x1b["));
+    fn plain_banner_is_one_static_ascii_render() {
+        assert_eq!(
+            render(false),
+            concat!(
+                "______________________________\n",
+                "___  __/__    |_  ___/_  ____/\n",
+                "__  /  __  /| |____ \\_  /\n",
+                "_  /   _  ___ |___/ // /___\n",
+                "/_/    /_/  |_/____/ \\____/\n",
+            )
+        );
+    }
+
+    #[test]
+    fn decorated_banner_only_adds_color_without_redraw() {
+        let mut rendered = render(true);
+        for color in ["91", "93", "92", "96", "94"] {
+            let escape = format!("\x1b[1;{color}m");
+            assert_eq!(rendered.matches(&escape).count(), 1);
+            rendered = rendered.replace(&escape, "");
+        }
+        assert_eq!(rendered.matches("\x1b[0m").count(), 5);
+        assert_eq!(rendered.replace("\x1b[0m", ""), render(false));
     }
 }
