@@ -38,7 +38,7 @@ safe-outputs:
     max: 1
   add-comment:
     target: "triggering"
-    required-labels: ["wayfinder:map", specced, to-plan]
+    required-labels: ["wayfinder:map", specced]
     max: 1
   noop:
     report-as-issue: false
