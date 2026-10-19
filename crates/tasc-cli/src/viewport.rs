@@ -56,8 +56,46 @@ pub struct Viewport {
     scroll: usize,
     new_output: bool,
     palette: Option<Palette>,
+    picker: Option<Picker>,
     active_operation: bool,
     pub footer: Footer,
+}
+
+const PICKER_MAX_ROWS: usize = 8;
+
+struct PickerItem {
+    value: String,
+    session: bool,
+    profile: bool,
+}
+
+enum PickerKind {
+    Model,
+    Scope(String),
+}
+
+struct PickerLevel {
+    kind: PickerKind,
+    items: Vec<PickerItem>,
+    filter: String,
+    selected: usize,
+    status: Option<String>,
+}
+
+struct Picker {
+    original_composer: String,
+    original_cursor: usize,
+    levels: Vec<PickerLevel>,
+}
+
+impl PickerLevel {
+    fn matches(&self) -> Vec<&PickerItem> {
+        let filter = self.filter.to_lowercase();
+        self.items
+            .iter()
+            .filter(|item| item.value.to_lowercase().contains(&filter))
+            .collect()
+    }
 }
 
 struct Palette {
@@ -78,6 +116,7 @@ impl Viewport {
             scroll: 0,
             new_output: false,
             palette: None,
+            picker: None,
             active_operation: false,
             footer: Footer {
                 state: "Idle".into(),
@@ -123,6 +162,62 @@ impl Viewport {
             selected: None,
         });
         self.refresh_palette_selection();
+    }
+
+    pub fn open_model_picker(&mut self) {
+        self.palette = None;
+        let (original_composer, original_cursor) = self
+            .picker
+            .take()
+            .map(|picker| (picker.original_composer, picker.original_cursor))
+            .unwrap_or_else(|| (self.composer.clone(), self.cursor));
+        self.picker = Some(Picker {
+            original_composer,
+            original_cursor,
+            levels: vec![PickerLevel {
+                kind: PickerKind::Model,
+                items: Vec::new(),
+                filter: String::new(),
+                selected: 0,
+                status: Some("Loading models…".into()),
+            }],
+        });
+    }
+
+    pub fn set_model_picker_models(
+        &mut self,
+        models: &[String],
+        session: &str,
+        profile: Option<&str>,
+    ) {
+        if let Some(level) = self.picker_loading_level() {
+            level.status = None;
+            level.items = std::iter::once("auto")
+                .chain(models.iter().map(String::as_str).filter(|id| *id != "auto"))
+                .map(|id| PickerItem {
+                    value: id.to_string(),
+                    session: id == session,
+                    profile: Some(id) == profile,
+                })
+                .collect();
+        }
+    }
+
+    pub fn fail_model_picker(&mut self, message: &str) {
+        if let Some(level) = self.picker_loading_level() {
+            level.status = Some(format!("Models unavailable: {}", safe_text(message)));
+        }
+    }
+
+    fn picker_loading_level(&mut self) -> Option<&mut PickerLevel> {
+        self.picker
+            .as_mut()
+            .and_then(|picker| picker.levels.last_mut())
+            .filter(|level| matches!(level.kind, PickerKind::Model) && level.items.is_empty())
+    }
+
+    pub fn picker_open(&self) -> bool {
+        self.picker.is_some()
     }
 
     pub fn content(&mut self, body: &str) {
@@ -186,7 +281,7 @@ impl Viewport {
             .len()
             .clamp(1, 5);
         self.height
-            .saturating_sub(composer_height + 1 + self.palette_rows(composer_height).len())
+            .saturating_sub(composer_height + 1 + self.overlay_rows(composer_height).len())
     }
 
     fn max_scroll(&self) -> usize {
@@ -217,6 +312,9 @@ impl Viewport {
     }
 
     pub fn key(&mut self, key: Key) -> Option<String> {
+        if self.picker.is_some() {
+            return self.picker_key(key);
+        }
         let previous_composer = self.composer.clone();
         let previous_cursor = self.cursor;
         match key {
@@ -462,6 +560,160 @@ impl Viewport {
         }
     }
 
+    fn composer_height(&self) -> usize {
+        wrap(&self.composer, self.width.saturating_sub(2).max(1))
+            .len()
+            .clamp(1, 5)
+    }
+
+    fn picker_capacity(&self) -> usize {
+        self.height
+            .saturating_sub(self.composer_height() + 2)
+            .saturating_sub(2)
+            .clamp(1, PICKER_MAX_ROWS)
+    }
+
+    fn picker_key(&mut self, key: Key) -> Option<String> {
+        let capacity = self.picker_capacity();
+        let enabled = self.width >= 60 && self.height >= 16;
+        let picker = self.picker.as_mut()?;
+        let level = picker.levels.last_mut()?;
+        let count = level.matches().len();
+        match key {
+            Key::Text(text) | Key::Paste(text) => {
+                let text = safe_text(&text).replace('\n', "");
+                level.filter.push_str(&text);
+                level.selected = 0;
+            }
+            Key::Backspace => {
+                level.filter.pop();
+                level.selected = 0;
+            }
+            Key::Up if count > 0 => level.selected = (level.selected + count - 1) % count,
+            Key::Down if count > 0 => level.selected = (level.selected + 1) % count,
+            Key::PageUp => level.selected = level.selected.saturating_sub(capacity),
+            Key::PageDown if count > 0 => {
+                level.selected = (level.selected + capacity).min(count - 1)
+            }
+            Key::Escape => {
+                if !level.filter.is_empty() {
+                    level.filter.clear();
+                    level.selected = 0;
+                } else if picker.levels.len() > 1 {
+                    picker.levels.pop();
+                } else if let Some(picker) = self.picker.take() {
+                    self.composer = picker.original_composer;
+                    self.cursor = picker.original_cursor.min(self.composer.len());
+                    self.clamp_scroll();
+                }
+            }
+            Key::Enter if enabled && count > 0 => {
+                let value = level.matches()[level.selected.min(count - 1)].value.clone();
+                match &level.kind {
+                    PickerKind::Model => {
+                        picker.levels.push(PickerLevel {
+                            kind: PickerKind::Scope(value),
+                            items: ["session", "profile"]
+                                .into_iter()
+                                .map(|scope| PickerItem {
+                                    value: scope.into(),
+                                    session: false,
+                                    profile: false,
+                                })
+                                .collect(),
+                            filter: String::new(),
+                            selected: 0,
+                            status: None,
+                        });
+                    }
+                    PickerKind::Scope(model) => {
+                        let command = if value == "profile" {
+                            format!("/model profile {model}")
+                        } else {
+                            format!("/model {model}")
+                        };
+                        if let Some(picker) = self.picker.take() {
+                            self.composer = picker.original_composer;
+                            self.cursor = picker.original_cursor.min(self.composer.len());
+                        }
+                        self.clamp_scroll();
+                        return Some(command);
+                    }
+                }
+            }
+            _ => {}
+        }
+        self.clamp_scroll();
+        None
+    }
+
+    fn overlay_rows(&self, composer_height: usize) -> Vec<String> {
+        if self.picker.is_some() {
+            self.picker_rows(composer_height)
+        } else {
+            self.palette_rows(composer_height)
+        }
+    }
+
+    fn picker_rows(&self, composer_height: usize) -> Vec<String> {
+        let Some(level) = self.picker.as_ref().and_then(|picker| picker.levels.last()) else {
+            return Vec::new();
+        };
+        let available = self.height.saturating_sub(composer_height + 2);
+        let title = match &level.kind {
+            PickerKind::Model => "Model Picker".to_string(),
+            PickerKind::Scope(model) => format!("Scope Picker · {}", safe_text(model)),
+        };
+        let header = if level.filter.is_empty() {
+            format!("{title} · type to filter")
+        } else {
+            format!("{title} · filter: {}", safe_text(&level.filter))
+        };
+        let mut rows = vec![header];
+        let matches = level.matches();
+        if let Some(status) = &level.status {
+            rows.push(status.clone());
+        } else if matches.is_empty() {
+            rows.push("No matches · Esc clears the filter".into());
+        } else {
+            let selected = level.selected.min(matches.len() - 1);
+            let visible = available
+                .saturating_sub(2)
+                .clamp(1, PICKER_MAX_ROWS)
+                .min(matches.len());
+            let start = selected
+                .saturating_sub(visible - 1)
+                .min(matches.len() - visible);
+            for (offset, item) in matches.iter().skip(start).take(visible).enumerate() {
+                let marker = if start + offset == selected {
+                    "›"
+                } else {
+                    " "
+                };
+                let label = match (&level.kind, item.value.as_str()) {
+                    (PickerKind::Scope(_), "session") => "This Agent Session".to_string(),
+                    (PickerKind::Scope(_), "profile") => "Profile default".to_string(),
+                    _ => item.value.clone(),
+                };
+                let mut row = format!("{marker} {}", safe_text(&label));
+                if item.session {
+                    row.push_str(" · active session");
+                }
+                if item.profile {
+                    row.push_str(" · profile default");
+                }
+                rows.push(row);
+            }
+            rows.push(format!(
+                "Selection {}/{} · Enter select · Esc back",
+                selected + 1,
+                matches.len()
+            ));
+        }
+        rows.truncate(available);
+        rows
+    }
+
     fn palette_rows(&self, composer_height: usize) -> Vec<String> {
         if self.palette.is_none() {
             return Vec::new();
@@ -562,7 +814,7 @@ impl Viewport {
         let cursor_row = before_cursor.len() - 1;
         let composer_height = composer.len().clamp(1, 5);
         let composer_start = cursor_row.saturating_sub(composer_height - 1);
-        let palette = self.palette_rows(composer_height);
+        let palette = self.overlay_rows(composer_height);
         let transcript_height = self.height - composer_height - 1 - palette.len();
         let transcript = self
             .blocks
@@ -1137,5 +1389,100 @@ mod tests {
             view.key(Key::Backspace);
             assert_eq!(view.key(Key::Enter).unwrap(), "");
         }
+    }
+
+    fn picker_view(models: &[&str]) -> Viewport {
+        let mut view = viewport();
+        view.key(Key::Text("draft".into()));
+        view.key(Key::Left);
+        view.open_model_picker();
+        let models = models.iter().map(|m| m.to_string()).collect::<Vec<_>>();
+        view.set_model_picker_models(&models, "m2", Some("m3"));
+        view
+    }
+
+    #[test]
+    fn model_picker_marks_session_and_profile_independently_and_is_bounded() {
+        let models = (1..=20).map(|n| format!("m{n}")).collect::<Vec<_>>();
+        let refs = models.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut view = picker_view(&refs);
+        let rendered = view.render().rows.join("\n");
+        assert!(rendered.contains("Model Picker"));
+        assert!(rendered.contains("auto"));
+        assert!(rendered.contains("m2 · active session"), "{rendered}");
+        assert!(rendered.contains("m3 · profile default"), "{rendered}");
+        assert!(rendered.matches("· active session").count() == 1);
+        let choices = rendered
+            .lines()
+            .skip_while(|line| !line.contains("Model Picker"))
+            .skip(1)
+            .take_while(|line| !line.contains("Selection"))
+            .count();
+        assert!((1..=PICKER_MAX_ROWS).contains(&choices), "{rendered}");
+        for _ in 0..12 {
+            view.key(Key::Down);
+        }
+        let rendered = view.render().rows.join("\n");
+        assert!(rendered.contains("› m12"), "{rendered}");
+        assert!(rendered.contains("Selection 13/21"));
+        view.key(Key::PageUp);
+        assert!(view.render().rows.join("\n").contains("Selection 5/21"));
+        assert_grid(&view.render(), 60, 16);
+    }
+
+    #[test]
+    fn picker_filters_and_commits_through_scope_picker() {
+        let mut view = picker_view(&["alpha", "beta"]);
+        view.key(Key::Text("BET".into()));
+        let rendered = view.render().rows.join("\n");
+        assert!(rendered.contains("filter: BET") && rendered.contains("› beta"));
+        assert!(!rendered.contains("alpha"));
+        assert_eq!(view.key(Key::Enter), None);
+        let rendered = view.render().rows.join("\n");
+        assert!(rendered.contains("Scope Picker · beta"));
+        assert!(rendered.contains("This Agent Session") && rendered.contains("Profile default"));
+        view.key(Key::Down);
+        assert_eq!(view.key(Key::Enter).as_deref(), Some("/model profile beta"));
+        assert!(!view.picker_open());
+
+        let mut view = picker_view(&["alpha"]);
+        view.key(Key::Down);
+        view.key(Key::Enter);
+        assert_eq!(view.key(Key::Enter).as_deref(), Some("/model alpha"));
+    }
+
+    #[test]
+    fn picker_escape_clears_filter_then_unwinds_restoring_composer() {
+        let mut view = picker_view(&["alpha", "beta"]);
+        view.key(Key::Text("zzz".into()));
+        assert!(view.render().rows.join("\n").contains("No matches"));
+        view.key(Key::Escape);
+        assert!(view.picker_open());
+        assert!(view.render().rows.join("\n").contains("alpha"));
+        view.key(Key::Enter);
+        assert!(view.render().rows.join("\n").contains("Scope Picker"));
+        view.key(Key::Escape);
+        assert!(view.render().rows.join("\n").contains("Model Picker"));
+        view.key(Key::Escape);
+        assert!(!view.picker_open());
+        let grid = view.render();
+        assert!(grid.rows.join("\n").contains("› draft"));
+        assert_eq!(grid.cursor.map(|(column, _)| column), Some(2 + 4));
+        view.key(Key::Text("!".into()));
+        assert!(view.render().rows.join("\n").contains("› draf!t"));
+    }
+
+    #[test]
+    fn picker_failure_renders_in_place_without_choices() {
+        let mut view = viewport();
+        view.open_model_picker();
+        assert!(view.render().rows.join("\n").contains("Loading models…"));
+        view.fail_model_picker("offline");
+        let rendered = view.render().rows.join("\n");
+        assert!(rendered.contains("Models unavailable: offline"));
+        assert_eq!(view.key(Key::Enter), None);
+        assert!(view.picker_open());
+        view.key(Key::Escape);
+        assert!(!view.picker_open());
     }
 }

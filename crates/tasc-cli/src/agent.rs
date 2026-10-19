@@ -1077,7 +1077,10 @@ async fn interact(
         std::env::var("TERM").as_deref() == Ok("dumb"),
         context.json_output,
     );
-    let mut model = profile_model.unwrap_or_else(|| "auto".to_string());
+    let mut profile_default = profile_model;
+    let mut model = profile_default
+        .clone()
+        .unwrap_or_else(|| "auto".to_string());
     if show_dashboard {
         let usage = session
             .rpc()
@@ -1197,7 +1200,23 @@ async fn interact(
                 continue;
             }
             ShellCommand::ModelList => {
+                let picker = managed.is_some() && !context.json_output;
+                if picker {
+                    let _ = terminal::update(|view| view.open_model_picker());
+                }
                 match list_models(client).await {
+                    Ok(models) if picker => {
+                        let _ = terminal::update(|view| {
+                            view.set_model_picker_models(
+                                &models,
+                                &model,
+                                profile_default.as_deref(),
+                            )
+                        });
+                    }
+                    Err(error) if picker => {
+                        let _ = terminal::update(|view| view.fail_model_picker(&error.message));
+                    }
                     Ok(models) => {
                         if context.json_output {
                             println!(
@@ -1245,19 +1264,24 @@ async fn interact(
             }
             ShellCommand::ModelProfile(selected) => {
                 match set_session_model(client, session, &selected).await {
-                    Ok(()) => match save_profile_model(&context.state_path, &selected) {
-                        Ok(()) => {
-                            model = selected.clone();
-                            print_shell_event(
-                                "result",
-                                &format!("Profile model preference saved as {selected}."),
-                                context.json_output,
-                            );
+                    Ok(()) => {
+                        model = selected.clone();
+                        match save_profile_model(&context.state_path, &selected) {
+                            Ok(()) => {
+                                profile_default = Some(selected.clone());
+                                print_shell_event(
+                                    "result",
+                                    &format!(
+                                        "Profile model preference saved as {selected} and active for this session."
+                                    ),
+                                    context.json_output,
+                                );
+                            }
+                            Err(error) => {
+                                print_shell_event("error", &error.message, context.json_output)
+                            }
                         }
-                        Err(error) => {
-                            print_shell_event("error", &error.message, context.json_output)
-                        }
-                    },
+                    }
                     Err(error) => print_shell_event("error", &error.message, context.json_output),
                 }
                 continue;
