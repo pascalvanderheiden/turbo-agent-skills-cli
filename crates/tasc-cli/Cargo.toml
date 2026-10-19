@@ -16,3 +16,4 @@ github-copilot-sdk = { version = "=1.0.22", default-features = false, features =
 async-trait = "=0.1.92"
 crossterm = "0.29.0"
 unicode-width = "0.2.2"
+unicode-segmentation = "1.13.3"

@@ -112,12 +112,12 @@ impl ManagedTerminal {
         )));
         let (sender, input) = mpsc::unbounded_channel();
         let stop = Arc::new(AtomicBool::new(false));
+        terminal::enable_raw_mode()?;
         let mut guard = Self {
             input,
             stop: stop.clone(),
             reader: None,
         };
-        terminal::enable_raw_mode()?;
         execute!(
             io::stdout(),
             EnterAlternateScreen,

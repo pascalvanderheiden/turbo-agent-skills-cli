@@ -1414,8 +1414,8 @@ async fn interact(
 
 fn print_shell_event(kind: &str, message: &str, json_output: bool) {
     if !json_output {
-        if kind == "cancelled" {
-            let _ = terminal::update(|view| view.settle(PresentationEvent::Error, message));
+        if kind == "cancelled" && terminal::emit(PresentationEvent::Error, message).is_some() {
+            return;
         }
         let _ = presentation_event(kind).emit(message, false);
         return;

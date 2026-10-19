@@ -1641,6 +1641,7 @@ dependencies = [
  "tasc-agent",
  "tasc-core",
  "tokio",
+ "unicode-segmentation",
  "unicode-width",
 ]
 

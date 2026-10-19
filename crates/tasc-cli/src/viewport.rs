@@ -1,5 +1,6 @@
 use crate::presentation::{safe_text, Event};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone, Debug)]
 pub enum Key {
@@ -80,17 +81,13 @@ impl Viewport {
     pub fn present(&mut self, event: Event, body: &str) {
         if matches!(event, Event::Done | Event::Error) {
             if let Some(index) = self.working.take() {
-                self.blocks[index] = Block {
-                    event: Some(event),
-                    body: safe_text(body),
-                };
-                self.new_output |= self.scroll > 0;
+                self.replace(index, event, body);
                 return;
             }
         }
         if event == Event::Working {
             if let Some(index) = self.working {
-                self.blocks[index].body = safe_text(body);
+                self.replace(index, event, body);
                 return;
             }
             self.working = Some(self.blocks.len());
@@ -102,6 +99,43 @@ impl Viewport {
         if self.working.is_some() {
             self.present(event, body);
         }
+    }
+
+    fn replace(&mut self, index: usize, event: Event, body: &str) {
+        let width = self.width.saturating_sub(1);
+        if self.scroll > 0 {
+            let lengths = self
+                .blocks
+                .iter()
+                .map(|block| block_lines(block.event, &block.body, width).len())
+                .collect::<Vec<_>>();
+            let visible_start = lengths
+                .iter()
+                .sum::<usize>()
+                .saturating_sub(self.scroll)
+                .saturating_sub(self.transcript_height());
+            let block_start = lengths[..index].iter().sum::<usize>();
+            if block_start >= visible_start {
+                self.scroll = self
+                    .scroll
+                    .saturating_add(block_lines(Some(event), body, width).len())
+                    .saturating_sub(lengths[index]);
+            }
+            self.new_output = true;
+        }
+        self.blocks[index] = Block {
+            event: Some(event),
+            body: safe_text(body),
+        };
+    }
+
+    fn transcript_height(&self) -> usize {
+        self.height.saturating_sub(
+            wrap(&self.composer, self.width.saturating_sub(2).max(1))
+                .len()
+                .clamp(1, 5)
+                + 1,
+        )
     }
 
     fn append(&mut self, event: Option<Event>, body: &str) {
@@ -134,7 +168,7 @@ impl Viewport {
             }
             Key::Backspace if self.cursor > 0 => {
                 let previous = self.composer[..self.cursor]
-                    .char_indices()
+                    .grapheme_indices(true)
                     .last()
                     .unwrap()
                     .0;
@@ -142,21 +176,26 @@ impl Viewport {
                 self.cursor = previous;
             }
             Key::Delete if self.cursor < self.composer.len() => {
-                self.composer.remove(self.cursor);
+                let length = self.composer[self.cursor..]
+                    .graphemes(true)
+                    .next()
+                    .unwrap()
+                    .len();
+                self.composer.drain(self.cursor..self.cursor + length);
             }
             Key::Left if self.cursor > 0 => {
                 self.cursor = self.composer[..self.cursor]
-                    .char_indices()
+                    .grapheme_indices(true)
                     .last()
                     .unwrap()
                     .0;
             }
             Key::Right if self.cursor < self.composer.len() => {
                 self.cursor += self.composer[self.cursor..]
-                    .chars()
+                    .graphemes(true)
                     .next()
                     .unwrap()
-                    .len_utf8();
+                    .len();
             }
             Key::Home => self.cursor = 0,
             Key::End => {
@@ -165,12 +204,6 @@ impl Viewport {
                 self.new_output = false;
             }
             Key::PageUp => {
-                let transcript_height = self.height.saturating_sub(
-                    wrap(&self.composer, self.width.saturating_sub(2).max(1))
-                        .len()
-                        .clamp(1, 5)
-                        + 1,
-                );
                 let max_scroll = self
                     .blocks
                     .iter()
@@ -178,7 +211,7 @@ impl Viewport {
                         block_lines(block.event, &block.body, self.width.saturating_sub(1)).len()
                     })
                     .sum::<usize>()
-                    .saturating_sub(transcript_height);
+                    .saturating_sub(self.transcript_height());
                 self.scroll = self
                     .scroll
                     .saturating_add(self.height.saturating_sub(7).max(1))
@@ -325,28 +358,23 @@ fn block_lines(event: Option<Event>, body: &str, width: usize) -> Vec<String> {
 fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut rows = vec![String::new()];
     let mut column = 0;
-    for character in text.chars() {
-        if character == '\n' {
+    for grapheme in text.graphemes(true) {
+        if grapheme == "\n" {
             rows.push(String::new());
             column = 0;
             continue;
         }
-        let text = if character == '\t' {
-            "    ".into()
-        } else {
-            character.to_string()
-        };
-        let cells = UnicodeWidthStr::width(text.as_str());
+        let text = if grapheme == "\t" { "    " } else { grapheme };
+        let cells = UnicodeWidthStr::width(text);
         if column + cells > width {
             rows.push(String::new());
             column = 0;
         }
-        rows.last_mut().unwrap().push_str(&text);
+        rows.last_mut().unwrap().push_str(text);
         column += cells;
-        if column == width {
-            rows.push(String::new());
-            column = 0;
-        }
+    }
+    if column == width {
+        rows.push(String::new());
     }
     rows
 }
@@ -354,12 +382,12 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 fn fit(text: &str, width: usize) -> String {
     let mut result = String::new();
     let mut cells = 0;
-    for character in text.chars() {
-        let size = UnicodeWidthChar::width(character).unwrap_or(0);
-        if character.is_control() || cells + size > width {
+    for grapheme in text.graphemes(true) {
+        let size = UnicodeWidthStr::width(grapheme);
+        if grapheme.chars().any(char::is_control) || cells + size > width {
             break;
         }
-        result.push(character);
+        result.push_str(grapheme);
         cells += size;
     }
     result.push_str(&" ".repeat(width - cells));
@@ -523,6 +551,32 @@ mod tests {
     }
 
     #[test]
+    fn paused_page_stays_anchored_when_working_rows_reflow() {
+        let mut view = viewport();
+        for index in 0..30 {
+            view.content(&format!("row {index}"));
+        }
+        view.present(Event::Working, "search");
+        view.key(Key::PageUp);
+        let first = view.render().rows[0].clone();
+        view.present(Event::Working, &"long progress ".repeat(20));
+        assert_eq!(view.render().rows[0], first);
+        assert!(view.render().rows[15].contains("Paused · new output"));
+        view.present(Event::Done, "finished");
+        assert_eq!(view.render().rows[0], first);
+
+        let mut view = viewport();
+        view.present(Event::Working, "search");
+        for index in 0..40 {
+            view.content(&format!("row {index}"));
+        }
+        view.key(Key::PageUp);
+        let first = view.render().rows[0].clone();
+        view.present(Event::Done, &"long outcome ".repeat(20));
+        assert_eq!(view.render().rows[0], first);
+    }
+
+    #[test]
     fn wide_characters_and_control_sequences_cannot_escape_the_grid() {
         let mut view = viewport();
         view.present(Event::Tasc, &format!("{}\x1b[2J\r", "界é".repeat(100)));
@@ -532,5 +586,23 @@ mod tests {
         assert!(!view.render().rows.join("").contains('\x1b'));
         let (column, row) = view.render().cursor.unwrap();
         assert!(column < 60 && row < 15);
+    }
+
+    #[test]
+    fn composed_unicode_keeps_cell_width_and_editing_boundaries() {
+        for grapheme in ["👩‍💻", "🇳🇱", "e\u{301}", "界"] {
+            let mut view = viewport();
+            view.footer.profile = grapheme.repeat(4);
+            view.footer.model = grapheme.repeat(4);
+            view.present(Event::Tasc, &grapheme.repeat(60));
+            view.key(Key::Paste(grapheme.repeat(60)));
+            assert_grid(&view.render(), 60, 16);
+            let (column, row) = view.render().cursor.unwrap();
+            assert!(column < 60 && row < 15);
+            view.key(Key::Enter);
+            view.key(Key::Text(grapheme.into()));
+            view.key(Key::Backspace);
+            assert_eq!(view.key(Key::Enter).unwrap(), "");
+        }
     }
 }
