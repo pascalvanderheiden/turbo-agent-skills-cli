@@ -3,7 +3,7 @@ description: Turn completed wayfinder maps into implementation specs.
 intent: Convert a fully resolved wayfinder map into one traceable implementation spec without duplicating or prematurely planning work.
 on:
   issues:
-    types: [closed, edited, labeled, reopened]
+    types: [labeled, edited, reopened]
   schedule: every 30 minutes
   workflow_dispatch:
 permissions:
@@ -20,20 +20,20 @@ skills:
 safe-outputs:
   add-comment:
     target: "*"
-    required-labels: ["wayfinder:map"]
+    required-labels: ["wayfinder:map", "to-spec"]
     max: 1
     hide-older-comments: false
   add-labels:
     target: "*"
     allowed: [specced, to-plan]
-    required-labels: ["wayfinder:map"]
+    required-labels: ["wayfinder:map", "to-spec"]
     issues: true
     pull-requests: false
     create-if-missing: true
     max: 1
   remove-labels:
     target: "*"
-    allowed: [ready-for-agent]
+    allowed: [ready-for-agent, to-spec]
     required-labels: ["wayfinder:map"]
     max: 1
   noop:
@@ -45,8 +45,8 @@ network:
 
 # Spec completed wayfinder maps
 
-Find the oldest open issue labelled `wayfinder:map` that is ready to become an
-implementation spec.
+Find the oldest open issue labelled `wayfinder:map` and `to-spec` that is ready to
+become an implementation spec.
 
 Use GitHub's native sub-issue relationships as the source of truth. A map is
 ready only when:
@@ -72,6 +72,9 @@ specification format, with this workflow-specific publishing override:
 
 If the map has `ready-for-agent`, remove it because only implementation tickets,
 not wayfinder decision maps, use that label.
+
+If the map is still labelled `to-spec`, remove it once the spec has been
+published so the label remains a single-use gate for the next specification run.
 
 Process at most one map per run. If no map meets every condition, call `noop`
 with the first unmet condition and make no visible write.
