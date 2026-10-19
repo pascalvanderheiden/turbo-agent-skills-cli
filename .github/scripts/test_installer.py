@@ -57,7 +57,7 @@ class InstallerTests(unittest.TestCase):
             root = Path(temporary)
             assets = root / "assets"
             assets.mkdir()
-            archive_path = assets / "tasc-v0.1.0-x86_64-unknown-linux-gnu.tar.gz"
+            archive_path = assets / "tasc-v0.2.0-x86_64-unknown-linux-gnu.tar.gz"
             binary = root / "tasc"
             binary.write_text("#!/bin/sh\nprintf 'installed tasc\\n'\n", encoding="utf-8")
             with tarfile.open(archive_path, "w:gz") as archive:
@@ -106,7 +106,7 @@ class InstallerTests(unittest.TestCase):
                 result.stderr.splitlines(),
                 [
                     "DETECTING: platform",
-                    "DOWNLOADING: tasc-v0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+                    "DOWNLOADING: tasc-v0.2.0-x86_64-unknown-linux-gnu.tar.gz",
                     "VERIFYING: checksum and archive",
                     f"INSTALLING: {install_dir}",
                 ],
@@ -114,7 +114,7 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(
                 result.stdout.splitlines(),
                 [
-                    f"INSTALLED: TASC v0.1.0 to {install_dir}/tasc",
+                    f"INSTALLED: TASC v0.2.0 to {install_dir}/tasc",
                     f"NEXT: Add {install_dir} to your PATH to run tasc.",
                 ],
             )
@@ -139,10 +139,10 @@ class InstallerTests(unittest.TestCase):
                 result.stderr.splitlines(),
                 [
                     "DETECTING: platform",
-                    "DOWNLOADING: tasc-v0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+                    "DOWNLOADING: tasc-v0.2.0-x86_64-unknown-linux-gnu.tar.gz",
                     "VERIFYING: checksum and archive",
                     "ERROR: SHA-256 verification failed for "
-                    "tasc-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.",
+                    "tasc-v0.2.0-x86_64-unknown-linux-gnu.tar.gz.",
                 ],
             )
             self.assertEqual(result.stdout, "")

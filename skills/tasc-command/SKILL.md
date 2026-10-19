@@ -5,7 +5,7 @@ metadata:
   tasc-source: tasc://first-party/command-skill
   tasc-path: tasc-command
   tasc-path: tasc-command
-  tasc-version: 0.1.0
+  tasc-version: 0.2.0
 ---
 
 # TASC Command Skill
@@ -16,7 +16,7 @@ reimplement TASC policy.
 
 ## Compatibility handshake
 
-Before acting, run `tasc skill command capabilities --skill-version 0.1.0 --policy-semantics-version 1 --json`. Continue only when
+Before acting, run `tasc skill command capabilities --skill-version 0.2.0 --policy-semantics-version 1 --json`. Continue only when
 the JSON envelope has `schemaVersion: 1`, the `skill command capabilities`
 command, and the requested capability. Treat a missing executable as
 `tasc_executable_missing` and return a structured diagnostic such as

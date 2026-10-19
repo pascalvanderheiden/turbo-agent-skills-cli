@@ -15,14 +15,14 @@ Local-first tools to discover, install, create, evaluate, and safely manage codi
 
 ## Start here
 
-Install TASC 0.1.0 on Linux, macOS, or Windows x64. The installers verify the selected release archive against its published SHA-256 checksum before installing it in a user-writable directory.
+Install TASC 0.2.0 on Linux, macOS, or Windows x64. The installers verify the selected release archive against its published SHA-256 checksum before installing it in a user-writable directory.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/pascalvanderheiden/turbo-agent-skills-cli/v0.1.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/pascalvanderheiden/turbo-agent-skills-cli/v0.2.0/install.sh | bash
 ```
 
 ```powershell
-iex (irm https://raw.githubusercontent.com/pascalvanderheiden/turbo-agent-skills-cli/v0.1.0/install.ps1)
+iex (irm https://raw.githubusercontent.com/pascalvanderheiden/turbo-agent-skills-cli/v0.2.0/install.ps1)
 ```
 
 First run:
@@ -54,13 +54,13 @@ Lifecycle changes require approval. `--dry-run` previews changes; locally modifi
 
 `tasc agent` starts a Copilot SDK conversation and displays the Turbo banner in an interactive terminal. Install and authenticate GitHub Copilot CLI first. The bundled TASC Command Skill is optional and uses the same versioned CLI contracts; manage it with `tasc skill command install`, `update`, `repair`, and `uninstall`.
 
-Capable interactive terminals use a full-screen transcript with a bottom composer and a single-row session/Profile, model, and token-usage footer. Enter submits; Alt+Enter inserts a newline; multiline paste is preserved. The composer grows to five rows, then scrolls internally. Page Up/Down or the mouse wheel scroll the transcript; End resumes live output. Scrolling up pauses following and the footer flags new output until you return to the bottom; a right-edge position indicator appears only when the transcript is scrollable. The banner scrolls away with the transcript, and Working rows settle in place. Below 60×16, resize the terminal to continue. Piped, JSON, `NO_COLOR`, and `TERM=dumb` sessions keep streaming output.
+Capable interactive terminals use a full-screen transcript with a bottom composer and a single-row session/Profile, model, and token-usage footer. Enter submits; Alt+Enter inserts a newline; multiline paste is preserved. Up/Down recalls submitted commands, and typing `/` opens a command palette with descriptions. `/skill list [PAGE]` renders a paginated table with skill name, description, tracking state, scope, and current Security Check validation state; `/skill track` opens a picker for untracked installations. The composer grows to five rows, then scrolls internally. Page Up/Down or the mouse wheel scrolls the transcript; End resumes live output. Scrolling up pauses following and the footer flags new output until you return to the bottom; a right-edge position indicator appears only when the transcript is scrollable. Input, TASC output, and errors use stable semantic colors, while the status line is dark gray. Below 60×16, resize the terminal to continue. Piped, JSON, `NO_COLOR`, and `TERM=dumb` sessions keep streaming output.
 
 Agent-assisted documentation changes may propose pull requests; they do not publish site copy or releases directly.
 
 ## Documentation and releases
 
-- [TASC 0.1.0 user guides](https://pascalvanderheiden.github.io/turbo-agent-skills-cli/v0.1.0/index.html)
+- [TASC 0.2.0 user guides](https://pascalvanderheiden.github.io/turbo-agent-skills-cli/v0.2.0/index.html)
 - [Release downloads, checksums, and attestations](https://github.com/pascalvanderheiden/turbo-agent-skills-cli/releases)
 - [Release governance and verification runbook](https://github.com/pascalvanderheiden/turbo-agent-skills-cli/blob/main/.github/RELEASE.md)
 
@@ -71,7 +71,7 @@ TASC does not self-update. Select one of the five published Linux x64/ARM64, mac
 
 The shell installer supports Linux x64/ARM64, macOS Intel/Apple Silicon, and Windows x64 from Bash. Windows users can use the native PowerShell installer above. It installs to `~/.local/bin` on Unix-like systems or `%LOCALAPPDATA%\Programs\TASC` on Windows; set `TASC_INSTALL_DIR` to choose another writable directory.
 
-Install the verified v0.1.0 binary with the command above, then start with:
+Install the verified v0.2.0 binary with the command above, then start with:
 
 ```sh
 tasc setup

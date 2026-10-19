@@ -1630,7 +1630,7 @@ dependencies = [
 
 [[package]]
 name = "tasc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "clap",
@@ -1647,7 +1647,7 @@ dependencies = [
 
 [[package]]
 name = "tasc-agent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -1659,7 +1659,7 @@ dependencies = [
 
 [[package]]
 name = "tasc-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
 ]

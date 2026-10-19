@@ -62,11 +62,11 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("github.event.release.tag_name || inputs.release_tag", pages)
 
     def test_tag_must_be_protected_stable_semver_matching_package(self):
-        validate_tag("v0.1.0", "0.1.0", True)
+        validate_tag("v0.2.0", "0.2.0", True)
         for tag, version, protected in (
-            ("v0.1.0-rc.1", "0.1.0", True),
-            ("v0.1.0", "0.2.0", True),
-            ("v0.1.0", "0.1.0", False),
+            ("v0.2.0-rc.1", "0.2.0", True),
+            ("v0.2.0", "0.1.0", True),
+            ("v0.2.0", "0.2.0", False),
         ):
             with self.subTest(tag=tag, version=version, protected=protected):
                 with self.assertRaises(ValueError):
@@ -74,26 +74,26 @@ class ReleaseTests(unittest.TestCase):
 
     def test_release_metadata_and_installer_versions_match(self):
         root = Path(__file__).resolve().parents[2]
-        validate_version_metadata(root, "0.1.0")
+        validate_version_metadata(root, "0.2.0")
         with self.assertRaisesRegex(ValueError, "does not match release"):
-            validate_version_metadata(root, "0.2.0")
+            validate_version_metadata(root, "0.1.0")
 
     def test_archives_reject_invalid_versions_and_targets(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "tasc"
             source.write_bytes(b"binary")
             with self.assertRaises(ValueError):
-                make_archive(source, "x86_64-unknown-linux-gnu", "v0.1.0-rc.1", directory)
+                make_archive(source, "x86_64-unknown-linux-gnu", "v0.2.0-rc.1", directory)
             with self.assertRaises(ValueError):
-                make_archive(source, "x86_64-unknown-linux-musl", "v0.1.0", directory)
+                make_archive(source, "x86_64-unknown-linux-musl", "v0.2.0", directory)
 
     def test_archive_metadata_and_contents_are_reproducible(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "tasc"
             source.write_bytes(b"binary")
-            first = make_archive(source, "x86_64-unknown-linux-gnu", "v0.1.0", directory)
+            first = make_archive(source, "x86_64-unknown-linux-gnu", "v0.2.0", directory)
             first_bytes = first.read_bytes()
-            second = make_archive(source, "x86_64-unknown-linux-gnu", "v0.1.0", directory)
+            second = make_archive(source, "x86_64-unknown-linux-gnu", "v0.2.0", directory)
 
             self.assertEqual(first_bytes, second.read_bytes())
             with gzip.open(first, "rb") as archive_bytes:
@@ -108,9 +108,9 @@ class ReleaseTests(unittest.TestCase):
     def test_command_skill_archive_is_reproducible_and_matches_release_version(self):
         skill_directory = Path(__file__).resolve().parents[2] / "skills" / "tasc-command"
         with tempfile.TemporaryDirectory() as directory:
-            first = make_command_skill_archive(skill_directory, "v0.1.0", directory)
+            first = make_command_skill_archive(skill_directory, "v0.2.0", directory)
             first_bytes = first.read_bytes()
-            second = make_command_skill_archive(skill_directory, "v0.1.0", directory)
+            second = make_command_skill_archive(skill_directory, "v0.2.0", directory)
 
             self.assertEqual(first_bytes, second.read_bytes())
             with tarfile.open(first, "r:gz") as archive:
@@ -123,7 +123,7 @@ class ReleaseTests(unittest.TestCase):
                    },
                 )
             with self.assertRaises(ValueError):
-                make_command_skill_archive(skill_directory, "v0.2.0", directory)
+                make_command_skill_archive(skill_directory, "v0.1.0", directory)
 
     def test_asset_validation_requires_all_targets_sbom_and_matching_checksums(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -136,7 +136,7 @@ class ReleaseTests(unittest.TestCase):
                 "x86_64-pc-windows-msvc",
             )
             for target in targets:
-                (root / f"tasc-v0.1.0-{target}.tar.gz").write_bytes(target.encode())
+                (root / f"tasc-v0.2.0-{target}.tar.gz").write_bytes(target.encode())
             (root / "tasc.cdx.json").write_text(
                 json.dumps(
                     {
@@ -150,14 +150,14 @@ class ReleaseTests(unittest.TestCase):
             )
             make_command_skill_archive(
                 Path(__file__).resolve().parents[2] / "skills" / "tasc-command",
-                "v0.1.0",
+                "v0.2.0",
                 root,
             )
             write_checksums(root)
-            validate_assets(root, "v0.1.0")
+            validate_assets(root, "v0.2.0")
             (root / "tasc.cdx.json").write_text("{}", encoding="utf-8")
             with self.assertRaises(ValueError):
-                validate_assets(root, "v0.1.0")
+                validate_assets(root, "v0.2.0")
 
     def test_reproducible_sbom_gets_deterministic_attestation_identity(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -174,7 +174,7 @@ class ReleaseTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            prepare_cyclonedx_sbom(sbom_path, "pascalvanderheiden/turbo-agent-skills-cli@v0.1.0")
+            prepare_cyclonedx_sbom(sbom_path, "pascalvanderheiden/turbo-agent-skills-cli@v0.2.0")
             first = sbom_path.read_bytes()
             prepared = json.loads(first)
 
@@ -182,7 +182,7 @@ class ReleaseTests(unittest.TestCase):
                 prepared["serialNumber"],
                 r"^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
             )
-            prepare_cyclonedx_sbom(sbom_path, "pascalvanderheiden/turbo-agent-skills-cli@v0.1.0")
+            prepare_cyclonedx_sbom(sbom_path, "pascalvanderheiden/turbo-agent-skills-cli@v0.2.0")
             self.assertEqual(first, sbom_path.read_bytes())
 
     def test_asset_validation_rejects_missing_platform_and_tampered_checksums(self):
@@ -195,7 +195,7 @@ class ReleaseTests(unittest.TestCase):
                 "aarch64-apple-darwin",
                 "x86_64-pc-windows-msvc",
             ):
-                (root / f"tasc-v0.1.0-{target}.tar.gz").write_bytes(target.encode())
+                (root / f"tasc-v0.2.0-{target}.tar.gz").write_bytes(target.encode())
             (root / "tasc.cdx.json").write_text(
                 json.dumps(
                     {
@@ -209,18 +209,18 @@ class ReleaseTests(unittest.TestCase):
             )
             make_command_skill_archive(
                 Path(__file__).resolve().parents[2] / "skills" / "tasc-command",
-                "v0.1.0",
+                "v0.2.0",
                 root,
             )
             write_checksums(root)
-            (root / "tasc-v0.1.0-x86_64-pc-windows-msvc.tar.gz").unlink()
+            (root / "tasc-v0.2.0-x86_64-pc-windows-msvc.tar.gz").unlink()
             with self.assertRaises(ValueError):
-                validate_assets(root, "v0.1.0")
+                validate_assets(root, "v0.2.0")
 
-            archive = root / "tasc-v0.1.0-x86_64-pc-windows-msvc.tar.gz"
+            archive = root / "tasc-v0.2.0-x86_64-pc-windows-msvc.tar.gz"
             archive.write_bytes(b"tampered")
             with self.assertRaises(ValueError):
-                validate_assets(root, "v0.1.0")
+                validate_assets(root, "v0.2.0")
 
     def test_checksum_file_covers_each_release_asset(self):
         with tempfile.TemporaryDirectory() as directory:

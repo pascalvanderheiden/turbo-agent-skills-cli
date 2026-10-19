@@ -1,4 +1,4 @@
-$Version = "0.1.0"
+$Version = "0.2.0"
 $Repository = "pascalvanderheiden/turbo-agent-skills-cli"
 
 $ErrorActionPreference = "Stop"

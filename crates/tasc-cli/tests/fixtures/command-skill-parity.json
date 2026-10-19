@@ -9,13 +9,13 @@
         "command",
         "capabilities",
         "--skill-version",
-        "0.1.0",
+        "0.2.0",
         "--policy-semantics-version",
         "1",
         "--json"
       ],
-      "agentSlash": "/command-skill capabilities --skill-version 0.1.0 --policy-semantics-version 1 --json",
-      "externalInvocation": "tasc skill command capabilities --skill-version 0.1.0 --policy-semantics-version 1 --json",
+      "agentSlash": "/command-skill capabilities --skill-version 0.2.0 --policy-semantics-version 1 --json",
+      "externalInvocation": "tasc skill command capabilities --skill-version 0.2.0 --policy-semantics-version 1 --json",
       "expected": {
         "compatibility": "compatible",
         "schemaVersion": 1

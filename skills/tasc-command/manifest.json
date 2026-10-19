@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "id": "tasc-command",
-  "version": "0.1.0",
-  "minCliVersion": "0.1.0",
+  "version": "0.2.0",
+  "minCliVersion": "0.2.0",
   "policySemanticsVersion": 1,
   "capabilities": [
     "inventory.read",

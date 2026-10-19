@@ -13,7 +13,7 @@ class LandingPageTests(unittest.TestCase):
         self.assertIn("Turbo Agent Skills CLI", content)
         self.assertIn("tasc setup", content)
         self.assertIn("tasc discover", content)
-        self.assertIn("v0.1.0/index.html", content)
+        self.assertIn("v0.2.0/index.html", content)
 
     def test_agent_session_screenshot_precedes_start_here_with_exact_alt_text(self):
         content = generated_content()
