@@ -8,8 +8,10 @@ on:
     types: [created]
   pull_request:
     types: [ready_for_review]
+  pull_request_review_comment:
+    types: [created]
   workflow_run:
-    workflows: ["Running Copilot cloud agent"]
+    workflows: ["Copilot cloud agent"]
     types: [completed]
     branches: ["copilot/**"]
   schedule: every 30 minutes
@@ -87,6 +89,13 @@ comment using only the map, spec, ticket, repository, and already-recorded
 decisions. Do not invent product or architecture decisions. If evidence is
 insufficient, state the exact missing decision and stop; do not assign or merge
 other work in that run.
+
+When a pull request review comment is created, inspect it with the active
+ticket, its acceptance criteria, and the map. Do not request a review or wait
+for one. If the comment identifies a concrete implementation problem, leave
+the pull request open for Copilot to address it; if it is informational or
+already resolved by the current commit, proceed with the normal completion
+checks.
 
 ## Pull request completion
 
