@@ -3,6 +3,7 @@ $Repository = "pascalvanderheiden/turbo-agent-skills-cli"
 
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$PresentationOutputPiped = $MyInvocation.PipelinePosition -lt $MyInvocation.PipelineLength
 
 function Write-PresentationEvent {
     param(
@@ -11,14 +12,15 @@ function Write-PresentationEvent {
         [string]$Body
     )
     $styles = @{
-        Input = @("›", "36"); TASC = @("◆", "35"); Prompt = @("?", "36")
-        Info = @("·", "34"); Working = @("...", "36"); Warning = @("!", "33")
-        Error = @("×", "31"); Done = @("✓", "32"); Next = @("↳", "2;36")
+        Input = @([char]0x203A, "36"); TASC = @([char]0x25C6, "35"); Prompt = @("?", "36")
+        Info = @([char]0x00B7, "34"); Working = @("...", "36"); Warning = @("!", "33")
+        Error = @([char]0x00D7, "31"); Done = @([char]0x2713, "32"); Next = @([char]0x21B3, "2;36")
     }
     $isError = $Category -in @("Prompt", "Working", "Warning", "Error")
     $redirected = if ($isError) { [Console]::IsErrorRedirected } else { [Console]::IsOutputRedirected }
     $label = "$($Category.ToUpperInvariant()):"
-    if (-not $redirected -and -not (Test-Path Env:NO_COLOR) -and $env:TERM -ne "dumb") {
+    if (-not $redirected -and ($isError -or -not $PresentationOutputPiped) -and
+        -not (Test-Path Env:NO_COLOR) -and $env:TERM -ne "dumb") {
         $escape = [char]27
         $style = $styles[$Category]
         $label = "$escape[$($style[1])m$($style[0]) $Category$escape[0m"

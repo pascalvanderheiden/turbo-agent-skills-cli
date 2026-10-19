@@ -140,6 +140,9 @@ class PresentationProcessTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "posix", "requires Bash and pseudo-terminals")
 class InstallerPresentationTests(unittest.TestCase):
+    def test_powershell_script_stays_ascii_for_windows_powershell_51(self):
+        (ROOT / "install.ps1").read_bytes().decode("ascii")
+
     def test_bash_vocabulary_routing_and_capability_gates(self):
         for category, glyph, color in EVENTS:
             stream = "stderr" if category in ("Prompt", "Working", "Error", "Warning") else "stdout"
@@ -180,6 +183,65 @@ class InstallerPresentationTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertEqual(result.stdout, b"")
             self.assertEqual(result.stderr, b"ERROR: This installer supports Windows x64 only.\n")
+
+
+@unittest.skipUnless(os.name == "posix" and shutil.which("pwsh"), "requires PowerShell and a PTY")
+class PowerShellPresentationTests(unittest.TestCase):
+    MARKER = b"TASC_ADAPTER_BEGIN\n"
+
+    def command(self, piped=False):
+        # Load only the presentation adapter, without downloading or installing TASC.
+        script = r"""
+        [Console]::Out.Write("TASC_ADAPTER_BEGIN`n")
+        [Console]::Error.Write("TASC_ADAPTER_BEGIN`n")
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            $env:TASC_TEST_INSTALLER, [ref]$null, [ref]$null)
+        $function = $ast.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Write-PresentationEvent'
+        }, $true)
+        $source = '$PresentationOutputPiped = $MyInvocation.PipelinePosition -lt $MyInvocation.PipelineLength; '
+        $source += $function.Extent.Text
+        $source += '; Write-PresentationEvent ' + $env:TASC_TEST_CATEGORY + ' body'
+        $adapter = [scriptblock]::Create($source)
+        """
+        script += (
+            "& $adapter | Set-Content -Path $env:TASC_TEST_OUTPUT; "
+            "[Console]::Out.Write([IO.File]::ReadAllText($env:TASC_TEST_OUTPUT))"
+            if piped else "& $adapter"
+        )
+        return ["pwsh", "-NoProfile", "-NonInteractive", "-Command", script]
+
+    def test_vocabulary_and_pipeline_gating(self):
+        for category, glyph, color in EVENTS:
+            stream = "stderr" if category in ("Prompt", "Working", "Warning", "Error") else "stdout"
+            for gate in ({}, {"NO_COLOR": ""}, {"NO_COLOR": "1"}, {"TERM": "dumb"}):
+                with self.subTest(category=category, gate=gate):
+                    env = environment(
+                        TASC_TEST_INSTALLER=str(ROOT / "install.ps1"),
+                        TASC_TEST_CATEGORY=category,
+                        **gate,
+                    )
+                    code, stdout, stderr, rendered = terminal_output(self.command(), env, stream)
+                    self.assertEqual(code, 0, (stderr, rendered))
+                    self.assertEqual(stdout if stream == "stderr" else stderr, self.MARKER)
+                    # Ignore only host startup output before the adapter is invoked.
+                    self.assertIn(self.MARKER, rendered)
+                    rendered = rendered.split(self.MARKER, 1)[1]
+                    prefix = f"{category.upper()}:" if gate else f"\x1b[{color}m{glyph} {category}\x1b[0m"
+                    self.assertEqual(rendered, f"{prefix} body\n".encode())
+        with tempfile.TemporaryDirectory() as directory:
+            env = environment(
+                TASC_TEST_INSTALLER=str(ROOT / "install.ps1"),
+                TASC_TEST_CATEGORY="Done",
+                TASC_TEST_OUTPUT=str(Path(directory) / "output.txt"),
+            )
+            code, _, stderr, rendered = terminal_output(self.command(piped=True), env, "stdout")
+            self.assertEqual(code, 0, stderr)
+            self.assertEqual(stderr, self.MARKER)
+            self.assertIn(self.MARKER, rendered)
+            self.assertEqual(rendered.split(self.MARKER, 1)[1], b"DONE: body\n")
 
 
 if __name__ == "__main__":
