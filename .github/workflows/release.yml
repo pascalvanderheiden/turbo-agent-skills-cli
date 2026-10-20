@@ -249,4 +249,4 @@ jobs:
       - name: Trigger published-release documentation validation
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run pages.yml --ref main -f release_tag="$GITHUB_REF_NAME"
+        run: gh workflow run pages.yml --repo "$GITHUB_REPOSITORY" --ref main -f release_tag="$GITHUB_REF_NAME"
