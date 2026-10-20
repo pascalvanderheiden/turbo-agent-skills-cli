@@ -56,7 +56,11 @@ class ReleaseTests(unittest.TestCase):
         pages = (root / ".github" / "workflows" / "pages.yml").read_text()
 
         self.assertIn("actions: write", release)
-        self.assertIn('gh workflow run pages.yml --ref main -f release_tag="$GITHUB_REF_NAME"', release)
+        self.assertIn(
+            'gh workflow run pages.yml --repo "$GITHUB_REPOSITORY" --ref main '
+            '-f release_tag="$GITHUB_REF_NAME"',
+            release,
+        )
         self.assertIn("release_tag:", pages)
         self.assertIn("inputs.release_tag != ''", pages)
         self.assertIn("github.event.release.tag_name || inputs.release_tag", pages)
