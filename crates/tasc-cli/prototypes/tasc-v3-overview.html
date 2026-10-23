@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TASC v3 task-first skill overview — prototype</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #111315;
+      --panel: #191c1f;
+      --panel-raised: #202428;
+      --line: #30363b;
+      --text: #e8ecef;
+      --muted: #a2abb2;
+      --faint: #77818a;
+      --accent: #79d5c5;
+      --blue: #8dbbff;
+      --amber: #f0c477;
+      --red: #f09191;
+      --green: #8fd1a5;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); }
+    button, select { color: inherit; font: inherit; }
+    button { cursor: pointer; }
+    .page { width: min(1180px, calc(100% - 36px)); margin: 28px auto 112px; }
+    .topline, .toolbar, .section-head, .row-head, .switcher, .actions, .profile-tabs {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    }
+    .topline { border-bottom: 1px solid var(--line); padding-bottom: 16px; }
+    .brand { display: flex; align-items: center; gap: 11px; font-weight: 650; }
+    .mark { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; background: #25433f; color: var(--accent); }
+    .crumb { color: var(--muted); font-size: 13px; font-weight: 450; }
+    .prototype-tag, .pill, .state {
+      display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line);
+      border-radius: 999px; padding: 5px 9px; color: var(--muted); font-size: 11px; white-space: nowrap;
+    }
+    .prototype-tag { color: var(--amber); border-color: #625238; }
+    h1 { margin: 22px 0 8px; font-size: clamp(24px, 4vw, 35px); letter-spacing: -.035em; }
+    h2 { margin: 0; font-size: 17px; letter-spacing: -.015em; }
+    h3 { margin: 0; font-size: 14px; }
+    p { line-height: 1.55; }
+    .lede { max-width: 760px; margin: 0; color: var(--muted); }
+    .scenario-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 22px 0 18px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: #15181a; }
+    .scenario-bar label { color: var(--muted); font-size: 12px; }
+    select, .input-like { border: 1px solid var(--line); border-radius: 8px; background: var(--panel-raised); padding: 8px 10px; }
+    .scenario-note { color: var(--faint); font-size: 12px; margin-left: auto; }
+    .surface { min-height: 500px; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; }
+    .panel-pad { padding: 18px; }
+    .section-head { margin-bottom: 15px; }
+    .muted { color: var(--muted); }
+    .faint { color: var(--faint); }
+    .small { font-size: 12px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .button { border: 1px solid #43524f; color: #d9f7f1; background: #233632; border-radius: 8px; padding: 8px 11px; font-size: 12px; }
+    .button:hover { background: #2c4540; }
+    .button.secondary { color: var(--text); background: var(--panel-raised); border-color: var(--line); }
+    .button.quiet { border-color: transparent; color: var(--muted); background: transparent; }
+    .state.good { color: var(--green); border-color: #355842; }
+    .state.warn { color: var(--amber); border-color: #635335; }
+    .state.bad { color: var(--red); border-color: #634242; }
+    .state.info { color: var(--blue); border-color: #3a4d66; }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; background: currentColor; }
+    .divider { height: 1px; background: var(--line); margin: 15px 0; }
+    .grid-a { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(260px, .75fr); gap: 16px; }
+    .chat { padding: 20px; }
+    .chat-line { display: flex; gap: 11px; margin: 18px 0; }
+    .avatar { flex: 0 0 28px; height: 28px; display: grid; place-items: center; border-radius: 8px; background: #293138; color: var(--blue); font-size: 11px; font-weight: 700; }
+    .avatar.tasc { background: #25433f; color: var(--accent); }
+    .bubble { max-width: 680px; min-width: 0; }
+    .bubble p { margin: 5px 0; }
+    .match { margin-top: 14px; padding: 14px 0; border-top: 1px solid var(--line); }
+    .match-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .match p { margin: 6px 0 10px; color: var(--muted); font-size: 12px; }
+    .evidence { display: flex; flex-wrap: wrap; gap: 7px; margin: 10px 0 0; }
+    .quiet-card { padding: 16px; }
+    .quiet-card p { margin: 9px 0 0; color: var(--muted); font-size: 12px; }
+    .activity { display: grid; gap: 12px; margin-top: 18px; }
+    .activity-item { display: flex; gap: 9px; color: var(--muted); font-size: 12px; }
+    .chat-input { margin-top: 18px; border: 1px solid var(--line); border-radius: 10px; padding: 12px; color: var(--faint); background: #15181a; }
+    .grid-b { display: grid; grid-template-columns: 185px minmax(0, 1fr); gap: 16px; }
+    .scope-nav { padding: 14px; }
+    .nav-item { padding: 10px; margin: 4px 0; border-radius: 8px; color: var(--muted); font-size: 12px; }
+    .nav-item.active { color: var(--text); background: #29312f; }
+    .count { float: right; color: var(--faint); }
+    .inventory-head { padding: 17px 18px 12px; }
+    .profile-tabs { justify-content: flex-start; margin-top: 12px; }
+    .profile-tab { border: 1px solid var(--line); border-radius: 7px; padding: 6px 9px; color: var(--muted); font-size: 11px; }
+    .profile-tab.selected { border-color: #4a6b65; color: var(--accent); }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; min-width: 700px; }
+    th { color: var(--faint); font-size: 10px; text-align: left; letter-spacing: .06em; text-transform: uppercase; font-weight: 650; }
+    th, td { padding: 12px 14px; border-top: 1px solid var(--line); vertical-align: top; }
+    td { font-size: 12px; }
+    td .desc { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; max-width: 280px; }
+    .table-bottom { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 15px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+    .grid-c { display: grid; grid-template-columns: 235px minmax(0, 1fr); gap: 16px; }
+    .steps { padding: 18px; }
+    .step { display: flex; gap: 12px; padding: 0 0 21px; position: relative; }
+    .step:not(:last-child)::after { content: ""; position: absolute; left: 10px; top: 24px; bottom: 0; width: 1px; background: var(--line); }
+    .step-num { z-index: 1; flex: 0 0 21px; height: 21px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 50%; color: var(--muted); background: var(--panel); font-size: 10px; }
+    .step.done .step-num { color: var(--green); border-color: #355842; }
+    .step.active .step-num { color: var(--accent); border-color: var(--accent); }
+    .step-label { font-size: 12px; font-weight: 600; }
+    .step-desc { margin-top: 4px; color: var(--muted); font-size: 11px; line-height: 1.45; }
+    .workflow-main { padding: 20px; }
+    .result-block { margin: 18px 0; padding-top: 15px; border-top: 1px solid var(--line); }
+    .result-block p { margin: 7px 0 0; color: var(--muted); font-size: 12px; }
+    .scope-choices { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 13px; }
+    .scope-choice { min-width: 180px; flex: 1; border: 1px solid var(--line); border-radius: 9px; padding: 11px; color: var(--muted); background: transparent; text-align: left; font-size: 11px; }
+    .scope-choice.selected { border-color: #4a6b65; color: var(--text); }
+    .toast { position: fixed; bottom: 75px; left: 50%; transform: translateX(-50%); max-width: min(620px, calc(100% - 32px)); z-index: 8; padding: 12px 15px; border: 1px solid #4a6b65; border-radius: 10px; background: #1c2a27; color: #d9f7f1; font-size: 12px; box-shadow: 0 10px 35px #0008; display: none; }
+    .switcher { position: fixed; z-index: 10; left: 50%; bottom: 18px; transform: translateX(-50%); gap: 13px; padding: 9px 12px; border: 1px solid #56636b; border-radius: 999px; background: #272d31; box-shadow: 0 8px 28px #0009; }
+    .switcher button { width: 28px; height: 28px; border: 0; border-radius: 50%; background: #384147; color: white; }
+    .switcher-label { min-width: 205px; text-align: center; font-size: 11px; }
+    .key { border: 1px solid #525c62; border-radius: 4px; padding: 1px 4px; color: #c1c9ce; font: 10px ui-monospace, monospace; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    @media (max-width: 760px) {
+      .grid-a, .grid-b, .grid-c { grid-template-columns: 1fr; }
+      .scope-nav { display: flex; gap: 5px; overflow-x: auto; }
+      .nav-item { min-width: 115px; }
+      .scenario-note { width: 100%; margin-left: 0; }
+      .grid-c .steps { order: 2; }
+      .switcher-label { min-width: 155px; }
+      .page { width: min(100% - 22px, 1180px); margin-top: 13px; }
+    }
+  </style>
+</head>
+<body>
+  <!-- Three structurally different task-first skill overview variants, switchable via ?variant=conversation|inventory|workflow. Standalone because TASC is a CLI and has no existing web route. -->
+  <main class="page">
+    <header class="topline">
+      <div class="brand"><span class="mark">T</span><span>TASC <span class="crumb">/ v3 concept</span></span></div>
+      <span class="prototype-tag">THROWAWAY PROTOTYPE</span>
+    </header>
+
+    <h1 id="page-title">Skills for this task</h1>
+    <p class="lede">A small, evidence-aware view inside your coding flow. TASC stays quiet unless you ask; discovery never installs or edits a skill by itself.</p>
+    <p class="small faint">Synthetic sample data only; no live inventory, session data, checks or files are accessed.</p>
+
+    <div class="scenario-bar">
+      <label for="scenario">Walkthrough scenario</label>
+      <select id="scenario">
+        <option value="large">Large inventory</option>
+        <option value="untracked">Installed, untracked match</option>
+        <option value="stale">Stale Security Check evidence</option>
+        <option value="finding">High-confidence Security Finding</option>
+        <option value="nomatch">No matching skill</option>
+        <option value="ambiguous">Project or user scope?</option>
+        <option value="failed">Remote source unavailable</option>
+      </select>
+      <span class="scenario-note" id="scenario-note"></span>
+    </div>
+
+    <section id="surface" class="surface" aria-live="polite"></section>
+  </main>
+
+  <div class="toast" id="toast" role="status"></div>
+  <nav class="switcher" aria-label="Prototype layout switcher">
+    <button id="previous" aria-label="Previous layout">←</button>
+    <span class="switcher-label" id="variant-label"></span>
+    <button id="next" aria-label="Next layout">→</button>
+  </nav>
+
+  <script>
+    const layouts = [
+      { key: "conversation", name: "Inline conversation" },
+      { key: "inventory", name: "Grouped inventory" },
+      { key: "workflow", name: "Guided task flow" }
+    ];
+
+    const skills = [
+      { name: "Postgres migration planner", description: "Plan safe schema changes, backfills and rollback steps.", tracked: "Tracked", scope: "Project", security: "No findings · 22m ago", tone: "good" },
+      { name: "Test-first refactor", description: "Add behavior-focused tests before restructuring code.", tracked: "Tracked", scope: "User", security: "Stale · source changed", tone: "warn" },
+      { name: "Release notes helper", description: "Summarize verified changes for a release.", tracked: "Untracked", scope: "Project", security: "Not checked", tone: "info" },
+      { name: "Kubernetes diagnostics", description: "Inspect cluster health and explain likely causes.", tracked: "Tracked", scope: "User", security: "Incomplete · 2 checks", tone: "warn" }
+    ];
+
+    const scenarios = {
+      large: {
+        label: "37 skills · representative sample · page 1 of 4",
+        title: "A project skill fits this task",
+        prompt: "I need to change the database schema without breaking existing users.",
+        response: "Found a relevant project skill. It is already tracked and available; no install or update is needed.",
+        state: "Tracked", scope: "Project scope", security: "No findings · checked 22m ago", securityTone: "good",
+        note: "Observed use is shown separately from Evaluation evidence.",
+        primary: "Review skill details", action: "details", count: 37, rows: skills
+      },
+      untracked: {
+        label: "4 visible · 1 matching installation",
+        title: "A matching installation is not tracked",
+        prompt: "Can I use the schema migration skill for this task?",
+        response: "Copilot already has this installation. Track/Adopt records it in TASC without reinstalling or changing its files.",
+        state: "Installed · untracked", scope: "Project target", security: "Not checked", securityTone: "info",
+        note: "Declining leaves the existing Copilot installation untouched.",
+        primary: "Review Track/Adopt", action: "track", count: 4, rows: [skills[2]]
+      },
+      stale: {
+        label: "1 match · evidence needs refresh",
+        title: "The skill changed after its last check",
+        prompt: "Is the test-first skill suitable for this refactor?",
+        response: "The previous check belongs to older content. TASC cannot call this installation validated; a fresh check is needed.",
+        state: "Tracked", scope: "User scope", security: "Stale · content digest changed", securityTone: "warn",
+        note: "Stale evidence is not a pass or a finding; no files are changed by checking.",
+        primary: "Preview local check", action: "check", count: 1, rows: [skills[1]]
+      },
+      finding: {
+        label: "Remote candidate · high-confidence finding",
+        title: "A Security Finding needs review",
+        prompt: "Find a skill to help inspect environment configuration.",
+        response: "A high-confidence risk was found in this candidate. Installation is blocked unless you review the evidence and give a separate reasoned, one-operation authorization.",
+        state: "Remote candidate", scope: "No install target selected", security: "High finding · 98% confidence", securityTone: "bad",
+        note: "The finding stays visible and unsuppressed. Nothing is installed, disabled or edited automatically.",
+        primary: "Review Security Finding", action: "security", count: 1,
+        rows: [{ name: "Environment helper", description: "Synthetic example candidate; not a real skill or security scan.", tracked: "Candidate", scope: "Remote", security: "High finding · 98% confidence", tone: "bad" }]
+      },
+      nomatch: {
+        label: "No local match · remote search requested",
+        title: "No suitable skill found",
+        prompt: "I need help migrating a legacy queue to a new message broker.",
+        response: "No local match. Configured remote sources returned no suitable candidate. You can stop here or ask to draft a new skill.",
+        state: "No match", scope: "No target selected", security: "No skill checked", securityTone: "info",
+        note: "Authoring creates a separate draft only after you confirm; installation is a later approval.",
+        primary: "Review draft outline", action: "author", count: 0, rows: []
+      },
+      ambiguous: {
+        label: "1 match · installation scope is undecided",
+        title: "Choose where this skill belongs",
+        prompt: "Find a code-review skill I can use on this repository and other projects.",
+        response: "The task may be repository-specific or reusable. TASC suggests a scope but does not choose or install one silently.",
+        state: "Tracked", scope: "Choose explicitly", security: "No findings · checked 1h ago", securityTone: "good",
+        note: "A project-specific skill belongs to this repository; a reusable one may belong in user scope.",
+        primary: "Review scope choices", action: "scope", count: 1, rows: [skills[0]]
+      },
+      failed: {
+        label: "Remote source unavailable · no changes applied",
+        title: "Discovery could not finish",
+        prompt: "Can you find a skill for this framework upgrade?",
+        response: "The configured source timed out. Local inventory is unchanged; TASC will not describe this as “no matching skill.”",
+        state: "Unavailable", scope: "Local results retained", security: "Not checked", securityTone: "info",
+        note: "Retry or continue with local results; no installation or draft write occurred.",
+        primary: "Retry read-only search", action: "retry", count: 0, rows: []
+      }
+    };
+
+    let scenarioKey = new URLSearchParams(location.search).get("scenario") || "large";
+    let variantKey = new URLSearchParams(location.search).get("variant") || "conversation";
+    let page = 1;
+    let selectedScope = null;
+    let toastTimer;
+
+    function updateUrl() {
+      const params = new URLSearchParams(location.search);
+      params.set("variant", variantKey);
+      params.set("scenario", scenarioKey);
+      history.replaceState(null, "", `${location.pathname}?${params.toString()}`);
+    }
+
+    function actionButton(label, action, secondary = false) {
+      return `<button class="button ${secondary ? "secondary" : ""}" data-action="${action}">${label}</button>`;
+    }
+
+    function status(tone, text) {
+      return `<span class="state ${tone}"><span class="status-dot"></span>${text}</span>`;
+    }
+
+    function actionableStatus(s) {
+      return s.securityTone === "warn" || s.securityTone === "bad"
+        ? status(s.securityTone, s.security)
+        : "";
+    }
+
+    function renderConversation(s) {
+      const match = s.count
+        ? `<div class="match"><div class="match-title"><div><h3>${s.title}</h3><p>${s.response}</p></div>${actionableStatus(s)}</div><div class="evidence"><span class="pill">${s.state}</span><span class="pill">${s.scope}</span><span class="pill">Source: local Copilot target</span><span class="pill">Usage: observed only</span></div><div class="actions" style="justify-content:flex-start;margin-top:13px">${actionButton(s.primary,s.action)}${actionButton("Show evidence details","details",true)}</div></div>`
+        : `<div class="match"><div class="match-title"><div><h3>${s.title}</h3><p>${s.response}</p></div>${actionableStatus(s)}</div><div class="actions" style="justify-content:flex-start;margin-top:13px">${actionButton(s.primary,s.action)}${actionButton("Keep working","dismiss",true)}</div></div>`;
+      const healthPanel = s.securityTone === "warn" || s.securityTone === "bad"
+        ? `<aside class="panel quiet-card"><div class="section-head"><h2>Needs review</h2><span class="pill">Read-only</span></div>${actionableStatus(s)}<p>${s.note}</p><div class="divider"></div>${actionButton("Review evidence","details",true)}</aside>`
+        : `<aside class="panel quiet-card"><div class="section-head"><h2>Details on request</h2><span class="pill">TASC stays quiet</span></div><p>Source, scope and evidence coverage are available when you ask. Clean Security Check results do not add a health banner.</p><div class="divider"></div>${actionButton("Show skill details","details",true)}</aside>`;
+      return `<div class="grid-a">
+        <section class="panel chat">
+          <div class="section-head"><div><h2>Current task</h2><span class="small muted">Asked in Copilot CLI</span></div><span class="pill">TASC on demand</span></div>
+          <div class="chat-line"><span class="avatar">PV</span><div class="bubble"><span class="small muted">You</span><p>${s.prompt}</p></div></div>
+          <div class="chat-line"><span class="avatar tasc">T</span><div class="bubble"><span class="small muted">TASC · local-first discovery</span>${match}<p class="small faint">${s.note}</p></div></div>
+          <div class="chat-input">Continue your coding task… <span class="faint">TASC stays quiet unless asked.</span></div>
+        </section>
+        ${healthPanel}
+      </div>`;
+    }
+
+    function renderInventory(s) {
+      const rows = s.rows.length ? s.rows.map(skill => `<tr>
+        <td><strong>${skill.name}</strong><span class="desc">${skill.description}</span></td>
+        <td>${skill.tracked}</td><td>${skill.scope}</td><td>${status(skill.tone,skill.security)}</td>
+      </tr>`).join("") : `<tr><td colspan="4"><strong>${s.title}</strong><span class="desc">${s.response}</span></td></tr>`;
+      const totalPages = Math.max(1, Math.ceil(s.count / 10));
+      return `<div class="grid-b">
+        <aside class="panel scope-nav"><h3 style="padding:8px 10px">Overview</h3>
+          <div class="nav-item active">All scopes <span class="count">${s.count}</span></div>
+          <div class="nav-item">Project profile <span class="count">${s.rows.filter(r=>r.scope==="Project").length}</span></div>
+          <div class="nav-item">User profile <span class="count">${s.rows.filter(r=>r.scope==="User").length}</span></div>
+          <div class="divider"></div><div class="nav-item">Possible overlaps <span class="count">2</span></div>
+          <div class="nav-item">Checks needing attention <span class="count">1</span></div>
+          <p class="small faint" style="padding:0 10px">Grouped view only. Profiles remain separate.</p>
+        </aside>
+        <section class="panel">
+          <div class="inventory-head">
+            <div class="section-head"><div><h2>Installed skills</h2><span class="small muted">Explicit overview · grouped by scope</span></div><span class="pill">${s.count} total</span></div>
+            <div class="toolbar"><span class="input-like small muted">⌕ &nbsp; Filter by name or task</span>${actionButton("Refresh local evidence","check",true)}</div>
+            <div class="profile-tabs"><span class="profile-tab selected">All scopes · grouped</span><span class="profile-tab">Project</span><span class="profile-tab">User</span></div>
+          </div>
+          <div class="table-wrap"><table><thead><tr><th>Name / description</th><th>Tracked</th><th>Scope</th><th>Security Check</th></tr></thead><tbody>${rows}</tbody></table></div>
+          <div class="table-bottom"><span>${s.count ? `Page ${page} of ${totalPages} · ${s.count} skills` : s.label}</span><span>Evidence is installation/content-specific.</span><span>${actionButton(page < totalPages ? "Next page →" : "Page 1", "page", true)}</span></div>
+          <div class="panel-pad small muted"><strong>${s.title}:</strong> ${s.response} <span class="faint">${s.note}</span></div>
+        </section>
+      </div>`;
+    }
+
+    function renderWorkflow(s) {
+      const stateSteps = scenarioKey === "finding"
+        ? [["done","1","Search configured sources","Candidate found; no install has started."],["active","2","Review Security Finding","High-confidence evidence blocks installation by default."],["","3","Decide under Security Policy","A separate, reasoned one-operation authorization is required to proceed."],["","4","Keep finding visible","No automatic install, edit, disable or suppression."]]
+        : scenarioKey === "nomatch"
+        ? [["done","1","Search local inventory","No suitable local match."],["done","2","Search configured sources","No suitable remote candidate."],["active","3","Offer Skill Authoring","Draft only after confirmation."],["","4","Select target and install","Separate approval; nothing installed."]]
+        : scenarioKey === "failed"
+        ? [["done","1","Search local inventory","Local results are still available."],["active","2","Remote source unavailable","Failure is not the same as no match."],["","3","Retry or continue locally","Read-only; no state changed."],["","4","Install only after review","Requires explicit target/scope approval."]]
+        : [["done","1","Find a relevant skill","Local-first; remote only if needed."],["active","2","Review evidence and scope",`${s.state} · ${s.scope}`],["","3","Choose explicit next step","Track, inspect or select a target."],["","4","Approve any write","No silent install or authoring."]];
+      const steps = stateSteps.map(step => `<div class="step ${step[0]}"><span class="step-num">${step[1]}</span><div><div class="step-label">${step[2]}</div><div class="step-desc">${step[3]}</div></div></div>`).join("");
+      const scopeChoices = scenarioKey === "ambiguous"
+        ? `<div class="scope-choices"><button class="scope-choice ${selectedScope === "project" ? "selected" : ""}" data-action="scope-project"><strong>Project Profile</strong><br>Repository-specific skills</button><button class="scope-choice ${selectedScope === "user" ? "selected" : ""}" data-action="scope-user"><strong>User Profile</strong><br>Reusable across projects</button></div>`
+        : `<p class="small muted">${s.scope}. No installation target is changed by this view.</p>`;
+      return `<div class="grid-c">
+        <aside class="panel steps"><h2 style="margin:0 0 20px">Skill request</h2>${steps}</aside>
+        <section class="panel workflow-main">
+          <div class="section-head"><div><span class="small muted">Current task</span><h2 style="margin-top:5px">${s.title}</h2></div>${status(s.securityTone,s.state)}</div>
+          <p class="muted">${s.prompt}</p>
+          <div class="result-block"><div class="row-head"><strong>What TASC found</strong>${status(s.securityTone,s.security)}</div><p>${s.response}</p></div>
+          <div class="result-block"><strong>Scope and next step</strong><p>${s.note}</p>${scopeChoices}</div>
+          <div class="actions" style="justify-content:flex-start">${actionButton(s.primary,s.action)}${actionButton("No changes","dismiss",true)}</div>
+          <p class="small faint">Any write shows the exact target and requires approval. This prototype performs no operations.</p>
+        </section>
+      </div>`;
+    }
+
+    function render() {
+      const s = scenarios[scenarioKey] || scenarios.large;
+      document.getElementById("scenario-note").textContent = s.label;
+      document.getElementById("scenario").value = scenarioKey;
+      document.getElementById("surface").innerHTML = variantKey === "inventory"
+        ? renderInventory(s)
+        : variantKey === "workflow" ? renderWorkflow(s) : renderConversation(s);
+      const current = layouts.findIndex(x => x.key === variantKey);
+      variantKey = layouts[current < 0 ? 0 : current].key;
+      document.getElementById("variant-label").innerHTML = `<strong>${layouts.findIndex(x=>x.key===variantKey)+1}/3</strong> · ${layouts.find(x=>x.key===variantKey).name} <span class="key">←</span><span class="key">→</span>`;
+      updateUrl();
+    }
+
+    function showToast(text) {
+      const toast = document.getElementById("toast");
+      toast.textContent = text;
+      toast.style.display = "block";
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { toast.style.display = "none"; }, 3800);
+    }
+
+    function cycle(direction) {
+      const index = layouts.findIndex(x => x.key === variantKey);
+      variantKey = layouts[(index + direction + layouts.length) % layouts.length].key;
+      render();
+    }
+
+    document.getElementById("scenario").addEventListener("change", event => {
+      scenarioKey = event.target.value;
+      page = 1;
+      selectedScope = null;
+      render();
+    });
+    document.getElementById("previous").addEventListener("click", () => cycle(-1));
+    document.getElementById("next").addEventListener("click", () => cycle(1));
+    document.addEventListener("keydown", event => {
+      const target = event.target;
+      if (target.matches("input, textarea, select, [contenteditable='true']")) return;
+      if (event.key === "ArrowLeft") { event.preventDefault(); cycle(-1); }
+      if (event.key === "ArrowRight") { event.preventDefault(); cycle(1); }
+    });
+    document.addEventListener("click", event => {
+      const button = event.target.closest("[data-action]");
+      if (!button) return;
+      const action = button.dataset.action;
+      if (action === "scope-project" || action === "scope-user") {
+        selectedScope = action === "scope-project" ? "project" : "user";
+        render();
+        showToast(`${selectedScope === "project" ? "Project" : "User"} scope selected in the prototype; no install was performed.`);
+        return;
+      }
+      if (action === "page") { page = page < 4 ? page + 1 : 1; render(); showToast(`Prototype only: page ${page} selected. Sample rows are unchanged.`); return; }
+      const messages = {
+        details: "Read-only prototype: details would show source, exact Installation, evidence coverage and current content fingerprint.",
+        security: "Read-only prototype: show the exact finding and evidence. Installation remains blocked unless a separate reasoned one-operation authorization is given.",
+        track: "Read-only prototype: Track/Adopt would record this installation in the chosen Profile; files remain untouched.",
+        check: "Read-only prototype: preview the bounded local check. It would not edit or disable the skill.",
+        author: "Read-only prototype: confirm creation of a separate Skill Draft; installation requires a later, separate approval.",
+        scope: "Read-only prototype: select exactly one target and scope before any install. No scope is chosen implicitly.",
+        retry: "Read-only prototype: remote search retry requested; no state changed.",
+        dismiss: "No change made. Copilot's existing skill installation, if any, remains untouched."
+      };
+      showToast(messages[action] || "Prototype only: no files or TASC state were changed.");
+    });
+
+    render();
+  </script>
+</body>
+</html>
