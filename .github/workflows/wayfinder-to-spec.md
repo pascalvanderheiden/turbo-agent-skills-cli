@@ -6,6 +6,10 @@ on:
     types: [closed, edited, labeled, unlabeled, reopened]
   schedule: every 30 minutes
   workflow_dispatch:
+concurrency:
+  group: wayfinder-to-spec
+  queue: max
+  job-discriminator: ${{ github.run_id }}
 permissions:
   copilot-requests: write
   contents: read
@@ -34,12 +38,13 @@ network:
 # Label resolved wayfinder maps for specification
 
 Find the oldest open issue labelled `wayfinder:map` that is not already labelled
-`to-spec`, `specced`, or `planned` and has all of its wayfinder decision
+`to-spec`, `specced`, `to-tickets`, `to-plan`, or `planned` and has all of its wayfinder decision
 sub-issues closed.
 
 A map becomes eligible for the specification gate when:
 
-- every child wayfinder decision sub-issue is closed;
+- it has at least one native wayfinder decision sub-issue, and every such
+  sub-issue is closed (paginate the full list);
 - the map itself is still open; and
 - it does not already have a spec marker or a follow-on planning state.
 
@@ -49,3 +54,6 @@ workflow.
 
 If no eligible map is found, call `noop` with the first blocking condition and
 make no visible write.
+
+An explicit `to-spec` label on an ordinary issue is also supported by the
+specification workflow; this automatic gate only selects resolved maps.
