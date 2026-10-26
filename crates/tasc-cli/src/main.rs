@@ -1926,7 +1926,7 @@ fn security_snapshot_freshness(
     let Some(recorded) = skill.content_digest.as_ref() else {
         return EvidenceFreshness::Unknown;
     };
-    match tasc_agent::service::skill_content_digest(std::path::Path::new(&item.path)) {
+    match tasc_agent::security::skill_content_digest(std::path::Path::new(&item.path)) {
         Ok(current) if &current == recorded => EvidenceFreshness::Current,
         Ok(_) => EvidenceFreshness::Stale,
         Err(_) => EvidenceFreshness::Unavailable,

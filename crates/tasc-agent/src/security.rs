@@ -909,65 +909,8 @@ fn inspect_skill(skill: &SelectedSkill) -> Inspection {
             complete: false,
         };
     }
-    let mut files = Vec::new();
-    if let Err(error) = collect_files(
-        &canonical_root,
-        &canonical_root,
-        &mut files,
-        &mut diagnostics,
-    ) {
-        diagnostics.push(error);
-        complete = false;
-    }
+    let content_files = read_content_files(&canonical_root, &mut diagnostics);
     complete &= diagnostics.is_empty();
-    files.sort_by(|left, right| left.0.cmp(&right.0));
-    if files.len() > MAX_SKILL_FILES {
-        files.truncate(MAX_SKILL_FILES);
-        diagnostics.push(format!(
-            "analysis stopped after the {MAX_SKILL_FILES}-file inspection limit"
-        ));
-        complete = false;
-    }
-    let mut total = 0_u64;
-    let mut content_files = Vec::new();
-    for (relative_path, file_path) in files {
-        let metadata = match fs::symlink_metadata(&file_path) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                diagnostics.push(format!("cannot inspect '{}': {error}", relative_path));
-                complete = false;
-                continue;
-            }
-        };
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            diagnostics.push(format!("skipped non-regular file '{relative_path}'"));
-            complete = false;
-            continue;
-        }
-        let remaining = MAX_SKILL_BYTES.saturating_sub(total);
-        if metadata.len() > remaining {
-            diagnostics.push(format!(
-                "analysis stopped at the {} MiB inspection limit",
-                MAX_SKILL_BYTES / (1024 * 1024)
-            ));
-            complete = false;
-            break;
-        }
-        match read_regular_file(&file_path, &metadata, remaining) {
-            Ok(bytes) => {
-                total = total.saturating_add(bytes.len() as u64);
-                content_files.push(ContentFile {
-                    relative_path,
-                    bytes,
-                    executable: file_is_executable(&metadata),
-                })
-            }
-            Err(error) => {
-                diagnostics.push(format!("cannot read '{relative_path}': {error}"));
-                complete = false;
-            }
-        }
-    }
     let digest = content_digest(&content_files);
     let source_revision = skill
         .source_revision
@@ -1054,6 +997,74 @@ fn inspect_skill(skill: &SelectedSkill) -> Inspection {
         diagnostics,
         complete,
     }
+}
+
+pub fn skill_content_digest(root: &Path) -> Result<String, String> {
+    let metadata = fs::symlink_metadata(root)
+        .map_err(|error| format!("cannot inspect selected Skill Workspace: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("selected Skill Workspace is not a regular directory".to_string());
+    }
+    let canonical_root = fs::canonicalize(root)
+        .map_err(|error| format!("cannot resolve selected Skill Workspace: {error}"))?;
+    let mut diagnostics = Vec::new();
+    let files = read_content_files(&canonical_root, &mut diagnostics);
+    if diagnostics.is_empty() {
+        Ok(content_digest(&files))
+    } else {
+        Err(diagnostics.join("; "))
+    }
+}
+
+fn read_content_files(root: &Path, diagnostics: &mut Vec<String>) -> Vec<ContentFile> {
+    let mut files = Vec::new();
+    if let Err(error) = collect_files(root, root, &mut files, diagnostics) {
+        diagnostics.push(error);
+    }
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    if files.len() > MAX_SKILL_FILES {
+        files.truncate(MAX_SKILL_FILES);
+        diagnostics.push(format!(
+            "analysis stopped after the {MAX_SKILL_FILES}-file inspection limit"
+        ));
+    }
+    let mut total = 0_u64;
+    let mut content_files = Vec::new();
+    for (relative_path, file_path) in files {
+        let metadata = match fs::symlink_metadata(&file_path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                diagnostics.push(format!("cannot inspect '{}': {error}", relative_path));
+                continue;
+            }
+        };
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            diagnostics.push(format!("skipped non-regular file '{relative_path}'"));
+            continue;
+        }
+        let remaining = MAX_SKILL_BYTES.saturating_sub(total);
+        if metadata.len() > remaining {
+            diagnostics.push(format!(
+                "analysis stopped at the {} MiB inspection limit",
+                MAX_SKILL_BYTES / (1024 * 1024)
+            ));
+            break;
+        }
+        match read_regular_file(&file_path, &metadata, remaining) {
+            Ok(bytes) => {
+                total = total.saturating_add(bytes.len() as u64);
+                content_files.push(ContentFile {
+                    relative_path,
+                    bytes,
+                    executable: file_is_executable(&metadata),
+                })
+            }
+            Err(error) => {
+                diagnostics.push(format!("cannot read '{relative_path}': {error}"));
+            }
+        }
+    }
+    content_files
 }
 
 fn collect_files(

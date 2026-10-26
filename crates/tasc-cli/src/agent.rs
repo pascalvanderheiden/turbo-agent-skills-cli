@@ -2366,7 +2366,7 @@ mod tests {
                 "skills": [{
                     "identity": item.identity,
                     "sourceRevision": null,
-                    "contentDigest": tasc_agent::service::skill_content_digest(
+                    "contentDigest": tasc_agent::security::skill_content_digest(
                         std::path::Path::new(&item.path)
                     ).unwrap(),
                     "path": item.path
@@ -2523,6 +2523,37 @@ mod tests {
         assert_eq!(fixture.statuses(&[wrong_path]).await, ["stale", "stale"]);
         fs::remove_dir_all(&fixture.items[0].path).unwrap();
         assert_eq!(fixture.statuses(&[artifact]).await, ["incomplete", "stale"]);
+    }
+
+    #[tokio::test]
+    async fn security_boundary_matches_real_local_check_artifacts_and_audit() {
+        let fixture = SecurityFixture::new();
+        let artifact = super::security_service(&fixture.state_path)
+            .check(&[fixture.items[0].installation_id.clone()], false, None)
+            .unwrap();
+        let (inventory, _) = super::load_agent_skill_rows(&fixture.state_path).unwrap();
+        assert!(
+            super::super::evidence_freshness_security(&artifact, Some(&inventory))
+                == super::super::EvidenceFreshness::Current
+        );
+        assert_eq!(
+            fixture.statuses(&[artifact.clone()]).await,
+            ["incomplete", "stale"]
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                PathBuf::from(&fixture.items[0].path).join("SKILL.md"),
+                fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+            assert!(
+                super::super::evidence_freshness_security(&artifact, Some(&inventory))
+                    == super::super::EvidenceFreshness::Stale
+            );
+            assert_eq!(fixture.statuses(&[artifact]).await, ["stale", "stale"]);
+        }
     }
 
     #[tokio::test]
