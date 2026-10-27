@@ -85,33 +85,41 @@ fn security_state(
             artifact
                 .skills
                 .iter()
-                .find(|skill| skill.identity.id == item.identity.id)
+                .find(|skill| skill.identity.id == item.identity.id && skill.path == item.path)
                 .map(|skill| (artifact, skill))
         })
         .max_by_key(|(artifact, _)| artifact.completed_at_unix_ms);
     let Some((artifact, skill)) = latest else {
+        if artifacts.iter().any(|artifact| {
+            artifact
+                .skills
+                .iter()
+                .any(|skill| skill.identity.id == item.identity.id)
+        }) {
+            return "stale";
+        }
         return "not checked";
     };
-    if item.source_revision.as_ref()
-        != skill
-            .source_revision
-            .as_ref()
-            .map(|revision| &revision.value)
-    {
-        return "stale";
-    }
-    if artifact.status == tasc_core::security::SecurityCheckStatus::Partial {
-        return "inconclusive";
+    match super::security_snapshot_freshness(skill, item) {
+        super::EvidenceFreshness::Stale => return "stale",
+        super::EvidenceFreshness::Unknown | super::EvidenceFreshness::Unavailable => {
+            return "incomplete";
+        }
+        super::EvidenceFreshness::Current => {}
     }
     if artifact
         .findings
         .iter()
         .any(|finding| finding.skill_id == item.identity.id)
     {
-        "findings"
-    } else {
-        "validated"
+        return "findings";
     }
+    if artifact.status == tasc_core::security::SecurityCheckStatus::Partial
+        || !artifact.unavailable_checks.is_empty()
+    {
+        return "incomplete";
+    }
+    "no findings"
 }
 
 fn skill_rows_value(rows: &[AgentSkillRow], rank_offset: usize) -> Value {
@@ -2219,7 +2227,7 @@ mod tests {
                 description: "Builds changes test-first.".to_string(),
                 tracked: true,
                 scope: "user".to_string(),
-                secure: "validated".to_string(),
+                secure: "no findings".to_string(),
             },
         ]);
 
@@ -2296,6 +2304,317 @@ mod tests {
             "description_excerpt": format!("{name} description")
         }))
         .unwrap()
+    }
+
+    struct SecurityFixture {
+        state_path: PathBuf,
+        items: Vec<InventoryItem>,
+    }
+
+    impl SecurityFixture {
+        fn new() -> Self {
+            let state_path = test_path();
+            let mut items = Vec::new();
+            for name in ["first", "second"] {
+                let mut item = inventory_item(name, true);
+                item.identity = inventory_item("security-fixture", true).identity;
+                item.path = state_path
+                    .parent()
+                    .unwrap()
+                    .join(name)
+                    .display()
+                    .to_string();
+                fs::create_dir_all(&item.path).unwrap();
+                item.path = fs::canonicalize(&item.path).unwrap().display().to_string();
+                fs::write(
+                    PathBuf::from(&item.path).join("SKILL.md"),
+                    "---\nname: security-fixture\ndescription: Fixture.\n---\n",
+                )
+                .unwrap();
+                items.push(item);
+            }
+            let state = serde_json::json!({
+                "version": 2,
+                "identities": [items[0].identity],
+                "targets": [items[0].target],
+                "installations": items.iter().map(|item| serde_json::json!({
+                    "id": item.installation_id,
+                    "skill_id": item.identity.id,
+                    "target_id": item.target.as_ref().unwrap().id,
+                    "path": item.path,
+                    "status": "installed"
+                })).collect::<Vec<_>>()
+            });
+            fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+            Self { state_path, items }
+        }
+
+        fn artifact(&self, index: usize) -> tasc_core::security::SecurityArtifact {
+            let item = &self.items[index];
+            serde_json::from_value(serde_json::json!({
+                "schemaVersion": 1,
+                "id": format!("security-{index}"),
+                "createdAtUnixMs": 1,
+                "completedAtUnixMs": index + 2,
+                "selectors": [],
+                "allInstalled": false,
+                "analyzer": "fixture",
+                "analyzerVersion": "1",
+                "ruleVersion": "1",
+                "status": "complete",
+                "policy": {"failOn": null, "minimumConfidence": 0},
+                "skills": [{
+                    "identity": item.identity,
+                    "sourceRevision": null,
+                    "contentDigest": tasc_agent::security::skill_content_digest(
+                        std::path::Path::new(&item.path)
+                    ).unwrap(),
+                    "path": item.path
+                }],
+                "findings": [],
+                "suppressedFingerprints": [],
+                "unavailableChecks": [],
+                "diagnostics": []
+            }))
+            .unwrap()
+        }
+
+        async fn statuses(
+            &self,
+            artifacts: &[tasc_core::security::SecurityArtifact],
+        ) -> Vec<String> {
+            use tasc_agent::security::SecurityArtifactRepository;
+            let directory = self.state_path.with_extension("security-checks");
+            if directory.exists() {
+                fs::remove_dir_all(&directory).unwrap();
+            }
+            let repository = super::FsSecurityArtifactRepository::new(directory);
+            for artifact in artifacts {
+                repository.save(artifact).unwrap();
+            }
+            let context = super::AgentContext::new(self.state_path.clone(), true, true);
+            assert_eq!(
+                super::translate_sdk_event(
+                    "tool.execution_start",
+                    &serde_json::json!({"toolName": "tasc_list_skills"})
+                ),
+                Some(super::AgentEvent::ToolStarted(
+                    "tasc_list_skills".to_string()
+                ))
+            );
+            let mut statuses = std::collections::BTreeMap::new();
+            let mut page = 1;
+            loop {
+                let request = super::translate_tool_call(
+                    "tasc_list_skills",
+                    serde_json::json!({"page": page, "pageSize": 20}),
+                )
+                .unwrap();
+                let result = context.dispatch(request).await.unwrap();
+                for row in result["result"]["items"].as_array().unwrap() {
+                    let status = row["secure"].as_str().unwrap();
+                    assert!(!["validated", "secure"].contains(&status), "{row}");
+                    statuses.insert(
+                        row["installationId"].as_str().unwrap().to_string(),
+                        status.to_string(),
+                    );
+                }
+                if result["result"]["hasNext"] != true {
+                    break;
+                }
+                page += 1;
+            }
+            assert_eq!(
+                super::translate_sdk_event("assistant.turn_end", &serde_json::json!({})),
+                Some(super::AgentEvent::TurnFinished)
+            );
+            self.items
+                .iter()
+                .map(|item| statuses[&item.installation_id].clone())
+                .collect()
+        }
+    }
+
+    impl Drop for SecurityFixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(self.state_path.parent().unwrap()).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn security_boundary_keeps_duplicate_installation_evidence_independent() {
+        let fixture = SecurityFixture::new();
+        let artifacts = [fixture.artifact(0), fixture.artifact(1)];
+        assert_eq!(fixture.statuses(&[]).await, ["not checked", "not checked"]);
+        assert_eq!(
+            fixture.statuses(&artifacts).await,
+            ["no findings", "no findings"]
+        );
+        let mut combined = artifacts[0].clone();
+        combined.skills.push(artifacts[1].skills[0].clone());
+        assert_eq!(
+            fixture.statuses(&[combined.clone()]).await,
+            ["no findings", "no findings"]
+        );
+
+        fs::write(
+            PathBuf::from(&fixture.items[0].path).join("SKILL.md"),
+            "Changed locally without a source revision change.",
+        )
+        .unwrap();
+        assert_eq!(fixture.statuses(&artifacts).await, ["stale", "no findings"]);
+        assert_eq!(
+            fixture.statuses(&[combined]).await,
+            ["stale", "no findings"]
+        );
+        let (inventory, _) = super::load_agent_skill_rows(&fixture.state_path).unwrap();
+        for (index, artifact) in artifacts.iter().enumerate() {
+            assert!(
+                super::super::evidence_freshness_security(artifact, Some(&inventory))
+                    == if index == 0 {
+                        super::super::EvidenceFreshness::Stale
+                    } else {
+                        super::super::EvidenceFreshness::Current
+                    }
+            );
+        }
+        assert_eq!(
+            fixture.statuses(&artifacts[1..]).await,
+            ["stale", "no findings"]
+        );
+    }
+
+    #[tokio::test]
+    async fn security_boundary_never_reports_incomplete_evidence_as_clean() {
+        use tasc_core::security::{SecurityCheckStatus, SecurityUnavailableCheck};
+
+        let fixture = SecurityFixture::new();
+        let artifact = fixture.artifact(0);
+        let mut missing_digest = artifact.clone();
+        missing_digest.skills[0].content_digest = None;
+        assert_eq!(
+            fixture.statuses(&[missing_digest]).await,
+            ["incomplete", "stale"]
+        );
+        let mut multi_snapshot = artifact.clone();
+        let mut missing_digest_snapshot = fixture.artifact(1).skills[0].clone();
+        missing_digest_snapshot.content_digest = None;
+        multi_snapshot.skills.push(missing_digest_snapshot);
+        let (inventory, _) = super::load_agent_skill_rows(&fixture.state_path).unwrap();
+        assert!(
+            super::super::evidence_freshness_security(&multi_snapshot, Some(&inventory))
+                == super::super::EvidenceFreshness::Unknown
+        );
+        let mut partial = artifact.clone();
+        partial.status = SecurityCheckStatus::Partial;
+        partial.id = "security-newer".to_string();
+        partial.completed_at_unix_ms += 1;
+        assert_eq!(
+            fixture.statuses(&[artifact.clone(), partial]).await,
+            ["incomplete", "stale"]
+        );
+        for status in ["failed", "unavailable", "inconclusive"] {
+            let mut incomplete = artifact.clone();
+            incomplete
+                .unavailable_checks
+                .push(SecurityUnavailableCheck {
+                    name: "fixture".to_string(),
+                    status: status.to_string(),
+                    reason: "Fixture check did not complete.".to_string(),
+                });
+            assert_eq!(
+                fixture.statuses(&[incomplete]).await,
+                ["incomplete", "stale"]
+            );
+        }
+        let mut wrong_path = artifact.clone();
+        wrong_path.skills[0].path.push_str("-different");
+        assert_eq!(fixture.statuses(&[wrong_path]).await, ["stale", "stale"]);
+        fs::remove_dir_all(&fixture.items[0].path).unwrap();
+        assert_eq!(fixture.statuses(&[artifact]).await, ["incomplete", "stale"]);
+    }
+
+    #[tokio::test]
+    async fn security_boundary_matches_real_local_check_artifacts_and_audit() {
+        let fixture = SecurityFixture::new();
+        let artifact = super::security_service(&fixture.state_path)
+            .check(&[fixture.items[0].installation_id.clone()], false, None)
+            .unwrap();
+        let (inventory, _) = super::load_agent_skill_rows(&fixture.state_path).unwrap();
+        assert!(
+            super::super::evidence_freshness_security(&artifact, Some(&inventory))
+                == super::super::EvidenceFreshness::Current
+        );
+        assert_eq!(
+            fixture.statuses(&[artifact.clone()]).await,
+            ["incomplete", "stale"]
+        );
+        let mut artifact_with_finding = artifact.clone();
+        artifact_with_finding.findings.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "finding",
+                "fingerprint": "fixture",
+                "category": "unsafe_instruction",
+                "detector": "fixture",
+                "severity": "high",
+                "confidenceScore": 100,
+                "deterministic": true,
+                "rationale": "Fixture finding.",
+                "recommendation": "Review locally.",
+                "skillId": fixture.items[0].identity.id,
+                "evidence": []
+            }))
+            .unwrap(),
+        );
+        assert_eq!(
+            fixture.statuses(&[artifact_with_finding]).await,
+            ["findings", "stale"]
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                PathBuf::from(&fixture.items[0].path).join("SKILL.md"),
+                fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+            assert!(
+                super::super::evidence_freshness_security(&artifact, Some(&inventory))
+                    == super::super::EvidenceFreshness::Stale
+            );
+            assert_eq!(fixture.statuses(&[artifact]).await, ["stale", "stale"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn security_boundary_reports_findings_without_relying_on_source_revision() {
+        let fixture = SecurityFixture::new();
+        let mut artifact = fixture.artifact(0);
+        artifact.skills[0].source_revision = Some(tasc_core::SourceRevision {
+            kind: "commit".to_string(),
+            value: "different-source-revision".to_string(),
+        });
+        assert_eq!(
+            fixture.statuses(&[artifact.clone()]).await,
+            ["no findings", "stale"]
+        );
+        artifact.findings.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "finding",
+                "fingerprint": "fixture",
+                "category": "unsafe_instruction",
+                "detector": "fixture",
+                "severity": "high",
+                "confidenceScore": 100,
+                "deterministic": true,
+                "rationale": "Fixture finding.",
+                "recommendation": "Review locally.",
+                "skillId": fixture.items[0].identity.id,
+                "evidence": []
+            }))
+            .unwrap(),
+        );
+        assert_eq!(fixture.statuses(&[artifact]).await, ["findings", "stale"]);
     }
 
     #[test]

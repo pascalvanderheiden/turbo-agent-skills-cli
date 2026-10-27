@@ -394,7 +394,9 @@ fn stats_matches_evidence_to_the_correct_installation_for_duplicate_identities()
         "skills": [{
             "identity": selected["identity"],
             "sourceRevision": null,
-            "contentDigest": digest,
+            "contentDigest": tasc_agent::security::skill_content_digest(
+                std::path::Path::new(selected["path"].as_str().unwrap())
+            ).unwrap(),
             "path": selected["path"]
         }],
         "findings": [],
@@ -555,7 +557,7 @@ fn audit_reports_unresolved_current_evidence_findings() {
     assert!(inventory.status.success());
     let inventory: serde_json::Value = serde_json::from_slice(&inventory.stdout).unwrap();
     let item = &inventory["items"][0];
-    let content_digest = tasc_agent::service::skill_content_digest(&skill_dir).unwrap();
+    let content_digest = tasc_agent::security::skill_content_digest(&skill_dir).unwrap();
     let artifact_dir = state_path.with_extension("security-checks");
     fs::create_dir_all(&artifact_dir).unwrap();
     let artifact = serde_json::json!({

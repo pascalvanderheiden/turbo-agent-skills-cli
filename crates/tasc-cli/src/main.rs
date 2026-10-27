@@ -1903,23 +1903,33 @@ fn evidence_freshness_security(
         else {
             return EvidenceFreshness::Stale;
         };
-        let Some(recorded) = skill.content_digest.as_ref() else {
-            continue;
-        };
-        match tasc_agent::service::skill_content_digest(std::path::Path::new(&current_item.path)) {
-            Ok(current) => {
-                compared = true;
-                if &current != recorded {
-                    return EvidenceFreshness::Stale;
-                }
-            }
-            Err(_) => return EvidenceFreshness::Unavailable,
+        match security_snapshot_freshness(skill, current_item) {
+            EvidenceFreshness::Current => compared = true,
+            EvidenceFreshness::Unknown => return EvidenceFreshness::Unknown,
+            freshness => return freshness,
         }
     }
     if compared {
         EvidenceFreshness::Current
     } else {
         EvidenceFreshness::Unknown
+    }
+}
+
+fn security_snapshot_freshness(
+    skill: &tasc_core::security::SecuritySkillSnapshot,
+    item: &tasc_core::InventoryItem,
+) -> EvidenceFreshness {
+    if skill.identity.id != item.identity.id || skill.path != item.path {
+        return EvidenceFreshness::Stale;
+    }
+    let Some(recorded) = skill.content_digest.as_ref() else {
+        return EvidenceFreshness::Unknown;
+    };
+    match tasc_agent::security::skill_content_digest(std::path::Path::new(&item.path)) {
+        Ok(current) if &current == recorded => EvidenceFreshness::Current,
+        Ok(_) => EvidenceFreshness::Stale,
+        Err(_) => EvidenceFreshness::Unavailable,
     }
 }
 
