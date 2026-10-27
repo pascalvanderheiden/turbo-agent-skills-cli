@@ -1905,7 +1905,7 @@ fn evidence_freshness_security(
         };
         match security_snapshot_freshness(skill, current_item) {
             EvidenceFreshness::Current => compared = true,
-            EvidenceFreshness::Unknown => {}
+            EvidenceFreshness::Unknown => return EvidenceFreshness::Unknown,
             freshness => return freshness,
         }
     }

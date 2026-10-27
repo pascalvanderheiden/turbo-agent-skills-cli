@@ -107,20 +107,19 @@ fn security_state(
         }
         super::EvidenceFreshness::Current => {}
     }
-    if artifact.status == tasc_core::security::SecurityCheckStatus::Partial
-        || !artifact.unavailable_checks.is_empty()
-    {
-        return "incomplete";
-    }
     if artifact
         .findings
         .iter()
         .any(|finding| finding.skill_id == item.identity.id)
     {
-        "findings"
-    } else {
-        "no findings"
+        return "findings";
     }
+    if artifact.status == tasc_core::security::SecurityCheckStatus::Partial
+        || !artifact.unavailable_checks.is_empty()
+    {
+        return "incomplete";
+    }
+    "no findings"
 }
 
 fn skill_rows_value(rows: &[AgentSkillRow], rank_offset: usize) -> Value {
@@ -2326,6 +2325,7 @@ mod tests {
                     .display()
                     .to_string();
                 fs::create_dir_all(&item.path).unwrap();
+                item.path = fs::canonicalize(&item.path).unwrap().display().to_string();
                 fs::write(
                     PathBuf::from(&item.path).join("SKILL.md"),
                     "---\nname: security-fixture\ndescription: Fixture.\n---\n",
@@ -2496,6 +2496,15 @@ mod tests {
             fixture.statuses(&[missing_digest]).await,
             ["incomplete", "stale"]
         );
+        let mut multi_snapshot = artifact.clone();
+        let mut missing_digest_snapshot = fixture.artifact(1).skills[0].clone();
+        missing_digest_snapshot.content_digest = None;
+        multi_snapshot.skills.push(missing_digest_snapshot);
+        let (inventory, _) = super::load_agent_skill_rows(&fixture.state_path).unwrap();
+        assert!(
+            super::super::evidence_freshness_security(&multi_snapshot, Some(&inventory))
+                == super::super::EvidenceFreshness::Unknown
+        );
         let mut partial = artifact.clone();
         partial.status = SecurityCheckStatus::Partial;
         partial.id = "security-newer".to_string();
@@ -2539,6 +2548,27 @@ mod tests {
         assert_eq!(
             fixture.statuses(&[artifact.clone()]).await,
             ["incomplete", "stale"]
+        );
+        let mut artifact_with_finding = artifact.clone();
+        artifact_with_finding.findings.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "finding",
+                "fingerprint": "fixture",
+                "category": "unsafe_instruction",
+                "detector": "fixture",
+                "severity": "high",
+                "confidenceScore": 100,
+                "deterministic": true,
+                "rationale": "Fixture finding.",
+                "recommendation": "Review locally.",
+                "skillId": fixture.items[0].identity.id,
+                "evidence": []
+            }))
+            .unwrap(),
+        );
+        assert_eq!(
+            fixture.statuses(&[artifact_with_finding]).await,
+            ["findings", "stale"]
         );
         #[cfg(unix)]
         {
